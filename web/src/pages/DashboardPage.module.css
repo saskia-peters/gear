@@ -44,17 +44,3 @@
   gap: var(--gear-space-4);
   width: 100%;
 }
-
-.mfaLink {
-  font-size: var(--gear-font-label-size);
-  color: var(--gear-color-brand);
-  text-decoration: none;
-  width: fit-content;
-  min-height: 44px;
-  display: inline-flex;
-  align-items: center;
-}
-
-.mfaLink:hover {
-  text-decoration: underline;
-}
