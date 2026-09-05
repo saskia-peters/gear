@@ -1,3 +1,4 @@
+// @vitest-environment jsdom
 import { render, screen, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
@@ -40,7 +41,8 @@ describe('ChangePasswordPage', () => {
     expect(screen.getByLabelText('Neues Passwort')).toBeInTheDocument()
     expect(screen.getByLabelText('Wiederholung')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Passwort ändern' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'Zurück zur Übersicht' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Abbrechen' })).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Zurück zum Profil' })).toBeInTheDocument()
   })
 
   it('MISSING_CURRENT: shows validation error when the current password is empty', async () => {
@@ -98,6 +100,7 @@ describe('ChangePasswordPage', () => {
       expect(screen.getByText('→ Andere Sitzungen beendet')).toBeInTheDocument()
     })
     expect(screen.getByText('Passwort geändert.')).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'Zurück zum Profil' })).toHaveAttribute('href', '/profil')
 
     expect(fetchMock).toHaveBeenCalledWith('/api/v1/auth/password/change', {
       method: 'POST',

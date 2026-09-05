@@ -160,8 +160,8 @@ export function ChangePasswordPage() {
                   Das Passwort wurde geändert, aber andere Sitzungen konnten nicht beendet werden.
                 </p>
               )}
-              <Link to="/" className={styles.primaryLink}>
-                Zurück zur Übersicht
+              <Link to="/profil" className={styles.primaryLink}>
+                Zurück zum Profil
               </Link>
             </div>
           ) : (
@@ -238,14 +238,20 @@ export function ChangePasswordPage() {
               <button type="submit" className={styles.submitButton} disabled={isSubmitting}>
                 {isSubmitting ? 'Wird gesendet...' : 'Passwort ändern'}
               </button>
+
+              <button type="button" className={styles.cancelButton} onClick={() => navigate('/profil')}>
+                Abbrechen
+              </button>
             </form>
           )}
 
-          <div className={styles.links}>
-            <Link to="/" className={styles.link}>
-              Zurück zur Übersicht
-            </Link>
-          </div>
+          {!isChanged && (
+            <div className={styles.links}>
+              <Link to="/profil" className={styles.link}>
+                Zurück zum Profil
+              </Link>
+            </div>
+          )}
         </div>
       </main>
     </div>
