@@ -327,9 +327,15 @@ export function MfaPage() {
 
           {renderBody()}
 
+          {phase !== 'requested' && (
+            <button type="button" className={styles.backButton} onClick={() => navigate('/profil')}>
+              Abbrechen
+            </button>
+          )}
+
           <div className={styles.links}>
-            <Link to="/" className={styles.link}>
-              Zurück zur Übersicht
+            <Link to="/profil" className={styles.link}>
+              Zurück zum Profil
             </Link>
           </div>
         </div>
