@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"strings"
 	"time"
 )
@@ -24,6 +25,11 @@ type Repository interface {
 	ClearUserTotpSecret(ctx context.Context, userID string) error
 	SetUserPendingTotpSecret(ctx context.Context, userID, encryptedSecret string, expiresAt time.Time) error
 	ClearUserPendingTotpSecret(ctx context.Context, userID string) error
+	// Password change persistence (FR-25): UpdateUserPassword writes the new
+	// Argon2id hash; InsertAuditEvent appends to the User-owned audit trail
+	// (NFR-O1/NFR-O2, spine table 11).
+	UpdateUserPassword(ctx context.Context, userID, passwordHash string) (*User, error)
+	InsertAuditEvent(ctx context.Context, userID, operation string) error
 }
 
 // SecretCipher encrypts/decrypts the TOTP shared secret at rest (NFR-S4). The
@@ -52,15 +58,20 @@ type Service struct {
 	hasher   PasswordHasher
 	sessions *SessionManager
 	cipher   SecretCipher
+	logger   *slog.Logger
 }
 
-// NewService constructs a User domain Service.
-func NewService(repo Repository, hasher PasswordHasher, sessions *SessionManager, cipher SecretCipher) *Service {
+// NewService constructs a User domain Service. logger is used for structured
+// logging of best-effort operations inside the core (e.g. a failed audit write
+// during a password change, NFR-O1); it may be nil, in which case the package
+// falls back to slog.Default().
+func NewService(repo Repository, hasher PasswordHasher, sessions *SessionManager, cipher SecretCipher, logger *slog.Logger) *Service {
 	return &Service{
 		repo:     repo,
 		hasher:   hasher,
 		sessions: sessions,
 		cipher:   cipher,
+		logger:   logger,
 	}
 }
 

@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -15,18 +16,20 @@ import (
 	"time"
 
 	"github.com/saskia-peters/gear/internal/platform/auth"
+	"github.com/saskia-peters/gear/internal/platform/crypto"
 	"github.com/saskia-peters/gear/internal/platform/httpapi"
 	"github.com/saskia-peters/gear/internal/user/core"
 	"github.com/saskia-peters/gear/internal/user/ports"
 )
 
 type mockService struct {
-	registerFunc func(ctx context.Context, input core.RegisterInput) (*ports.RegisterResult, error)
-	loginFunc    func(ctx context.Context, input core.LoginInput) (*ports.LoginResult, error)
-	logoutFunc   func(ctx context.Context, rawToken string) error
-	enrollFunc   func(ctx context.Context, user *core.User) (*core.MFAEnrollResult, error)
-	confirmFunc  func(ctx context.Context, user *core.User, secret, code string) error
-	disableFunc  func(ctx context.Context, user *core.User, code string) error
+	registerFunc         func(ctx context.Context, input core.RegisterInput) (*ports.RegisterResult, error)
+	loginFunc            func(ctx context.Context, input core.LoginInput) (*ports.LoginResult, error)
+	logoutFunc           func(ctx context.Context, rawToken string) error
+	enrollFunc           func(ctx context.Context, user *core.User) (*core.MFAEnrollResult, error)
+	confirmFunc          func(ctx context.Context, user *core.User, secret, code string) error
+	disableFunc          func(ctx context.Context, user *core.User, code string) error
+	changePasswordFunc   func(ctx context.Context, user *core.User, input core.ChangePasswordInput, rawToken string) (*core.ChangePasswordResult, error)
 }
 
 func (m *mockService) Register(ctx context.Context, input core.RegisterInput) (*ports.RegisterResult, error) {
@@ -96,6 +99,13 @@ func (m *mockService) RevokeOtherSessions(ctx context.Context, userID, rawToken 
 
 func (m *mockService) RevokeAllSessions(ctx context.Context, userID string) error {
 	return nil
+}
+
+func (m *mockService) ChangePassword(ctx context.Context, user *core.User, input core.ChangePasswordInput, rawToken string) (*core.ChangePasswordResult, error) {
+	if m.changePasswordFunc != nil {
+		return m.changePasswordFunc(ctx, user, input, rawToken)
+	}
+	return &core.ChangePasswordResult{Message: core.MsgPasswordChanged}, nil
 }
 
 // stubValidator always authenticates the caller as an active user. Used to
@@ -645,6 +655,19 @@ func authedMFARequest(method, target string, body []byte) *http.Request {
 	return req.WithContext(auth.WithUser(req.Context(), user))
 }
 
+// authedPasswordRequest builds a change-password request carrying an
+// authenticated user in context plus an optional bearer token (what the
+// handler passes on for session revocation).
+func authedPasswordRequest(body []byte, token string) *http.Request {
+	req := httptest.NewRequest(http.MethodPost, "/password/change", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	user := &core.User{ID: "u-1", Email: "max@example.com", State: core.StateActive}
+	return req.WithContext(auth.WithUser(req.Context(), user))
+}
+
 func TestHandlerMFAEnrollRequest(t *testing.T) {
 	svc := &mockService{}
 	h := newTestHandler(svc, &stubValidator{})
@@ -1058,5 +1081,520 @@ func TestHandlerLoginMFAUnavailableMapsTo503(t *testing.T) {
 	}
 	if env.Error.Message != "MFA ist derzeit nicht verfügbar." {
 		t.Errorf("message = %q, want MFA-unavailable microcopy", env.Error.Message)
+	}
+}
+
+func TestHandlerChangePasswordHappyPath(t *testing.T) {
+	var gotUser *core.User
+	var gotInput core.ChangePasswordInput
+	var gotToken string
+	svc := &mockService{
+		changePasswordFunc: func(ctx context.Context, user *core.User, input core.ChangePasswordInput, rawToken string) (*core.ChangePasswordResult, error) {
+			gotUser = user
+			gotInput = input
+			gotToken = rawToken
+			return &core.ChangePasswordResult{Message: core.MsgPasswordChanged}, nil
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	payload := map[string]string{
+		"current_password":     "geheim123456",
+		"new_password":         "neuespasswort123",
+		"new_password_confirm": "neuespasswort123",
+	}
+	body, _ := json.Marshal(payload)
+	req := authedPasswordRequest(body, "current-session-token")
+	rec := httptest.NewRecorder()
+
+	h.ChangePassword(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var res core.ChangePasswordResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.Message != core.MsgPasswordChanged {
+		t.Errorf("message = %q, want %q", res.Message, core.MsgPasswordChanged)
+	}
+	// The authenticated user and the bearer token must be forwarded so the core
+	// can revoke OTHER sessions while keeping the current one.
+	if gotUser == nil || gotUser.Email != "max@example.com" {
+		t.Errorf("user not passed through, got %+v", gotUser)
+	}
+	if gotInput.CurrentPassword != "geheim123456" || gotInput.NewPassword != "neuespasswort123" || gotInput.NewPasswordConfirm != "neuespasswort123" {
+		t.Errorf("input not forwarded, got %+v", gotInput)
+	}
+	if gotToken != "current-session-token" {
+		t.Errorf("raw token = %q, want current-session-token", gotToken)
+	}
+}
+
+func TestHandlerChangePasswordWrongCurrentReturns400(t *testing.T) {
+	svc := &mockService{
+		changePasswordFunc: func(ctx context.Context, user *core.User, input core.ChangePasswordInput, rawToken string) (*core.ChangePasswordResult, error) {
+			return nil, core.ErrInvalidCurrentPassword
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	body, _ := json.Marshal(map[string]string{
+		"current_password":     "falsch",
+		"new_password":         "neuespasswort123",
+		"new_password_confirm": "neuespasswort123",
+	})
+	req := authedPasswordRequest(body, "token")
+	rec := httptest.NewRecorder()
+
+	h.ChangePassword(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error.Code != "invalid_current_password" {
+		t.Errorf("code = %q, want invalid_current_password", env.Error.Code)
+	}
+	if env.Error.Message != core.MsgInvalidCurrentPassword {
+		t.Errorf("message = %q, want %q", env.Error.Message, core.MsgInvalidCurrentPassword)
+	}
+}
+
+func TestHandlerChangePasswordShortPasswordReturns400(t *testing.T) {
+	svc := &mockService{
+		changePasswordFunc: func(ctx context.Context, user *core.User, input core.ChangePasswordInput, rawToken string) (*core.ChangePasswordResult, error) {
+			return nil, core.ErrShortPassword
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	body, _ := json.Marshal(map[string]string{
+		"current_password":     "geheim123456",
+		"new_password":         "kurz",
+		"new_password_confirm": "kurz",
+	})
+	req := authedPasswordRequest(body, "token")
+	rec := httptest.NewRecorder()
+
+	h.ChangePassword(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error.Code != "invalid_request" {
+		t.Errorf("code = %q, want invalid_request", env.Error.Code)
+	}
+	if env.Error.Message != core.MsgShortPassword {
+		t.Errorf("message = %q, want %q", env.Error.Message, core.MsgShortPassword)
+	}
+}
+
+func TestHandlerChangePasswordMismatchReturns400(t *testing.T) {
+	svc := &mockService{
+		changePasswordFunc: func(ctx context.Context, user *core.User, input core.ChangePasswordInput, rawToken string) (*core.ChangePasswordResult, error) {
+			return nil, core.ErrPasswordMismatch
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	body, _ := json.Marshal(map[string]string{
+		"current_password":     "geheim123456",
+		"new_password":         "neuespasswort123",
+		"new_password_confirm": "anders123456",
+	})
+	req := authedPasswordRequest(body, "token")
+	rec := httptest.NewRecorder()
+
+	h.ChangePassword(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error.Code != "invalid_request" {
+		t.Errorf("code = %q, want invalid_request", env.Error.Code)
+	}
+	if env.Error.Message != core.MsgPasswordMismatch {
+		t.Errorf("message = %q, want %q", env.Error.Message, core.MsgPasswordMismatch)
+	}
+}
+
+func TestHandlerChangePasswordInvalidJSON(t *testing.T) {
+	svc := &mockService{}
+	h := newTestHandler(svc, &stubValidator{})
+
+	req := authedPasswordRequest([]byte("{bad"), "token")
+	rec := httptest.NewRecorder()
+
+	h.ChangePassword(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error.Code != "invalid_request" {
+		t.Errorf("code = %q, want invalid_request", env.Error.Code)
+	}
+}
+
+func TestHandlerChangePasswordInternalErrorReturns500(t *testing.T) {
+	svc := &mockService{
+		changePasswordFunc: func(ctx context.Context, user *core.User, input core.ChangePasswordInput, rawToken string) (*core.ChangePasswordResult, error) {
+			return nil, errors.New("db down")
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	body, _ := json.Marshal(map[string]string{
+		"current_password":     "geheim123456",
+		"new_password":         "neuespasswort123",
+		"new_password_confirm": "neuespasswort123",
+	})
+	req := authedPasswordRequest(body, "token")
+	rec := httptest.NewRecorder()
+
+	h.ChangePassword(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error.Code != "internal_error" {
+		t.Errorf("code = %q, want internal_error", env.Error.Code)
+	}
+}
+
+func TestHandlerChangePasswordUnauthenticatedReturns401(t *testing.T) {
+	// The change-password route is wrapped in the auth middleware: no valid
+	// bearer token must yield a uniform 401.
+	h := NewHandler(&mockService{}, discardLogger(), &rejectingValidator{})
+
+	body, _ := json.Marshal(map[string]string{
+		"current_password":     "geheim123456",
+		"new_password":         "neuespasswort123",
+		"new_password_confirm": "neuespasswort123",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/password/change", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 from the auth middleware", rec.Code)
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error.Code != "unauthorized" {
+		t.Errorf("code = %q, want unauthorized", env.Error.Code)
+	}
+}
+
+func TestHandlerChangePasswordTooLongReturns400(t *testing.T) {
+	// Review finding 1.7-3: an oversized new password (>1024 runes) maps to a
+	// 400 invalid_request, not a generic 500.
+	svc := &mockService{
+		changePasswordFunc: func(ctx context.Context, user *core.User, input core.ChangePasswordInput, rawToken string) (*core.ChangePasswordResult, error) {
+			return nil, core.ErrPasswordTooLong
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	body, _ := json.Marshal(map[string]string{
+		"current_password":     "geheim123456",
+		"new_password":         "x",
+		"new_password_confirm": "x",
+	})
+	req := authedPasswordRequest(body, "token")
+	rec := httptest.NewRecorder()
+
+	h.ChangePassword(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error.Code != "invalid_request" {
+		t.Errorf("code = %q, want invalid_request", env.Error.Code)
+	}
+	if env.Error.Message != core.MsgPasswordTooLong {
+		t.Errorf("message = %q, want %q", env.Error.Message, core.MsgPasswordTooLong)
+	}
+}
+
+func TestHandlerChangePasswordUserNotFoundReturns400(t *testing.T) {
+	// Review finding 1.7-10: a referenced user that no longer exists maps to a
+	// clear 400, never a generic 500.
+	svc := &mockService{
+		changePasswordFunc: func(ctx context.Context, user *core.User, input core.ChangePasswordInput, rawToken string) (*core.ChangePasswordResult, error) {
+			return nil, core.ErrUserNotFound
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	body, _ := json.Marshal(map[string]string{
+		"current_password":     "geheim123456",
+		"new_password":         "neuespasswort123",
+		"new_password_confirm": "neuespasswort123",
+	})
+	req := authedPasswordRequest(body, "token")
+	rec := httptest.NewRecorder()
+
+	h.ChangePassword(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error.Code != "invalid_request" {
+		t.Errorf("code = %q, want invalid_request", env.Error.Code)
+	}
+}
+
+func TestHandlerChangePasswordServiceUnauthorizedReturns401(t *testing.T) {
+	// Review finding 1.7-2: the core rejects an empty/missing session token
+	// with ErrInvalidCredentials; the handler maps it to a uniform 401 (it must
+	// never fall through to a 500).
+	svc := &mockService{
+		changePasswordFunc: func(ctx context.Context, user *core.User, input core.ChangePasswordInput, rawToken string) (*core.ChangePasswordResult, error) {
+			return nil, core.ErrInvalidCredentials
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	body, _ := json.Marshal(map[string]string{
+		"current_password":     "geheim123456",
+		"new_password":         "neuespasswort123",
+		"new_password_confirm": "neuespasswort123",
+	})
+	req := authedPasswordRequest(body, "")
+	rec := httptest.NewRecorder()
+
+	h.ChangePassword(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error.Code != "unauthorized" {
+		t.Errorf("code = %q, want unauthorized", env.Error.Code)
+	}
+}
+
+// changePasswordRepo is a minimal core.Repository that records the password
+// update and audit event without a live DB. It is used to drive the REAL user
+// Service through the change-password flow (finding 1.7-12).
+type changePasswordRepo struct {
+	user    *core.User
+	audit   []string
+	updated int
+}
+
+func (r *changePasswordRepo) CreateRegisteredUser(_ context.Context, email, _, _, _, _ string) (*core.User, error) {
+	return nil, nil
+}
+
+func (r *changePasswordRepo) GetUserByEmail(_ context.Context, _ string) (*core.User, error) {
+	return r.user, nil
+}
+
+func (r *changePasswordRepo) ListPermissionsByUser(_ context.Context, _ string) ([]string, error) {
+	return nil, nil
+}
+
+func (r *changePasswordRepo) GetLoginAttempts(_ context.Context, _ string) (*core.LoginAttempts, error) {
+	return nil, nil
+}
+
+func (r *changePasswordRepo) IncrementLoginAttempts(_ context.Context, _ string) error { return nil }
+
+func (r *changePasswordRepo) ClearLoginAttempts(_ context.Context, _ string) error { return nil }
+
+func (r *changePasswordRepo) SetUserTotpSecret(_ context.Context, _, _ string) error { return nil }
+
+func (r *changePasswordRepo) ClearUserTotpSecret(_ context.Context, _ string) error { return nil }
+
+func (r *changePasswordRepo) SetUserPendingTotpSecret(_ context.Context, _, _ string, _ time.Time) error {
+	return nil
+}
+
+func (r *changePasswordRepo) ClearUserPendingTotpSecret(_ context.Context, _ string) error { return nil }
+
+func (r *changePasswordRepo) UpdateUserPassword(_ context.Context, _ string, passwordHash string) (*core.User, error) {
+	r.updated++
+	r.user.PasswordHash = passwordHash
+	return r.user, nil
+}
+
+func (r *changePasswordRepo) InsertAuditEvent(_ context.Context, _ string, operation string) error {
+	r.audit = append(r.audit, operation)
+	return nil
+}
+
+// changePasswordSessionStore is an in-memory SessionStore driving the real
+// SessionManager (and thus the real RequireAuth resolution) without a DB.
+type changePasswordSessionStore struct {
+	sessions map[string]*core.Session
+	users    map[string]*core.User
+	nextID   int
+}
+
+func newChangePasswordSessionStore() *changePasswordSessionStore {
+	return &changePasswordSessionStore{sessions: make(map[string]*core.Session)}
+}
+
+func (m *changePasswordSessionStore) CreateSession(_ context.Context, userID, tokenHash string, expiresAt time.Time) (*core.Session, error) {
+	m.nextID++
+	s := &core.Session{
+		ID:        fmt.Sprintf("sess-%d", m.nextID),
+		UserID:    userID,
+		TokenHash: tokenHash,
+		ExpiresAt: expiresAt,
+		CreatedAt: time.Now().UTC(),
+		User:      m.users[userID],
+	}
+	m.sessions[tokenHash] = s
+	return s, nil
+}
+
+func (m *changePasswordSessionStore) GetSessionByTokenHash(_ context.Context, tokenHash string) (*core.Session, error) {
+	s, ok := m.sessions[tokenHash]
+	if !ok {
+		return nil, core.ErrSessionNotFound
+	}
+	return s, nil
+}
+
+func (m *changePasswordSessionStore) DeleteSessionByTokenHash(_ context.Context, tokenHash string) error {
+	delete(m.sessions, tokenHash)
+	return nil
+}
+
+func (m *changePasswordSessionStore) DeleteSessionsByUser(_ context.Context, userID string) error {
+	for tokenHash, s := range m.sessions {
+		if s.UserID == userID {
+			delete(m.sessions, tokenHash)
+		}
+	}
+	return nil
+}
+
+func (m *changePasswordSessionStore) DeleteSessionsByUserExcept(_ context.Context, userID, exceptTokenHash string) error {
+	for tokenHash, s := range m.sessions {
+		if s.UserID == userID && tokenHash != exceptTokenHash {
+			delete(m.sessions, tokenHash)
+		}
+	}
+	return nil
+}
+
+// TestHandlerChangePasswordRealSessionManagerChain pins the FR-25 current-password
+// check through the REAL session-resolution path (finding 1.7-12): RequireAuth
+// resolves the user via a real SessionManager over an in-memory SessionStore,
+// the session user snapshot carries the PasswordHash, and the real user Service
+// + real Argon2id hasher verify the current password — all without a live DB.
+func TestHandlerChangePasswordRealSessionManagerChain(t *testing.T) {
+	hash, err := crypto.HashPassword("geheim123456")
+	if err != nil {
+		t.Fatalf("hashing current password failed: %v", err)
+	}
+	user := &core.User{
+		ID:           "u-real",
+		Email:        "real@example.com",
+		State:        core.StateActive,
+		PasswordHash: hash,
+	}
+
+	store := newChangePasswordSessionStore()
+	store.users = map[string]*core.User{user.ID: user}
+	sm := core.NewSessionManager(store, time.Hour)
+	raw, err := sm.Issue(context.Background(), user)
+	if err != nil {
+		t.Fatalf("Issue failed: %v", err)
+	}
+
+	repo := &changePasswordRepo{user: user}
+	svc := core.NewService(repo, crypto.NewHasher(), sm, nil, discardLogger())
+	h := NewHandler(svc, discardLogger(), sm)
+
+	post := func(current string) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(map[string]string{
+			"current_password":     current,
+			"new_password":         "neuespasswort123",
+			"new_password_confirm": "neuespasswort123",
+		})
+		req := httptest.NewRequest(http.MethodPost, "/password/change", bytes.NewReader(body))
+		req.Header.Set("Content-Type", "application/json")
+		req.Header.Set("Authorization", "Bearer "+raw)
+		rec := httptest.NewRecorder()
+		h.Routes().ServeHTTP(rec, req)
+		return rec
+	}
+
+	// Correct current password → 200 with the confirmation.
+	rec := post("geheim123456")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("correct current: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var res core.ChangePasswordResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.Message != core.MsgPasswordChanged {
+		t.Errorf("message = %q, want %q", res.Message, core.MsgPasswordChanged)
+	}
+	if !res.SessionsRevoked {
+		t.Error("sessions_revoked must be true through the real chain")
+	}
+	if repo.updated != 1 {
+		t.Errorf("UpdateUserPassword calls = %d, want 1", repo.updated)
+	}
+	if len(repo.audit) != 1 || repo.audit[0] != core.AuditOperationPasswordChange {
+		t.Errorf("audit = %v, want [password.change]", repo.audit)
+	}
+
+	// Wrong current password → 400 invalid_current_password.
+	rec = post("falsches-altes-passwort")
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("wrong current: status = %d, want 400", rec.Code)
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error.Code != "invalid_current_password" {
+		t.Errorf("code = %q, want invalid_current_password", env.Error.Code)
+	}
+	if repo.updated != 1 {
+		t.Errorf("UpdateUserPassword calls = %d, want still 1 after a rejected change", repo.updated)
 	}
 }

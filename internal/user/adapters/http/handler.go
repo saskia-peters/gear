@@ -46,6 +46,7 @@ func (h *Handler) Routes() http.Handler {
 		r.Get("/mfa/status", h.MFAStatus)
 		r.Post("/mfa/enroll", h.MFAEnroll)
 		r.Post("/mfa/disable", h.MFADisable)
+		r.Post("/password/change", h.ChangePassword)
 	})
 	return r
 }
@@ -314,4 +315,70 @@ func (h *Handler) MFADisable(w http.ResponseWriter, r *http.Request) {
 		h.logger.Error("mfa disable session revocation failed", "error", err)
 	}
 	httpapi.WriteJSON(w, http.StatusOK, map[string]any{"enabled": false})
+}
+
+// changePasswordRequest is the body of POST /api/v1/auth/password/change
+// (FR-25): the current password plus the new password and its confirmation.
+type changePasswordRequest struct {
+	CurrentPassword    string `json:"current_password"`
+	NewPassword        string `json:"new_password"`
+	NewPasswordConfirm string `json:"new_password_confirm"`
+}
+
+// ChangePassword handles POST /api/v1/auth/password/change for an authenticated
+// user (auth-gated via RequireAuth). It confirms the current password, stores
+// the new Argon2id hash, revokes all OTHER sessions (the current session stays
+// logged in, FR-25) and audits the change (NFR-O1/NFR-O2).
+//
+// Error mapping (uniform envelope):
+//   - 400 invalid_request for a short (<10 chars, FR-2), oversized (>1024) or
+//     mismatched new password
+//   - 400 invalid_current_password for a wrong current password
+//   - 400 invalid_request for a referenced user that no longer exists
+//   - 401 unauthorized when the caller is not authenticated (middleware) or
+//     the request carries no usable session token
+func (h *Handler) ChangePassword(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var input changePasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", "Ungültiges JSON-Format.")
+		return
+	}
+	user := auth.UserFrom(r.Context())
+	if user == nil {
+		httpapi.WriteError(w, http.StatusUnauthorized, "unauthorized", "Authentifizierung erforderlich.")
+		return
+	}
+
+	res, err := h.service.ChangePassword(r.Context(), user, core.ChangePasswordInput{
+		CurrentPassword:    input.CurrentPassword,
+		NewPassword:        input.NewPassword,
+		NewPasswordConfirm: input.NewPasswordConfirm,
+	}, auth.BearerToken(r))
+	if err != nil {
+		switch {
+		case errors.Is(err, core.ErrInvalidCredentials):
+			// Missing/invalid session token or a nil user: never revoke ALL
+			// sessions on an empty token (FR-25 current session stays logged in).
+			httpapi.WriteError(w, http.StatusUnauthorized, "unauthorized", "Authentifizierung erforderlich.")
+		case errors.Is(err, core.ErrInvalidCurrentPassword):
+			h.logger.Warn("password change rejected: wrong current password", "email", user.Email)
+			httpapi.WriteError(w, http.StatusBadRequest, "invalid_current_password", core.MsgInvalidCurrentPassword)
+		case errors.Is(err, core.ErrShortPassword):
+			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", core.MsgShortPassword)
+		case errors.Is(err, core.ErrPasswordTooLong):
+			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", core.MsgPasswordTooLong)
+		case errors.Is(err, core.ErrPasswordMismatch):
+			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", core.MsgPasswordMismatch)
+		case errors.Is(err, core.ErrUserNotFound):
+			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", "Das Konto wurde nicht gefunden.")
+		default:
+			h.logger.Error("password change failed unexpectedly", "error", err)
+			httpapi.WriteError(w, http.StatusInternalServerError, "internal_error", "Ein interner Fehler ist aufgetreten.")
+		}
+		return
+	}
+
+	h.logger.Info("password changed", "email", user.Email)
+	httpapi.WriteJSON(w, http.StatusOK, res)
 }

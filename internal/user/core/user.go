@@ -16,6 +16,7 @@ const (
 	MsgInvalidEmail     = "Bitte gib eine gültige E-Mail-Adresse ein."
 	MsgShortPassword    = "Das Passwort muss mindestens 10 Zeichen lang sein."
 	MsgPasswordMismatch = "Die Passwörter stimmen nicht überein."
+	MsgPasswordTooLong  = "Das Passwort ist zu lang."
 )
 
 var (
@@ -31,8 +32,17 @@ var (
 	// ErrPasswordMismatch is returned when password and confirmation do not match.
 	ErrPasswordMismatch = errors.New("passwords do not match")
 
+	// ErrPasswordTooLong is returned when a password exceeds the upper bound
+	// (1024 runes). A sentinel so handlers can map it to a 400 instead of a 500.
+	ErrPasswordTooLong = errors.New("password too long")
+
 	// ErrUserAlreadyExists is returned when attempting to register a user with an existing email.
 	ErrUserAlreadyExists = errors.New("user already exists")
+
+	// ErrUserNotFound is returned when an operation references a user ID with no
+	// matching row (e.g. the account was deleted mid-session). Handlers map it
+	// to a clear 4xx rather than a generic 500.
+	ErrUserNotFound = errors.New("user not found")
 )
 
 type UserState string

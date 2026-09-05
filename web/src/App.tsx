@@ -6,12 +6,12 @@ import { DashboardPage } from './pages/DashboardPage.tsx'
 import { LoginPage } from './pages/LoginPage.tsx'
 import { MfaPage } from './pages/MfaPage.tsx'
 import { RegisterPage } from './pages/RegisterPage.tsx'
+import { ChangePasswordPage } from './pages/ChangePasswordPage.tsx'
 import { NotFoundPage } from './pages/NotFoundPage.tsx'
-
-const TOKEN_STORAGE_KEY = 'gear.session_token'
+import { SESSION_TOKEN_KEY } from './auth/authState.ts'
 
 function hasSessionToken(): boolean {
-  return Boolean(localStorage.getItem(TOKEN_STORAGE_KEY))
+  return Boolean(localStorage.getItem(SESSION_TOKEN_KEY))
 }
 
 function RequireAuth({ children }: { children: ReactNode }) {
@@ -37,6 +37,14 @@ export function AppRoutes() {
         element={
           <RequireAuth>
             <MfaPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/password"
+        element={
+          <RequireAuth>
+            <ChangePasswordPage />
           </RequireAuth>
         }
       />

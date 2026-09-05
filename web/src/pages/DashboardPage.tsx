@@ -22,6 +22,9 @@ export function DashboardPage() {
           <Link to="/mfa" className={styles.mfaLink}>
             Zwei-Faktor-Authentifizierung verwalten
           </Link>
+          <Link to="/password" className={styles.mfaLink}>
+            Passwort ändern
+          </Link>
         </section>
 
         <SummaryGrid />

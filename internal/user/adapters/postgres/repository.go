@@ -133,6 +133,7 @@ func (r *Repository) GetSessionByTokenHash(ctx context.Context, tokenHash string
 			LastName:                 row.LastName,
 			State:                    core.UserState(row.State),
 			IsMFAEnabled:             row.IsMfaEnabled,
+			PasswordHash:             row.PasswordHash,
 			TotpSecretEncrypted:      secret,
 			PendingTotpSecretEncrypted: pendingSecret,
 			PendingTotpExpiresAt:     pendingExpiry,
@@ -246,6 +247,40 @@ func (r *Repository) DeleteSessionsByUserExcept(ctx context.Context, userID, exc
 	return r.queries.DeleteSessionsByUserExcept(ctx, DeleteSessionsByUserExceptParams{
 		UserID:     uid,
 		TokenHash: exceptTokenHash,
+	})
+}
+
+// UpdateUserPassword persists a new Argon2id password hash for the user and
+// returns the updated user (FR-25/AD-13). Only the hash is stored; the
+// plaintext password is never written.
+func (r *Repository) UpdateUserPassword(ctx context.Context, userID, passwordHash string) (*core.User, error) {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return nil, err
+	}
+	row, err := r.queries.UpdateUserPassword(ctx, UpdateUserPasswordParams{
+		ID:           uid,
+		PasswordHash: passwordHash,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
+		row.PasswordHash, row.State, row.IsMfaEnabled, row.TotpSecretEncrypted,
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt), nil
+}
+
+// InsertAuditEvent appends a row to the User-owned append-only audit trail
+// (NFR-O1/NFR-O2, spine table 11). It records only actor_user_id, operation
+// and created_at — never password values or other sensitive payloads.
+func (r *Repository) InsertAuditEvent(ctx context.Context, userID, operation string) error {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return err
+	}
+	return r.queries.InsertAuditEvent(ctx, InsertAuditEventParams{
+		ActorUserID: uid,
+		Operation:   operation,
 	})
 }
 

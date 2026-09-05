@@ -57,7 +57,7 @@ func main() {
 	}
 	secretCipher := crypto.NewSecretCipher(encKey)
 	sessionManager := usercore.NewSessionManager(userRepo, cfg.SessionIdle)
-	userService := usercore.NewService(userRepo, hasher, sessionManager, secretCipher)
+	userService := usercore.NewService(userRepo, hasher, sessionManager, secretCipher, log)
 	userHandler := userhttp.NewHandler(userService, log, sessionManager)
 
 	// The auth gateway resolves sessions and the live permission set (AD-6).

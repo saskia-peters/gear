@@ -45,8 +45,12 @@ VALUES ($1, $2, $3)
 RETURNING id, user_id, token_hash, expires_at, created_at;
 
 -- name: GetSessionByTokenHash :one
+-- The session user snapshot carries the password hash so the authenticated
+-- user can be verified server-side on the change-password flow (FR-25), just
+-- as it carries the encrypted TOTP secret for MFA disable (FR-4). The hash is
+-- never serialized to clients (core.User.PasswordHash is json:"-").
 SELECT s.id, s.user_id, s.token_hash, s.expires_at, s.created_at,
-       u.email, u.display_name, u.first_name, u.last_name, u.state, u.is_mfa_enabled, u.totp_secret_encrypted, u.pending_totp_secret_encrypted, u.pending_totp_expires_at, u.attributes
+       u.email, u.display_name, u.first_name, u.last_name, u.state, u.is_mfa_enabled, u.password_hash, u.totp_secret_encrypted, u.pending_totp_secret_encrypted, u.pending_totp_expires_at, u.attributes
 FROM sessions s
 JOIN users u ON u.id = s.user_id
 WHERE s.token_hash = $1;
@@ -155,3 +159,20 @@ SET pending_totp_secret_encrypted = NULL,
     updated_at                    = now()
 WHERE id = $1;
 
+-- name: UpdateUserPassword :one
+-- Persist a new password hash for a user (FR-25). The plaintext password is
+-- never stored, logged or returned (NFR-O1/AD-13); only the Argon2id hash
+-- provided by the caller is written, with a fresh updated_at.
+UPDATE users
+SET password_hash = $2,
+    updated_at    = now()
+WHERE id = $1
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at;
+
+-- name: InsertAuditEvent :exec
+-- Append a row to the User-owned audit trail (NFR-O1/NFR-O2, spine table 11):
+-- actor_user_id + operation + created_at. Never records password values or
+-- other sensitive payloads. Written best-effort: a failure is logged, not
+-- rolled back into the triggering operation (availability).
+INSERT INTO audit_log (actor_user_id, operation)
+VALUES ($1, $2);

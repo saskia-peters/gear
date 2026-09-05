@@ -30,6 +30,10 @@ type Service interface {
 	// MFA is enabled or disabled (review finding 1.6-2).
 	RevokeOtherSessions(ctx context.Context, userID, rawToken string) error
 	RevokeAllSessions(ctx context.Context, userID string) error
+	// ChangePassword is the self-service password change use-case (FR-25):
+	// confirm current password, validate + store new hash, revoke other
+	// sessions, audit the change.
+	ChangePassword(ctx context.Context, user *core.User, input core.ChangePasswordInput, rawToken string) (*core.ChangePasswordResult, error)
 }
 
 // Repository is the outbound persistence port for User data.
@@ -44,6 +48,8 @@ type Repository interface {
 	ClearUserTotpSecret(ctx context.Context, userID string) error
 	SetUserPendingTotpSecret(ctx context.Context, userID, encryptedSecret string, expiresAt time.Time) error
 	ClearUserPendingTotpSecret(ctx context.Context, userID string) error
+	UpdateUserPassword(ctx context.Context, userID, passwordHash string) (*core.User, error)
+	InsertAuditEvent(ctx context.Context, userID, operation string) error
 }
 
 // PasswordHasher is the outbound password hashing port (AD-13).

@@ -19,6 +19,9 @@ type mockRepo struct {
 	attemptsErr error
 	upsertCalls int
 	clearCalls  int
+	audit       map[string][]string
+	auditErr    error
+	updateCalls int
 }
 
 func newMockRepo() *mockRepo {
@@ -26,6 +29,7 @@ func newMockRepo() *mockRepo {
 		users:    make(map[string]*User),
 		perms:    make(map[string][]string),
 		attempts: make(map[string]*LoginAttempts),
+		audit:    make(map[string][]string),
 	}
 }
 
@@ -173,6 +177,34 @@ func (m *mockRepo) ClearUserPendingTotpSecret(_ context.Context, userID string) 
 	return ErrUserAlreadyExists
 }
 
+// UpdateUserPassword replaces the user's stored password hash (FR-25). Only the
+// hash is stored; the plaintext password is never kept. An unknown user ID maps
+// to ErrUserNotFound (never a misleading "already exists" sentinel).
+func (m *mockRepo) UpdateUserPassword(_ context.Context, userID, passwordHash string) (*User, error) {
+	m.updateCalls++
+	for _, u := range m.users {
+		if u.ID == userID {
+			u.PasswordHash = passwordHash
+			return u, nil
+		}
+	}
+	return nil, ErrUserNotFound
+}
+
+// InsertAuditEvent appends an audit row (actor_user_id -> operation) to the
+// in-memory append-only trail (NFR-O1/NFR-O2). auditErr lets tests simulate an
+// audit-write failure (best-effort path).
+func (m *mockRepo) InsertAuditEvent(_ context.Context, userID, operation string) error {
+	if m.auditErr != nil {
+		return m.auditErr
+	}
+	if m.audit == nil {
+		m.audit = make(map[string][]string)
+	}
+	m.audit[userID] = append(m.audit[userID], operation)
+	return nil
+}
+
 type mockHasher struct {
 	hashCalls   int
 	verifyCalls int
@@ -194,11 +226,14 @@ func (m *mockHasher) VerifyCalls() int {
 	return m.verifyCalls
 }
 
-// mockSessionStore is an in-memory SessionStore for tests.
+// mockSessionStore is an in-memory SessionStore for tests. revokeErr lets
+// tests simulate a session-revocation failure (best-effort path in
+// ChangePassword, FR-25/NFR-O1).
 type mockSessionStore struct {
-	sessions map[string]*Session
-	users    map[string]*User
-	nextID   int
+	sessions  map[string]*Session
+	users     map[string]*User
+	nextID    int
+	revokeErr error
 }
 
 func newMockSessionStore() *mockSessionStore {
@@ -259,6 +294,9 @@ func (m *mockSessionStore) DeleteSessionsByUser(_ context.Context, userID string
 }
 
 func (m *mockSessionStore) DeleteSessionsByUserExcept(_ context.Context, userID, exceptTokenHash string) error {
+	if m.revokeErr != nil {
+		return m.revokeErr
+	}
 	for tokenHash, s := range m.sessions {
 		if s.UserID == userID && tokenHash != exceptTokenHash {
 			delete(m.sessions, tokenHash)
@@ -297,6 +335,7 @@ func (mockCipher) Decrypt(encoded string) (string, error) {
 }
 
 // newTestService builds a Service with in-memory repo/hasher/session store.
+// The logger is nil (the core falls back to slog.Default()).
 func newTestService(repo *mockRepo, hasher *mockHasher) (*Service, *mockSessionStore) {
 	store := newMockSessionStore()
 	var users []*User
@@ -305,7 +344,7 @@ func newTestService(repo *mockRepo, hasher *mockHasher) (*Service, *mockSessionS
 	}
 	store.withUsers(users...)
 	sm := NewSessionManager(store, time.Hour)
-	return NewService(repo, hasher, sm, mockCipher{}), store
+	return NewService(repo, hasher, sm, mockCipher{}, nil), store
 }
 
 func TestServiceRegisterHappyPath(t *testing.T) {

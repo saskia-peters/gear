@@ -8,6 +8,13 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type AuditLog struct {
+	ID          pgtype.UUID        `json:"id"`
+	ActorUserID pgtype.UUID        `json:"actor_user_id"`
+	Operation   string             `json:"operation"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
 type LoginAttempt struct {
 	Email        string             `json:"email"`
 	FailedCount  int32              `json:"failed_count"`

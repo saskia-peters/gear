@@ -184,4 +184,32 @@ describe('App & Dashboard Foundation', () => {
 
     expect(screen.getByRole('heading', { level: 2, name: 'Anmeldung' })).toBeInTheDocument()
   })
+
+  it('PASSWORD_ROUTE: renders the change-password page at /password for an authenticated user', () => {
+    render(
+      <ThemeProvider>
+        <MemoryRouter initialEntries={['/password']}>
+          <AppRoutes />
+        </MemoryRouter>
+      </ThemeProvider>,
+    )
+
+    expect(screen.getByRole('heading', { level: 2, name: 'Passwort ändern' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Aktuelles Passwort')).toBeInTheDocument()
+    expect(screen.getByLabelText('Neues Passwort')).toBeInTheDocument()
+    expect(screen.getByLabelText('Wiederholung')).toBeInTheDocument()
+  })
+
+  it('PASSWORD_ROUTE_PROTECTED: redirects to /login without a session token', () => {
+    localStorage.removeItem(TOKEN_STORAGE_KEY)
+    render(
+      <ThemeProvider>
+        <MemoryRouter initialEntries={['/password']}>
+          <AppRoutes />
+        </MemoryRouter>
+      </ThemeProvider>,
+    )
+
+    expect(screen.getByRole('heading', { level: 2, name: 'Anmeldung' })).toBeInTheDocument()
+  })
 })

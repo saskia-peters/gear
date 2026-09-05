@@ -472,3 +472,124 @@ func TestPostgresSessionRevocationRepository(t *testing.T) {
 		t.Errorf("all sessions must be revoked, got %v", err)
 	}
 }
+
+func TestPostgresChangePasswordRepository(t *testing.T) {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Skipf("skipping db integration test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping db integration test (db ping failed): %v", err)
+	}
+
+	queries := New(pool)
+	repo := NewRepository(queries)
+
+	testEmail := "changepw.test." + time.Now().Format("20060102150405.000000") + "@gear.local"
+	created, err := repo.CreateRegisteredUser(ctx, testEmail, "Password Change Test", "Password", "Test", "$argon2id$v=19$oldhash")
+	if err != nil {
+		t.Fatalf("CreateRegisteredUser failed: %v", err)
+	}
+
+	// 1. UpdateUserPassword persists the new hash and returns the updated user
+	// (FR-25/AD-13); only the hash is written, never a plaintext.
+	newHash := "$argon2id$v=19$newhash"
+	updated, err := repo.UpdateUserPassword(ctx, created.ID, newHash)
+	if err != nil {
+		t.Fatalf("UpdateUserPassword failed: %v", err)
+	}
+	if updated.PasswordHash != newHash {
+		t.Errorf("updated password hash = %q, want %q", updated.PasswordHash, newHash)
+	}
+	if updated.ID != created.ID {
+		t.Errorf("updated user id = %q, want %q", updated.ID, created.ID)
+	}
+
+	fetched, err := repo.GetUserByEmail(ctx, testEmail)
+	if err != nil {
+		t.Fatalf("GetUserByEmail failed: %v", err)
+	}
+	if fetched == nil || fetched.PasswordHash != newHash {
+		t.Errorf("stored password hash = %+v, want %q", fetched, newHash)
+	}
+
+	// 1b. A session issued for the user carries the password hash on its user
+	// snapshot so the change-password flow can verify the current password
+	// server-side (FR-25), like the MFA secrets for DisableMFA. This pins the
+	// JOIN in GetSessionByTokenHash.
+	if _, err := repo.CreateSession(ctx, created.ID, "hash-of-changepw-session", time.Now().UTC().Add(time.Hour)); err != nil {
+		t.Fatalf("CreateSession failed: %v", err)
+	}
+	sessFetched, err := repo.GetSessionByTokenHash(ctx, "hash-of-changepw-session")
+	if err != nil {
+		t.Fatalf("GetSessionByTokenHash failed: %v", err)
+	}
+	if sessFetched.User == nil || sessFetched.User.PasswordHash != newHash {
+		t.Errorf("session user password hash = %+v, want %q", sessFetched.User, newHash)
+	}
+
+	// 2. InsertAuditEvent appends an immutable audit row (actor, operation,
+	// created_at) for the user (NFR-O1/NFR-O2, spine table 11).
+	op := core.AuditOperationPasswordChange
+	if err := repo.InsertAuditEvent(ctx, created.ID, op); err != nil {
+		t.Fatalf("InsertAuditEvent failed: %v", err)
+	}
+
+	var count int
+	var actorUserID string
+	var operation string
+	var createdAt time.Time
+	err = pool.QueryRow(ctx, `SELECT count(*) FROM audit_log WHERE actor_user_id = $1`, created.ID).Scan(&count)
+	if err != nil {
+		t.Fatalf("counting audit rows failed: %v", err)
+	}
+	if count != 1 {
+		t.Errorf("audit row count = %d, want 1", count)
+	}
+	err = pool.QueryRow(ctx,
+		`SELECT actor_user_id::text, operation, created_at FROM audit_log WHERE actor_user_id = $1 AND operation = $2`,
+		created.ID, op).Scan(&actorUserID, &operation, &createdAt)
+	if err != nil {
+		t.Fatalf("reading audit row failed: %v", err)
+	}
+	if actorUserID != created.ID {
+		t.Errorf("audit actor = %q, want %q", actorUserID, created.ID)
+	}
+	if operation != op {
+		t.Errorf("audit operation = %q, want %q", operation, op)
+	}
+	if createdAt.IsZero() {
+		t.Error("audit row must carry a created_at timestamp")
+	}
+
+	// 3. Deleting a user ANONYMIZES the audit trail (ON DELETE SET NULL) instead
+	// of destroying it (NFR-O1/NFR-O2): the row survives with a NULL actor.
+	var auditID string
+	err = pool.QueryRow(ctx,
+		`SELECT id::text FROM audit_log WHERE actor_user_id = $1 AND operation = $2`,
+		created.ID, op).Scan(&auditID)
+	if err != nil {
+		t.Fatalf("resolving audit row id failed: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `DELETE FROM users WHERE id = $1`, created.ID); err != nil {
+		t.Fatalf("deleting user failed: %v", err)
+	}
+	var actorIsNull bool
+	err = pool.QueryRow(ctx, `SELECT actor_user_id IS NULL FROM audit_log WHERE id = $1`, auditID).Scan(&actorIsNull)
+	if err != nil {
+		t.Fatalf("audit row must survive user deletion, got: %v", err)
+	}
+	if !actorIsNull {
+		t.Error("audit row actor must be anonymized (NULL) after the user is deleted")
+	}
+}
