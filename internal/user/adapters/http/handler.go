@@ -47,6 +47,9 @@ func (h *Handler) Routes() http.Handler {
 		r.Post("/mfa/enroll", h.MFAEnroll)
 		r.Post("/mfa/disable", h.MFADisable)
 		r.Post("/password/change", h.ChangePassword)
+		r.Get("/profile", h.GetProfile)
+		r.Post("/profile", h.UpdateProfile)
+		r.Post("/profile/email", h.StageEmailChange)
 	})
 	return r
 }
@@ -380,5 +383,123 @@ func (h *Handler) ChangePassword(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.logger.Info("password changed", "email", user.Email)
+	httpapi.WriteJSON(w, http.StatusOK, res)
+}
+
+// GetProfile handles GET /api/v1/auth/profile for an authenticated user (Story
+// 2.1). It returns the caller's base data (Vorname, Nachname, Anzeigename,
+// E-Mail plus any staged pending_email) built from the authenticated session
+// user — no DB round-trip needed.
+func (h *Handler) GetProfile(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFrom(r.Context())
+	if user == nil {
+		httpapi.WriteError(w, http.StatusUnauthorized, "unauthorized", "Authentifizierung erforderlich.")
+		return
+	}
+	profile, err := h.service.GetProfile(r.Context(), user)
+	if err != nil {
+		switch {
+		case errors.Is(err, core.ErrInvalidCredentials):
+			httpapi.WriteError(w, http.StatusUnauthorized, "unauthorized", "Authentifizierung erforderlich.")
+		default:
+			h.logger.Error("profile read failed unexpectedly", "error", err)
+			httpapi.WriteError(w, http.StatusInternalServerError, "internal_error", "Ein interner Fehler ist aufgetreten.")
+		}
+		return
+	}
+	httpapi.WriteJSON(w, http.StatusOK, profile)
+}
+
+// UpdateProfile handles POST /api/v1/auth/profile for an authenticated user
+// (Story 2.1). It validates and persists the caller's editable base data
+// (Vorname, Nachname, Anzeigename) and returns the updated profile. Error
+// mapping (uniform envelope): 400 invalid_request for missing/over-long
+// fields or a vanished account; 401 unauthorized when the caller is not
+// authenticated; 403 forbidden when an operation would target another user
+// (defense-in-depth, self-ownership AD-12).
+func (h *Handler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var input core.UpdateProfileInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", "Ungültiges JSON-Format.")
+		return
+	}
+	user := auth.UserFrom(r.Context())
+	if user == nil {
+		httpapi.WriteError(w, http.StatusUnauthorized, "unauthorized", "Authentifizierung erforderlich.")
+		return
+	}
+
+	profile, err := h.service.UpdateProfile(r.Context(), user, input)
+	if err != nil {
+		switch {
+		case errors.Is(err, core.ErrInvalidCredentials):
+			httpapi.WriteError(w, http.StatusUnauthorized, "unauthorized", "Authentifizierung erforderlich.")
+		case errors.Is(err, core.ErrMissingFields):
+			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", core.MsgMissingFields)
+		case errors.Is(err, core.ErrProfileNameTooLong):
+			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", core.MsgProfileNameTooLong)
+		case errors.Is(err, core.ErrUserNotFound):
+			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", "Das Konto wurde nicht gefunden.")
+		case errors.Is(err, core.ErrForbidden):
+			httpapi.WriteError(w, http.StatusForbidden, "forbidden", "Keine Berechtigung.")
+		default:
+			h.logger.Error("profile update failed unexpectedly", "error", err)
+			httpapi.WriteError(w, http.StatusInternalServerError, "internal_error", "Ein interner Fehler ist aufgetreten.")
+		}
+		return
+	}
+
+	h.logger.Info("profile updated", "email", user.Email)
+	httpapi.WriteJSON(w, http.StatusOK, profile)
+}
+
+// StageEmailChange handles POST /api/v1/auth/profile/email for an authenticated
+// user (Story 2.1). It stages the submitted email as pending_email — the
+// account stays ACTIVE on the current email until an admin approves the change
+// (Epic 2 admin workflow) — and returns a German confirmation. Error mapping
+// (uniform envelope): 400 invalid_request for a malformed email, a no-op
+// (same as current) or an email already in use by another account; 401
+// unauthorized when the caller is not authenticated; 403 forbidden when an
+// operation would target another user (defense-in-depth, self-ownership
+// AD-12).
+func (h *Handler) StageEmailChange(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var input core.StageEmailInput
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", "Ungültiges JSON-Format.")
+		return
+	}
+	user := auth.UserFrom(r.Context())
+	if user == nil {
+		httpapi.WriteError(w, http.StatusUnauthorized, "unauthorized", "Authentifizierung erforderlich.")
+		return
+	}
+
+	res, err := h.service.StageEmailChange(r.Context(), user, input.Email)
+	if err != nil {
+		switch {
+		case errors.Is(err, core.ErrInvalidCredentials):
+			httpapi.WriteError(w, http.StatusUnauthorized, "unauthorized", "Authentifizierung erforderlich.")
+		case errors.Is(err, core.ErrInvalidEmail):
+			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", core.MsgInvalidEmail)
+		case errors.Is(err, core.ErrEmailUnchanged):
+			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", core.MsgEmailUnchanged)
+		case errors.Is(err, core.ErrEmailAlreadyPending):
+			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", core.MsgEmailAlreadyPending)
+		case errors.Is(err, core.ErrEmailInUse):
+			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", core.MsgEmailInUse)
+		case errors.Is(err, core.ErrUserNotFound):
+			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", "Das Konto wurde nicht gefunden.")
+		case errors.Is(err, core.ErrForbidden):
+			httpapi.WriteError(w, http.StatusForbidden, "forbidden", "Keine Berechtigung.")
+		default:
+			h.logger.Error("email change staging failed unexpectedly", "error", err)
+			httpapi.WriteError(w, http.StatusInternalServerError, "internal_error", "Ein interner Fehler ist aufgetreten.")
+		}
+		return
+	}
+
+	h.logger.Info("email change staged", "email", user.Email)
 	httpapi.WriteJSON(w, http.StatusOK, res)
 }

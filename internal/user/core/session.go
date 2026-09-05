@@ -40,6 +40,12 @@ type SessionStore interface {
 	// pre-enrollment sessions cannot bypass the second factor (review finding
 	// 1.6-2).
 	DeleteSessionsByUserExcept(ctx context.Context, userID, exceptTokenHash string) error
+	// RefreshSessionUser replaces the user snapshot on every session of the
+	// given user so the session reflects profile edits immediately (Story 2.1).
+	// Adapters whose session user is re-derived live on every Validate (the
+	// postgres JOIN) implement this as a no-op; adapters that cache the
+	// snapshot must update it.
+	RefreshSessionUser(ctx context.Context, user *User) error
 }
 
 // SessionManager issues, validates and invalidates opaque session tokens
@@ -139,4 +145,16 @@ func (m *SessionManager) RevokeOtherSessions(ctx context.Context, userID, rawTok
 // finding 1.6-2).
 func (m *SessionManager) RevokeAllSessions(ctx context.Context, userID string) error {
 	return m.store.DeleteSessionsByUser(ctx, userID)
+}
+
+// RefreshSessionUser replaces the user snapshot on every session of the given
+// user (Story 2.1). The Service calls it after a profile edit so a subsequent
+// session resolution — and thus GetProfile and the header greeting — reflects
+// the fresh names/pending_email immediately, even for session stores that
+// cache the snapshot.
+func (m *SessionManager) RefreshSessionUser(ctx context.Context, user *User) error {
+	if user == nil {
+		return nil
+	}
+	return m.store.RefreshSessionUser(ctx, user)
 }

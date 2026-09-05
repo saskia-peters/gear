@@ -212,4 +212,49 @@ describe('App & Dashboard Foundation', () => {
 
     expect(screen.getByRole('heading', { level: 2, name: 'Anmeldung' })).toBeInTheDocument()
   })
+
+  it('PROFILE_ROUTE: renders the Profil page at /profil for an authenticated user', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          id: 'u-1',
+          email: 'max@example.com',
+          first_name: 'Max',
+          last_name: 'Mustermann',
+          display_name: 'Max Mustermann',
+        }),
+      }),
+    )
+    render(
+      <ThemeProvider>
+        <MemoryRouter initialEntries={['/profil']}>
+          <AppRoutes />
+        </MemoryRouter>
+      </ThemeProvider>,
+    )
+
+    expect(await screen.findByRole('heading', { level: 2, name: 'Profil' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Vorname')).toHaveValue('Max')
+    expect(
+      screen.getByRole('link', { name: /Zwei-Faktor-Authentifizierung verwalten/ }),
+    ).toHaveAttribute('href', '/mfa')
+    expect(screen.getByRole('link', { name: 'Passwort ändern' })).toHaveAttribute('href', '/password')
+    vi.unstubAllGlobals()
+  })
+
+  it('PROFILE_ROUTE_PROTECTED: redirects to /login without a session token', () => {
+    localStorage.removeItem(TOKEN_STORAGE_KEY)
+    render(
+      <ThemeProvider>
+        <MemoryRouter initialEntries={['/profil']}>
+          <AppRoutes />
+        </MemoryRouter>
+      </ThemeProvider>,
+    )
+
+    expect(screen.getByRole('heading', { level: 2, name: 'Anmeldung' })).toBeInTheDocument()
+  })
 })

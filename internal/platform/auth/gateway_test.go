@@ -237,6 +237,18 @@ func (m *inMemorySessionStore) DeleteSessionsByUserExcept(_ context.Context, use
 	return nil
 }
 
+// RefreshSessionUser replaces the user snapshot on every session of the given
+// user (Story 2.1 session-refresh contract). This store caches strictly, so
+// the refresh is how profile edits reach the session.
+func (m *inMemorySessionStore) RefreshSessionUser(_ context.Context, user *core.User) error {
+	for _, s := range m.sessions {
+		if s.UserID == user.ID {
+			s.User = user
+		}
+	}
+	return nil
+}
+
 // TestGatewayExpiredWithRealSessionManager exercises the actual expiry logic
 // (SessionManager.Validate re-checks the stored expires_at) through the
 // gateway, rather than faking it with a mock error.

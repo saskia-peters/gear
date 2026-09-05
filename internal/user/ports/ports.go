@@ -34,6 +34,12 @@ type Service interface {
 	// confirm current password, validate + store new hash, revoke other
 	// sessions, audit the change.
 	ChangePassword(ctx context.Context, user *core.User, input core.ChangePasswordInput, rawToken string) (*core.ChangePasswordResult, error)
+	// Profile base-data (Story 2.1): view own base data, edit Vorname/Nachname/
+	// Anzeigename immediately, and stage an email change awaiting admin
+	// approval. All act exclusively on the authenticated user (self-ownership).
+	GetProfile(ctx context.Context, user *core.User) (*core.Profile, error)
+	UpdateProfile(ctx context.Context, user *core.User, input core.UpdateProfileInput) (*core.Profile, error)
+	StageEmailChange(ctx context.Context, user *core.User, newEmail string) (*core.StageEmailResult, error)
 }
 
 // Repository is the outbound persistence port for User data.
@@ -50,6 +56,9 @@ type Repository interface {
 	ClearUserPendingTotpSecret(ctx context.Context, userID string) error
 	UpdateUserPassword(ctx context.Context, userID, passwordHash string) (*core.User, error)
 	InsertAuditEvent(ctx context.Context, userID, operation string) error
+	UpdateUserProfile(ctx context.Context, userID, firstName, lastName, displayName string) (*core.User, error)
+	StagePendingEmail(ctx context.Context, userID, pendingEmail string) (*core.User, error)
+	ClearPendingEmail(ctx context.Context, userID string) error
 }
 
 // PasswordHasher is the outbound password hashing port (AD-13).

@@ -8,6 +8,7 @@ import (
 	"time"
 
 	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/saskia-peters/gear/internal/user/core"
@@ -33,12 +34,18 @@ func (r *Repository) CreateRegisteredUser(ctx context.Context, email, displayNam
 		PasswordHash: passwordHash,
 	})
 	if err != nil {
+		// Reliable duplicate-key detection (review finding): match the Postgres
+		// error code directly instead of fragile string matching. The core's
+		// isDuplicateKeyErr remains only as a belt-and-suspenders fallback.
+		if isPgUniqueViolation(err) {
+			return nil, core.ErrUserAlreadyExists
+		}
 		return nil, err
 	}
 
 	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
 		row.PasswordHash, row.State, row.IsMfaEnabled, row.TotpSecretEncrypted,
-		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt), nil
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail), nil
 }
 
 // GetUserByEmail queries a user by their email address. If not found, returns nil, nil.
@@ -53,7 +60,7 @@ func (r *Repository) GetUserByEmail(ctx context.Context, email string) (*core.Us
 
 	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
 		row.PasswordHash, row.State, row.IsMfaEnabled, row.TotpSecretEncrypted,
-		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt), nil
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail), nil
 }
 
 // ListPermissionsByUser resolves the user's live permission set (AD-12):
@@ -118,6 +125,10 @@ func (r *Repository) GetSessionByTokenHash(ctx context.Context, tokenHash string
 	if row.PendingTotpExpiresAt.Valid {
 		pendingExpiry = row.PendingTotpExpiresAt.Time
 	}
+	pendingEmail := ""
+	if row.PendingEmail.Valid {
+		pendingEmail = row.PendingEmail.String
+	}
 
 	return &core.Session{
 		ID:        uuidToString(row.ID.Bytes),
@@ -126,18 +137,19 @@ func (r *Repository) GetSessionByTokenHash(ctx context.Context, tokenHash string
 		ExpiresAt: row.ExpiresAt.Time,
 		CreatedAt: row.CreatedAt.Time,
 		User: &core.User{
-			ID:                       uuidToString(row.UserID.Bytes),
-			Email:                    row.Email,
-			DisplayName:              row.DisplayName,
-			FirstName:                row.FirstName,
-			LastName:                 row.LastName,
-			State:                    core.UserState(row.State),
-			IsMFAEnabled:             row.IsMfaEnabled,
-			PasswordHash:             row.PasswordHash,
-			TotpSecretEncrypted:      secret,
+			ID:                         uuidToString(row.UserID.Bytes),
+			Email:                      row.Email,
+			PendingEmail:               pendingEmail,
+			DisplayName:                row.DisplayName,
+			FirstName:                  row.FirstName,
+			LastName:                   row.LastName,
+			State:                      core.UserState(row.State),
+			IsMFAEnabled:               row.IsMfaEnabled,
+			PasswordHash:               row.PasswordHash,
+			TotpSecretEncrypted:        secret,
 			PendingTotpSecretEncrypted: pendingSecret,
-			PendingTotpExpiresAt:     pendingExpiry,
-			Attributes:               attrs,
+			PendingTotpExpiresAt:       pendingExpiry,
+			Attributes:                 attrs,
 		},
 	}, nil
 }
@@ -267,7 +279,81 @@ func (r *Repository) UpdateUserPassword(ctx context.Context, userID, passwordHas
 	}
 	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
 		row.PasswordHash, row.State, row.IsMfaEnabled, row.TotpSecretEncrypted,
-		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt), nil
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail), nil
+}
+
+// UpdateUserProfile persists the user's editable base data (first/last/display
+// name, Story 2.1) and returns the updated user. Email and state are never
+// touched. An unknown user ID maps to core.ErrUserNotFound.
+func (r *Repository) UpdateUserProfile(ctx context.Context, userID, firstName, lastName, displayName string) (*core.User, error) {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return nil, err
+	}
+	row, err := r.queries.UpdateUserProfile(ctx, UpdateUserProfileParams{
+		ID:          uid,
+		FirstName:   firstName,
+		LastName:    lastName,
+		DisplayName: displayName,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, core.ErrUserNotFound
+		}
+		return nil, err
+	}
+	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
+		row.PasswordHash, row.State, row.IsMfaEnabled, row.TotpSecretEncrypted,
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail), nil
+}
+
+// StagePendingEmail stores a staged email change (Story 2.1) in a single
+// conditional UPDATE: the address is persisted only while NO OTHER account
+// holds it as its current email or as an already-staged pending_email
+// (case-insensitive). This is the DB-level TOCTOU guard that keeps a racing
+// registration from leaving a mixed collision. Both "no row updated" (the
+// address is taken) and a duplicate-key violation (23505, the pending_email
+// UNIQUE backstop) map to core.ErrEmailInUse.
+func (r *Repository) StagePendingEmail(ctx context.Context, userID, pendingEmail string) (*core.User, error) {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return nil, err
+	}
+	row, err := r.queries.StagePendingEmail(ctx, StagePendingEmailParams{
+		ID:           uid,
+		PendingEmail: pgtype.Text{String: pendingEmail, Valid: true},
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, core.ErrEmailInUse
+		}
+		if isPgUniqueViolation(err) {
+			return nil, core.ErrEmailInUse
+		}
+		return nil, err
+	}
+	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
+		row.PasswordHash, row.State, row.IsMfaEnabled, row.TotpSecretEncrypted,
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail), nil
+}
+
+// ClearPendingEmail clears a staged email change (pending_email -> NULL) for
+// the user. Used by the Epic 2 admin workflow when the staged address becomes
+// the real email or the change is cancelled. Unknown user IDs are a no-op.
+func (r *Repository) ClearPendingEmail(ctx context.Context, userID string) error {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return err
+	}
+	return r.queries.ClearPendingEmail(ctx, uid)
+}
+
+// RefreshSessionUser is a no-op: the postgres session store never caches a
+// user snapshot — GetSessionByTokenHash re-derives it live from users via the
+// JOIN on every Validate — so profile edits are always reflected immediately
+// (review finding: stale session snapshot).
+func (r *Repository) RefreshSessionUser(_ context.Context, _ *core.User) error {
+	return nil
 }
 
 // InsertAuditEvent appends a row to the User-owned append-only audit trail
@@ -295,7 +381,7 @@ func uuidToString(b [16]byte) string {
 }
 
 // userFromRow maps an sqlc user row to the core.User domain entity.
-func userFromRow(id pgtype.UUID, email, displayName, firstName, lastName, passwordHash, state string, isMfa bool, totpSecret pgtype.Text, pendingSecret pgtype.Text, pendingExpiry pgtype.Timestamptz, attributes []byte, createdAt, updatedAt pgtype.Timestamptz) *core.User {
+func userFromRow(id pgtype.UUID, email, displayName, firstName, lastName, passwordHash, state string, isMfa bool, totpSecret pgtype.Text, pendingSecret pgtype.Text, pendingExpiry pgtype.Timestamptz, attributes []byte, createdAt, updatedAt pgtype.Timestamptz, pendingEmail pgtype.Text) *core.User {
 	var attrs map[string]any
 	if len(attributes) > 0 {
 		_ = json.Unmarshal(attributes, &attrs)
@@ -312,9 +398,14 @@ func userFromRow(id pgtype.UUID, email, displayName, firstName, lastName, passwo
 	if pendingExpiry.Valid {
 		expiry = pendingExpiry.Time
 	}
+	staged := ""
+	if pendingEmail.Valid {
+		staged = pendingEmail.String
+	}
 	return &core.User{
 		ID:                         uuidToString(id.Bytes),
 		Email:                      email,
+		PendingEmail:               staged,
 		DisplayName:                displayName,
 		FirstName:                  firstName,
 		LastName:                   lastName,
@@ -344,4 +435,13 @@ func uuidFromString(s string) (pgtype.UUID, error) {
 		return pgtype.UUID{}, err
 	}
 	return pgtype.UUID{Bytes: b, Valid: true}, nil
+}
+
+// isPgUniqueViolation reports whether err is a Postgres unique-violation
+// (SQLSTATE 23505). Matching the structured pgconn.PgError code is reliable —
+// unlike matching the human-readable error string (review finding: pgx 23505
+// mapping).
+func isPgUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
 }

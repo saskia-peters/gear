@@ -73,6 +73,15 @@ describe('Header', () => {
     expect(screen.getByText('Erika Musterfrau')).toBeInTheDocument()
   })
 
+  it('USER_LOGGED_IN_PROFILE_LINK: the logged-in user name links to /profil (Story 2.1)', () => {
+    localStorage.setItem('gear.session_token', 'sesstoken123')
+    localStorage.setItem('gear.display_name', 'Erika Musterfrau')
+    renderHeader()
+    const name = screen.getByText('Erika Musterfrau')
+    expect(name.tagName).toBe('A')
+    expect(name).toHaveAttribute('href', '/profil')
+  })
+
   it('USER_LOGGED_OUT: hides the user name when not authenticated', () => {
     localStorage.clear()
     renderHeader()
@@ -86,6 +95,7 @@ describe('Header', () => {
     localStorage.setItem('gear.display_name', 'Erika Musterfrau')
     renderHeader()
     expect(screen.queryByText('Erika Musterfrau')).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'Erika Musterfrau' })).not.toBeInTheDocument()
   })
 
   it('LOGGED_IN: shows the "Abmelden" logout button', () => {

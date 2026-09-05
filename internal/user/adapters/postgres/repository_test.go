@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -205,6 +206,7 @@ func TestPostgresSessionAndPermissionRepository(t *testing.T) {
 	repo := NewRepository(queries)
 
 	testEmail := "auth.test." + time.Now().Format("20060102150405.000000") + "@gear.local"
+	suffix := time.Now().Format("20060102150405.000000")
 
 	created, err := repo.CreateRegisteredUser(ctx, testEmail, "Auth Test", "Auth", "Test", "$argon2id$v=19$m=65536,t=3,p=4$c2FsdHNhbHRzYWx0$8U3f5yO8JUpfGT5WmljHhL8n2nWlVEhL2fj7EXpS9gM")
 	if err != nil {
@@ -216,7 +218,8 @@ func TestPostgresSessionAndPermissionRepository(t *testing.T) {
 
 	// 1. CreateSession + GetSessionByTokenHash round-trip.
 	expiry := time.Now().UTC().Add(time.Hour)
-	sess, err := repo.CreateSession(ctx, created.ID, "hash-of-raw-token", expiry)
+	sessHash := "hash-of-raw-token." + suffix
+	sess, err := repo.CreateSession(ctx, created.ID, sessHash, expiry)
 	if err != nil {
 		t.Fatalf("CreateSession failed: %v", err)
 	}
@@ -224,7 +227,7 @@ func TestPostgresSessionAndPermissionRepository(t *testing.T) {
 		t.Errorf("session user id = %q, want %q", sess.UserID, created.ID)
 	}
 
-	fetched, err := repo.GetSessionByTokenHash(ctx, "hash-of-raw-token")
+	fetched, err := repo.GetSessionByTokenHash(ctx, sessHash)
 	if err != nil {
 		t.Fatalf("GetSessionByTokenHash failed: %v", err)
 	}
@@ -275,10 +278,10 @@ func TestPostgresSessionAndPermissionRepository(t *testing.T) {
 
 	// 4. DeleteSessionByTokenHash invalidates the session server-side,
 	// atomically by hashed token.
-	if err := repo.DeleteSessionByTokenHash(ctx, "hash-of-raw-token"); err != nil {
+	if err := repo.DeleteSessionByTokenHash(ctx, sessHash); err != nil {
 		t.Fatalf("DeleteSessionByTokenHash failed: %v", err)
 	}
-	if _, err := repo.GetSessionByTokenHash(ctx, "hash-of-raw-token"); err != core.ErrSessionNotFound {
+	if _, err := repo.GetSessionByTokenHash(ctx, sessHash); err != core.ErrSessionNotFound {
 		t.Errorf("deleted token error = %v, want core.ErrSessionNotFound", err)
 	}
 }
@@ -306,6 +309,7 @@ func TestPostgresTotpRepository(t *testing.T) {
 	repo := NewRepository(queries)
 
 	testEmail := "totp.test." + time.Now().Format("20060102150405.000000") + "@gear.local"
+	suffix := time.Now().Format("20060102150405.000000")
 	created, err := repo.CreateRegisteredUser(ctx, testEmail, "TOTP Test", "TOTP", "Test", "$argon2id$v=19$m=65536,t=3,p=4$c2FsdHNhbHRzYWx0$8U3f5yO8JUpfGT5WmljHhL8n2nWlVEhL2fj7EXpS9gM")
 	if err != nil {
 		t.Fatalf("CreateRegisteredUser failed: %v", err)
@@ -336,11 +340,12 @@ func TestPostgresTotpRepository(t *testing.T) {
 	// 1b. A session created for the MFA-enabled user must carry the encrypted
 	// secret on its user snapshot so MFA disable can validate a current code
 	// (FR-4). This pins the JOIN in GetSessionByTokenHash.
-	sess, err := repo.CreateSession(ctx, created.ID, "hash-of-totp-session", time.Now().UTC().Add(time.Hour))
+	totpSessHash := "hash-of-totp-session." + suffix
+	sess, err := repo.CreateSession(ctx, created.ID, totpSessHash, time.Now().UTC().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("CreateSession failed: %v", err)
 	}
-	sessFetched, err := repo.GetSessionByTokenHash(ctx, "hash-of-totp-session")
+	sessFetched, err := repo.GetSessionByTokenHash(ctx, totpSessHash)
 	if err != nil {
 		t.Fatalf("GetSessionByTokenHash failed: %v", err)
 	}
@@ -387,11 +392,12 @@ func TestPostgresTotpRepository(t *testing.T) {
 
 	// 3b. The session user snapshot carries the pending enrollment so the
 	// confirm step can act on it without an extra lookup.
-	sess2, err := repo.CreateSession(ctx, created.ID, "hash-of-pending-session", time.Now().UTC().Add(time.Hour))
+	pendingSessHash := "hash-of-pending-session." + suffix
+	sess2, err := repo.CreateSession(ctx, created.ID, pendingSessHash, time.Now().UTC().Add(time.Hour))
 	if err != nil {
 		t.Fatalf("CreateSession failed: %v", err)
 	}
-	sessFetched2, err := repo.GetSessionByTokenHash(ctx, "hash-of-pending-session")
+	sessFetched2, err := repo.GetSessionByTokenHash(ctx, pendingSessHash)
 	if err != nil {
 		t.Fatalf("GetSessionByTokenHash failed: %v", err)
 	}
@@ -436,6 +442,7 @@ func TestPostgresSessionRevocationRepository(t *testing.T) {
 	repo := NewRepository(queries)
 
 	testEmail := "revoke.test." + time.Now().Format("20060102150405.000000") + "@gear.local"
+	suffix := time.Now().Format("20060102150405.000000")
 	created, err := repo.CreateRegisteredUser(ctx, testEmail, "Revoke Test", "Revoke", "Test", "$argon2id$v=19$m=65536,t=3,p=4$c2FsdHNhbHRzYWx0$8U3f5yO8JUpfGT5WmljHhL8n2nWlVEhL2fj7EXpS9gM")
 	if err != nil {
 		t.Fatalf("CreateRegisteredUser failed: %v", err)
@@ -444,23 +451,24 @@ func TestPostgresSessionRevocationRepository(t *testing.T) {
 	// Create three sessions.
 	expiry := time.Now().UTC().Add(time.Hour)
 	for i := 1; i <= 3; i++ {
-		hash := fmt.Sprintf("hash-revoke-%d", i)
+		hash := fmt.Sprintf("hash-revoke-%d.%s", i, suffix)
 		if _, err := repo.CreateSession(ctx, created.ID, hash, expiry); err != nil {
 			t.Fatalf("CreateSession(%s) failed: %v", hash, err)
 		}
 	}
 
 	// DeleteSessionsByUserExcept keeps the excepted session.
-	if err := repo.DeleteSessionsByUserExcept(ctx, created.ID, "hash-revoke-2"); err != nil {
+	revokeExcept := fmt.Sprintf("hash-revoke-2.%s", suffix)
+	if err := repo.DeleteSessionsByUserExcept(ctx, created.ID, revokeExcept); err != nil {
 		t.Fatalf("DeleteSessionsByUserExcept failed: %v", err)
 	}
-	if _, err := repo.GetSessionByTokenHash(ctx, "hash-revoke-2"); err != nil {
+	if _, err := repo.GetSessionByTokenHash(ctx, revokeExcept); err != nil {
 		t.Errorf("excepted session must survive, got %v", err)
 	}
-	if _, err := repo.GetSessionByTokenHash(ctx, "hash-revoke-1"); !errors.Is(err, core.ErrSessionNotFound) {
+	if _, err := repo.GetSessionByTokenHash(ctx, fmt.Sprintf("hash-revoke-1.%s", suffix)); !errors.Is(err, core.ErrSessionNotFound) {
 		t.Errorf("non-excepted session must be revoked, got %v", err)
 	}
-	if _, err := repo.GetSessionByTokenHash(ctx, "hash-revoke-3"); !errors.Is(err, core.ErrSessionNotFound) {
+	if _, err := repo.GetSessionByTokenHash(ctx, fmt.Sprintf("hash-revoke-3.%s", suffix)); !errors.Is(err, core.ErrSessionNotFound) {
 		t.Errorf("non-excepted session must be revoked, got %v", err)
 	}
 
@@ -468,7 +476,7 @@ func TestPostgresSessionRevocationRepository(t *testing.T) {
 	if err := repo.DeleteSessionsByUser(ctx, created.ID); err != nil {
 		t.Fatalf("DeleteSessionsByUser failed: %v", err)
 	}
-	if _, err := repo.GetSessionByTokenHash(ctx, "hash-revoke-2"); !errors.Is(err, core.ErrSessionNotFound) {
+	if _, err := repo.GetSessionByTokenHash(ctx, revokeExcept); !errors.Is(err, core.ErrSessionNotFound) {
 		t.Errorf("all sessions must be revoked, got %v", err)
 	}
 }
@@ -496,6 +504,7 @@ func TestPostgresChangePasswordRepository(t *testing.T) {
 	repo := NewRepository(queries)
 
 	testEmail := "changepw.test." + time.Now().Format("20060102150405.000000") + "@gear.local"
+	suffix := time.Now().Format("20060102150405.000000")
 	created, err := repo.CreateRegisteredUser(ctx, testEmail, "Password Change Test", "Password", "Test", "$argon2id$v=19$oldhash")
 	if err != nil {
 		t.Fatalf("CreateRegisteredUser failed: %v", err)
@@ -527,10 +536,11 @@ func TestPostgresChangePasswordRepository(t *testing.T) {
 	// snapshot so the change-password flow can verify the current password
 	// server-side (FR-25), like the MFA secrets for DisableMFA. This pins the
 	// JOIN in GetSessionByTokenHash.
-	if _, err := repo.CreateSession(ctx, created.ID, "hash-of-changepw-session", time.Now().UTC().Add(time.Hour)); err != nil {
+	changepwSessHash := "hash-of-changepw-session." + suffix
+	if _, err := repo.CreateSession(ctx, created.ID, changepwSessHash, time.Now().UTC().Add(time.Hour)); err != nil {
 		t.Fatalf("CreateSession failed: %v", err)
 	}
-	sessFetched, err := repo.GetSessionByTokenHash(ctx, "hash-of-changepw-session")
+	sessFetched, err := repo.GetSessionByTokenHash(ctx, changepwSessHash)
 	if err != nil {
 		t.Fatalf("GetSessionByTokenHash failed: %v", err)
 	}
@@ -591,5 +601,142 @@ func TestPostgresChangePasswordRepository(t *testing.T) {
 	}
 	if !actorIsNull {
 		t.Error("audit row actor must be anonymized (NULL) after the user is deleted")
+	}
+}
+
+func TestPostgresProfileRepository(t *testing.T) {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Skipf("skipping db integration test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping db integration test (db ping failed): %v", err)
+	}
+
+	queries := New(pool)
+	repo := NewRepository(queries)
+
+	suffix := time.Now().Format("20060102150405.000000")
+	emailA := "profile.a." + suffix + "@gear.local"
+	emailB := "profile.b." + suffix + "@gear.local"
+	stagedEmail := "neu.a." + suffix + "@example.com"
+
+	a, err := repo.CreateRegisteredUser(ctx, emailA, "Profil A", "Profil", "A", "$argon2id$v=19$dummyhash")
+	if err != nil {
+		t.Fatalf("CreateRegisteredUser(A) failed: %v", err)
+	}
+	b, err := repo.CreateRegisteredUser(ctx, emailB, "Profil B", "Profil", "B", "$argon2id$v=19$dummyhash")
+	if err != nil {
+		t.Fatalf("CreateRegisteredUser(B) failed: %v", err)
+	}
+
+	// 1. UpdateUserProfile persists the editable base data and returns the
+	// updated user; email and state are untouched (Story 2.1).
+	updated, err := repo.UpdateUserProfile(ctx, a.ID, "Erika", "Musterfrau", "Erika")
+	if err != nil {
+		t.Fatalf("UpdateUserProfile failed: %v", err)
+	}
+	if updated.FirstName != "Erika" || updated.LastName != "Musterfrau" || updated.DisplayName != "Erika" {
+		t.Errorf("updated names = (%q,%q,%q), want (Erika, Musterfrau, Erika)", updated.FirstName, updated.LastName, updated.DisplayName)
+	}
+	if updated.Email != emailA || updated.State != core.StatePendingApproval {
+		t.Errorf("email/state must be untouched, got (%q, %q)", updated.Email, updated.State)
+	}
+	if updated.ID != a.ID {
+		t.Errorf("updated id = %q, want %q", updated.ID, a.ID)
+	}
+
+	// 2. StagePendingEmail persists the staged address; the current email stays
+	// the login identifier.
+	staged, err := repo.StagePendingEmail(ctx, a.ID, stagedEmail)
+	if err != nil {
+		t.Fatalf("StagePendingEmail failed: %v", err)
+	}
+	if staged.PendingEmail != stagedEmail {
+		t.Errorf("pending_email = %q, want neu.a@example.com", staged.PendingEmail)
+	}
+	if staged.Email != emailA {
+		t.Errorf("current email = %q, want unchanged %q", staged.Email, emailA)
+	}
+
+	// The session user snapshot carries pending_email so GetProfile can serve
+	// it without a DB round-trip (Story 2.1).
+	profileSessHash := "hash-of-profile-session." + suffix
+	if _, err := repo.CreateSession(ctx, a.ID, profileSessHash, time.Now().UTC().Add(time.Hour)); err != nil {
+		t.Fatalf("CreateSession failed: %v", err)
+	}
+	sess, err := repo.GetSessionByTokenHash(ctx, profileSessHash)
+	if err != nil {
+		t.Fatalf("GetSessionByTokenHash failed: %v", err)
+	}
+	if sess.User == nil || sess.User.PendingEmail != stagedEmail {
+		t.Errorf("session user pending_email = %+v, want neu.a@example.com", sess.User)
+	}
+	if sess.User == nil || sess.User.FirstName != "Erika" {
+		t.Errorf("session user first_name = %+v, want Erika", sess.User)
+	}
+
+	// 3. The conditional UPDATE (and the pending_email UNIQUE backstop) rejects
+	// an address another user already staged (EMAIL_STAGE_DUPLICATE) with
+	// core.ErrEmailInUse.
+	if _, err := repo.StagePendingEmail(ctx, b.ID, stagedEmail); !errors.Is(err, core.ErrEmailInUse) {
+		t.Errorf("staging another user's pending_email err = %v, want ErrEmailInUse", err)
+	}
+
+	// 3b. A CASE-VARIANT of another account's CURRENT email is rejected by the
+	// conditional UPDATE's lower() comparison (TOCTOU guard): the mixed
+	// pending_email == other's email collision cannot happen.
+	caseVariant := strings.ToUpper(emailB)
+	if _, err := repo.StagePendingEmail(ctx, a.ID, caseVariant); !errors.Is(err, core.ErrEmailInUse) {
+		t.Errorf("staging a case-variant of an existing email err = %v, want ErrEmailInUse", err)
+	}
+
+	// 3c. A CASE-VARIANT of another account's already-staged pending_email is
+	// rejected too (lower(pending_email) in the NOT EXISTS guard).
+	if _, err := repo.StagePendingEmail(ctx, b.ID, strings.ToUpper(stagedEmail)); !errors.Is(err, core.ErrEmailInUse) {
+		t.Errorf("staging a case-variant of another user's pending_email err = %v, want ErrEmailInUse", err)
+	}
+
+	// 4. The users.email UNIQUE constraint still governs the REAL login address:
+	// a second account cannot register an address that is already in use, and
+	// the adapter maps the 23505 violation to core.ErrUserAlreadyExists (pgx
+	// PgError mapping, not string matching).
+	if _, err := repo.CreateRegisteredUser(ctx, emailB, "Profil B2", "Profil", "B2", "$argon2id$v=19$dummyhash"); !errors.Is(err, core.ErrUserAlreadyExists) {
+		t.Errorf("re-registering an existing email err = %v, want core.ErrUserAlreadyExists", err)
+	}
+
+	// 5. ClearPendingEmail clears the staged address (Epic 2 admin workflow).
+	if err := repo.ClearPendingEmail(ctx, a.ID); err != nil {
+		t.Fatalf("ClearPendingEmail failed: %v", err)
+	}
+	fetched, err := repo.GetUserByEmail(ctx, emailA)
+	if err != nil {
+		t.Fatalf("GetUserByEmail failed: %v", err)
+	}
+	if fetched == nil || fetched.PendingEmail != "" {
+		t.Errorf("pending_email after clear = %+v, want empty", fetched)
+	}
+	if fetched == nil || fetched.Email != emailA {
+		t.Errorf("current email after clear = %+v, want %q", fetched, emailA)
+	}
+
+	// 6. UpdateUserProfile on an unknown user maps to ErrUserNotFound.
+	if _, err := repo.UpdateUserProfile(ctx, "00000000-0000-0000-0000-000000000000", "X", "Y", "Z"); !errors.Is(err, core.ErrUserNotFound) {
+		t.Errorf("UpdateUserProfile(unknown) err = %v, want ErrUserNotFound", err)
+	}
+	// StagePendingEmail on an unknown user affects zero rows → the in-use case
+	// (review finding: "no row updated" == ErrEmailInUse).
+	if _, err := repo.StagePendingEmail(ctx, "00000000-0000-0000-0000-000000000000", "x@example.com"); !errors.Is(err, core.ErrEmailInUse) {
+		t.Errorf("StagePendingEmail(unknown) err = %v, want ErrEmailInUse", err)
 	}
 }

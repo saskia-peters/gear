@@ -30,6 +30,13 @@ type Repository interface {
 	// (NFR-O1/NFR-O2, spine table 11).
 	UpdateUserPassword(ctx context.Context, userID, passwordHash string) (*User, error)
 	InsertAuditEvent(ctx context.Context, userID, operation string) error
+	// Profile base-data persistence (Story 2.1): UpdateUserProfile writes the
+	// editable fields; StagePendingEmail stores a staged email awaiting admin
+	// approval (the user stays active on the current email); ClearPendingEmail
+	// clears a staged change (Epic 2 admin workflow).
+	UpdateUserProfile(ctx context.Context, userID, firstName, lastName, displayName string) (*User, error)
+	StagePendingEmail(ctx context.Context, userID, pendingEmail string) (*User, error)
+	ClearPendingEmail(ctx context.Context, userID string) error
 }
 
 // SecretCipher encrypts/decrypts the TOTP shared secret at rest (NFR-S4). The

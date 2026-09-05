@@ -7,6 +7,7 @@ import { LoginPage } from './pages/LoginPage.tsx'
 import { MfaPage } from './pages/MfaPage.tsx'
 import { RegisterPage } from './pages/RegisterPage.tsx'
 import { ChangePasswordPage } from './pages/ChangePasswordPage.tsx'
+import { ProfilePage } from './pages/ProfilePage.tsx'
 import { NotFoundPage } from './pages/NotFoundPage.tsx'
 import { SESSION_TOKEN_KEY } from './auth/authState.ts'
 
@@ -45,6 +46,14 @@ export function AppRoutes() {
         element={
           <RequireAuth>
             <ChangePasswordPage />
+          </RequireAuth>
+        }
+      />
+      <Route
+        path="/profil"
+        element={
+          <RequireAuth>
+            <ProfilePage />
           </RequireAuth>
         }
       />

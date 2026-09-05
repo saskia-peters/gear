@@ -38,6 +38,18 @@ export function getDisplayName(): string | null {
   return localStorage.getItem(DISPLAY_NAME_KEY)
 }
 
+// setDisplayName refreshes the cached display name used by the header greeting
+// (e.g. after the user saves base-data edits on the profile page, Story 2.1).
+// The server remains the source of truth; this only keeps the client cache in
+// sync.
+export function setDisplayName(displayName: string): void {
+  if (displayName) {
+    localStorage.setItem(DISPLAY_NAME_KEY, displayName)
+  } else {
+    localStorage.removeItem(DISPLAY_NAME_KEY)
+  }
+}
+
 export function clearAuthState(): void {
   localStorage.removeItem(SESSION_TOKEN_KEY)
   localStorage.removeItem(MFA_ENABLED_KEY)

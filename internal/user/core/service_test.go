@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 )
@@ -22,6 +23,15 @@ type mockRepo struct {
 	audit       map[string][]string
 	auditErr    error
 	updateCalls int
+	// mismatchProfileUser makes UpdateUserProfile/StagePendingEmail return a
+	// DIFFERENT user than the caller, exercising the self-ownership
+	// defense-in-depth guard (AD-12 → ErrForbidden).
+	mismatchProfileUser bool
+	// newObjectOnProfile makes UpdateUserProfile/StagePendingEmail return a
+	// FRESH user value (like the postgres adapter's userFromRow) instead of the
+	// mutated in-memory pointer, so tests can prove the session snapshot is
+	// refreshed (review finding: stale session snapshot).
+	newObjectOnProfile bool
 }
 
 func newMockRepo() *mockRepo {
@@ -205,6 +215,71 @@ func (m *mockRepo) InsertAuditEvent(_ context.Context, userID, operation string)
 	return nil
 }
 
+// UpdateUserProfile persists the user's editable base data (first/last/display
+// name, Story 2.1) and returns the updated user. An unknown user ID maps to
+// ErrUserNotFound.
+func (m *mockRepo) UpdateUserProfile(_ context.Context, userID, firstName, lastName, displayName string) (*User, error) {
+	m.updateCalls++
+	for _, u := range m.users {
+		if u.ID == userID {
+			u.FirstName = firstName
+			u.LastName = lastName
+			u.DisplayName = displayName
+			if m.mismatchProfileUser {
+				return &User{ID: "other-user", Email: "other@example.com"}, nil
+			}
+			if m.newObjectOnProfile {
+				clone := *u
+				return &clone, nil
+			}
+			return u, nil
+		}
+	}
+	return nil, ErrUserNotFound
+}
+
+// StagePendingEmail stores a staged email change (Story 2.1) on the in-memory
+// user. It mirrors the postgres adapter's conditional UPDATE: the staging is
+// refused (ErrEmailInUse, "no row updated") while ANY other account holds the
+// address as its current email or as an already-staged pending_email,
+// compared case-insensitively. A missing target user also maps to
+// ErrEmailInUse (the conditional UPDATE affects zero rows).
+func (m *mockRepo) StagePendingEmail(_ context.Context, userID, pendingEmail string) (*User, error) {
+	var target *User
+	for _, u := range m.users {
+		if u.ID == userID {
+			target = u
+			continue
+		}
+		if strings.EqualFold(u.Email, pendingEmail) || strings.EqualFold(u.PendingEmail, pendingEmail) {
+			return nil, ErrEmailInUse
+		}
+	}
+	if target == nil {
+		return nil, ErrEmailInUse
+	}
+	if m.mismatchProfileUser {
+		return &User{ID: "other-user", Email: "other@example.com"}, nil
+	}
+	target.PendingEmail = pendingEmail
+	if m.newObjectOnProfile {
+		clone := *target
+		return &clone, nil
+	}
+	return target, nil
+}
+
+// ClearPendingEmail clears a staged email change (pending_email -> NULL).
+func (m *mockRepo) ClearPendingEmail(_ context.Context, userID string) error {
+	for _, u := range m.users {
+		if u.ID == userID {
+			u.PendingEmail = ""
+			return nil
+		}
+	}
+	return ErrUserNotFound
+}
+
 type mockHasher struct {
 	hashCalls   int
 	verifyCalls int
@@ -300,6 +375,19 @@ func (m *mockSessionStore) DeleteSessionsByUserExcept(_ context.Context, userID,
 	for tokenHash, s := range m.sessions {
 		if s.UserID == userID && tokenHash != exceptTokenHash {
 			delete(m.sessions, tokenHash)
+		}
+	}
+	return nil
+}
+
+// RefreshSessionUser replaces the user snapshot on every session of the given
+// user so a subsequent Validate returns the fresh profile (Story 2.1). The
+// mockSessionStore re-reads m.users on GetSessionByTokenHash anyway, but this
+// keeps the store contract honest for session stores that cache strictly.
+func (m *mockSessionStore) RefreshSessionUser(_ context.Context, user *User) error {
+	for _, s := range m.sessions {
+		if s.UserID == user.ID {
+			s.User = user
 		}
 	}
 	return nil

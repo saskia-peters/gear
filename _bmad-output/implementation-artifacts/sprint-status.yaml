@@ -44,6 +44,7 @@ development_status:
   1-5-progressive-login-lockout: done
   1-6-optional-totp-multi-factor-authentication: review
   1-7-change-own-password: review
+  profile-page-edit-base-data: done
   1-8-self-service-password-reset-forgot-password: backlog
   1-9-flexible-user-attributes: backlog
   1-10-dual-admin-credential-recovery: backlog

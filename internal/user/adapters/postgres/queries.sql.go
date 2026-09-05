@@ -22,6 +22,21 @@ func (q *Queries) ClearLoginAttempts(ctx context.Context, email string) error {
 	return err
 }
 
+const clearPendingEmail = `-- name: ClearPendingEmail :exec
+UPDATE users
+SET pending_email = NULL,
+    updated_at    = now()
+WHERE id = $1
+`
+
+// Clear a staged email change (pending_email -> NULL). Used by the Epic 2
+// admin workflow when the staged email becomes the real email or the change is
+// cancelled/rejected. Never touches the current email.
+func (q *Queries) ClearPendingEmail(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, clearPendingEmail, id)
+	return err
+}
+
 const clearUserPendingTotpSecret = `-- name: ClearUserPendingTotpSecret :exec
 UPDATE users
 SET pending_totp_secret_encrypted = NULL,
@@ -69,7 +84,7 @@ INSERT INTO users (
     $5,
     'pending_approval'
 )
-RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email
 `
 
 type CreateRegisteredUserParams struct {
@@ -95,6 +110,7 @@ type CreateRegisteredUserRow struct {
 	Attributes                 []byte             `json:"attributes"`
 	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt                  pgtype.Timestamptz `json:"updated_at"`
+	PendingEmail               pgtype.Text        `json:"pending_email"`
 }
 
 func (q *Queries) CreateRegisteredUser(ctx context.Context, arg CreateRegisteredUserParams) (CreateRegisteredUserRow, error) {
@@ -121,6 +137,7 @@ func (q *Queries) CreateRegisteredUser(ctx context.Context, arg CreateRegistered
 		&i.Attributes,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.PendingEmail,
 	)
 	return i, err
 }
@@ -237,7 +254,7 @@ func (q *Queries) GetPermissionByCode(ctx context.Context, code string) (GetPerm
 
 const getSessionByTokenHash = `-- name: GetSessionByTokenHash :one
 SELECT s.id, s.user_id, s.token_hash, s.expires_at, s.created_at,
-       u.email, u.display_name, u.first_name, u.last_name, u.state, u.is_mfa_enabled, u.password_hash, u.totp_secret_encrypted, u.pending_totp_secret_encrypted, u.pending_totp_expires_at, u.attributes
+       u.email, u.display_name, u.first_name, u.last_name, u.state, u.is_mfa_enabled, u.password_hash, u.totp_secret_encrypted, u.pending_totp_secret_encrypted, u.pending_totp_expires_at, u.attributes, u.pending_email
 FROM sessions s
 JOIN users u ON u.id = s.user_id
 WHERE s.token_hash = $1
@@ -260,6 +277,7 @@ type GetSessionByTokenHashRow struct {
 	PendingTotpSecretEncrypted pgtype.Text        `json:"pending_totp_secret_encrypted"`
 	PendingTotpExpiresAt       pgtype.Timestamptz `json:"pending_totp_expires_at"`
 	Attributes                 []byte             `json:"attributes"`
+	PendingEmail               pgtype.Text        `json:"pending_email"`
 }
 
 // The session user snapshot carries the password hash so the authenticated
@@ -286,12 +304,13 @@ func (q *Queries) GetSessionByTokenHash(ctx context.Context, tokenHash string) (
 		&i.PendingTotpSecretEncrypted,
 		&i.PendingTotpExpiresAt,
 		&i.Attributes,
+		&i.PendingEmail,
 	)
 	return i, err
 }
 
 const getUserByEmail = `-- name: GetUserByEmail :one
-SELECT id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at
+SELECT id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email
 FROM users
 WHERE email = $1
 `
@@ -311,6 +330,7 @@ type GetUserByEmailRow struct {
 	Attributes                 []byte             `json:"attributes"`
 	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt                  pgtype.Timestamptz `json:"updated_at"`
+	PendingEmail               pgtype.Text        `json:"pending_email"`
 }
 
 func (q *Queries) GetUserByEmail(ctx context.Context, email string) (GetUserByEmailRow, error) {
@@ -331,6 +351,7 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (GetUserByEm
 		&i.Attributes,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.PendingEmail,
 	)
 	return i, err
 }
@@ -500,12 +521,83 @@ func (q *Queries) SetUserTotpSecret(ctx context.Context, arg SetUserTotpSecretPa
 	return err
 }
 
+const stagePendingEmail = `-- name: StagePendingEmail :one
+UPDATE users
+SET pending_email = $2,
+    updated_at    = now()
+WHERE users.id = $1
+  AND NOT EXISTS (
+      SELECT 1 FROM users AS other
+      WHERE other.id <> $1
+        AND (lower(other.email) = lower($2) OR lower(other.pending_email) = lower($2))
+  )
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email
+`
+
+type StagePendingEmailParams struct {
+	ID           pgtype.UUID `json:"id"`
+	PendingEmail pgtype.Text `json:"pending_email"`
+}
+
+type StagePendingEmailRow struct {
+	ID                         pgtype.UUID        `json:"id"`
+	Email                      string             `json:"email"`
+	DisplayName                string             `json:"display_name"`
+	FirstName                  string             `json:"first_name"`
+	LastName                   string             `json:"last_name"`
+	PasswordHash               string             `json:"password_hash"`
+	State                      string             `json:"state"`
+	IsMfaEnabled               bool               `json:"is_mfa_enabled"`
+	TotpSecretEncrypted        pgtype.Text        `json:"totp_secret_encrypted"`
+	PendingTotpSecretEncrypted pgtype.Text        `json:"pending_totp_secret_encrypted"`
+	PendingTotpExpiresAt       pgtype.Timestamptz `json:"pending_totp_expires_at"`
+	Attributes                 []byte             `json:"attributes"`
+	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt                  pgtype.Timestamptz `json:"updated_at"`
+	PendingEmail               pgtype.Text        `json:"pending_email"`
+}
+
+// Persist a STAGED email change (Story 2.1): the new address is stored in
+// pending_email and the user stays ACTIVE on the current email until an admin
+// approves the change (Epic 2 admin workflow).
+//
+// The UPDATE is conditional (review finding: TOCTOU email-collision guard): it
+// only proceeds while NO OTHER account holds the address as its current email
+// OR as an already-staged pending_email, compared case-insensitively with
+// lower(). This closes the window where a registration racing between the
+// core's GetUserByEmail pre-check and this UPDATE could leave pending_email
+// equal to another account's email. A row that matches no other account is
+// updated; otherwise zero rows are affected and the caller maps it to
+// ErrEmailInUse.
+func (q *Queries) StagePendingEmail(ctx context.Context, arg StagePendingEmailParams) (StagePendingEmailRow, error) {
+	row := q.db.QueryRow(ctx, stagePendingEmail, arg.ID, arg.PendingEmail)
+	var i StagePendingEmailRow
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.DisplayName,
+		&i.FirstName,
+		&i.LastName,
+		&i.PasswordHash,
+		&i.State,
+		&i.IsMfaEnabled,
+		&i.TotpSecretEncrypted,
+		&i.PendingTotpSecretEncrypted,
+		&i.PendingTotpExpiresAt,
+		&i.Attributes,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.PendingEmail,
+	)
+	return i, err
+}
+
 const updateUserPassword = `-- name: UpdateUserPassword :one
 UPDATE users
 SET password_hash = $2,
     updated_at    = now()
 WHERE id = $1
-RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email
 `
 
 type UpdateUserPasswordParams struct {
@@ -528,6 +620,7 @@ type UpdateUserPasswordRow struct {
 	Attributes                 []byte             `json:"attributes"`
 	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt                  pgtype.Timestamptz `json:"updated_at"`
+	PendingEmail               pgtype.Text        `json:"pending_email"`
 }
 
 // Persist a new password hash for a user (FR-25). The plaintext password is
@@ -551,6 +644,73 @@ func (q *Queries) UpdateUserPassword(ctx context.Context, arg UpdateUserPassword
 		&i.Attributes,
 		&i.CreatedAt,
 		&i.UpdatedAt,
+		&i.PendingEmail,
+	)
+	return i, err
+}
+
+const updateUserProfile = `-- name: UpdateUserProfile :one
+UPDATE users
+SET first_name   = $2,
+    last_name    = $3,
+    display_name = $4,
+    updated_at   = now()
+WHERE id = $1
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email
+`
+
+type UpdateUserProfileParams struct {
+	ID          pgtype.UUID `json:"id"`
+	FirstName   string      `json:"first_name"`
+	LastName    string      `json:"last_name"`
+	DisplayName string      `json:"display_name"`
+}
+
+type UpdateUserProfileRow struct {
+	ID                         pgtype.UUID        `json:"id"`
+	Email                      string             `json:"email"`
+	DisplayName                string             `json:"display_name"`
+	FirstName                  string             `json:"first_name"`
+	LastName                   string             `json:"last_name"`
+	PasswordHash               string             `json:"password_hash"`
+	State                      string             `json:"state"`
+	IsMfaEnabled               bool               `json:"is_mfa_enabled"`
+	TotpSecretEncrypted        pgtype.Text        `json:"totp_secret_encrypted"`
+	PendingTotpSecretEncrypted pgtype.Text        `json:"pending_totp_secret_encrypted"`
+	PendingTotpExpiresAt       pgtype.Timestamptz `json:"pending_totp_expires_at"`
+	Attributes                 []byte             `json:"attributes"`
+	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt                  pgtype.Timestamptz `json:"updated_at"`
+	PendingEmail               pgtype.Text        `json:"pending_email"`
+}
+
+// Persist the user's editable base data (first/last/display name, Story 2.1):
+// changes take effect immediately for the authenticated user. Only the caller-
+// supplied values are written; email and state are never touched here.
+func (q *Queries) UpdateUserProfile(ctx context.Context, arg UpdateUserProfileParams) (UpdateUserProfileRow, error) {
+	row := q.db.QueryRow(ctx, updateUserProfile,
+		arg.ID,
+		arg.FirstName,
+		arg.LastName,
+		arg.DisplayName,
+	)
+	var i UpdateUserProfileRow
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.DisplayName,
+		&i.FirstName,
+		&i.LastName,
+		&i.PasswordHash,
+		&i.State,
+		&i.IsMfaEnabled,
+		&i.TotpSecretEncrypted,
+		&i.PendingTotpSecretEncrypted,
+		&i.PendingTotpExpiresAt,
+		&i.Attributes,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.PendingEmail,
 	)
 	return i, err
 }

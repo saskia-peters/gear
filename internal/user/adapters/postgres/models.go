@@ -68,6 +68,7 @@ type User struct {
 	TotpSecretEncrypted        pgtype.Text        `json:"totp_secret_encrypted"`
 	PendingTotpSecretEncrypted pgtype.Text        `json:"pending_totp_secret_encrypted"`
 	PendingTotpExpiresAt       pgtype.Timestamptz `json:"pending_totp_expires_at"`
+	PendingEmail               pgtype.Text        `json:"pending_email"`
 }
 
 type UserPermission struct {

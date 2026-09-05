@@ -32,10 +32,10 @@ INSERT INTO users (
     $5,
     'pending_approval'
 )
-RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at;
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email;
 
 -- name: GetUserByEmail :one
-SELECT id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at
+SELECT id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email
 FROM users
 WHERE email = $1;
 
@@ -50,7 +50,7 @@ RETURNING id, user_id, token_hash, expires_at, created_at;
 -- as it carries the encrypted TOTP secret for MFA disable (FR-4). The hash is
 -- never serialized to clients (core.User.PasswordHash is json:"-").
 SELECT s.id, s.user_id, s.token_hash, s.expires_at, s.created_at,
-       u.email, u.display_name, u.first_name, u.last_name, u.state, u.is_mfa_enabled, u.password_hash, u.totp_secret_encrypted, u.pending_totp_secret_encrypted, u.pending_totp_expires_at, u.attributes
+       u.email, u.display_name, u.first_name, u.last_name, u.state, u.is_mfa_enabled, u.password_hash, u.totp_secret_encrypted, u.pending_totp_secret_encrypted, u.pending_totp_expires_at, u.attributes, u.pending_email
 FROM sessions s
 JOIN users u ON u.id = s.user_id
 WHERE s.token_hash = $1;
@@ -167,7 +167,52 @@ UPDATE users
 SET password_hash = $2,
     updated_at    = now()
 WHERE id = $1
-RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at;
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email;
+
+-- name: UpdateUserProfile :one
+-- Persist the user's editable base data (first/last/display name, Story 2.1):
+-- changes take effect immediately for the authenticated user. Only the caller-
+-- supplied values are written; email and state are never touched here.
+UPDATE users
+SET first_name   = $2,
+    last_name    = $3,
+    display_name = $4,
+    updated_at   = now()
+WHERE id = $1
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email;
+
+-- name: StagePendingEmail :one
+-- Persist a STAGED email change (Story 2.1): the new address is stored in
+-- pending_email and the user stays ACTIVE on the current email until an admin
+-- approves the change (Epic 2 admin workflow).
+--
+-- The UPDATE is conditional (review finding: TOCTOU email-collision guard): it
+-- only proceeds while NO OTHER account holds the address as its current email
+-- OR as an already-staged pending_email, compared case-insensitively with
+-- lower(). This closes the window where a registration racing between the
+-- core's GetUserByEmail pre-check and this UPDATE could leave pending_email
+-- equal to another account's email. A row that matches no other account is
+-- updated; otherwise zero rows are affected and the caller maps it to
+-- ErrEmailInUse.
+UPDATE users
+SET pending_email = $2,
+    updated_at    = now()
+WHERE users.id = $1
+  AND NOT EXISTS (
+      SELECT 1 FROM users AS other
+      WHERE other.id <> $1
+        AND (lower(other.email) = lower($2) OR lower(other.pending_email) = lower($2))
+  )
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email;
+
+-- name: ClearPendingEmail :exec
+-- Clear a staged email change (pending_email -> NULL). Used by the Epic 2
+-- admin workflow when the staged email becomes the real email or the change is
+-- cancelled/rejected. Never touches the current email.
+UPDATE users
+SET pending_email = NULL,
+    updated_at    = now()
+WHERE id = $1;
 
 -- name: InsertAuditEvent :exec
 -- Append a row to the User-owned audit trail (NFR-O1/NFR-O2, spine table 11):

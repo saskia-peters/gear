@@ -57,6 +57,10 @@ const (
 type User struct {
 	ID           string         `json:"id"`
 	Email        string         `json:"email"`
+	// PendingEmail holds a staged email change awaiting admin approval (Story
+	// 2.1). Until approval the account stays active on Email, which remains the
+	// login identifier. Empty means no staged change.
+	PendingEmail string         `json:"pending_email,omitempty"`
 	DisplayName  string         `json:"display_name"`
 	FirstName    string         `json:"first_name"`
 	LastName     string         `json:"last_name"`

@@ -1,4 +1,4 @@
-import { useNavigate } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { useTheme } from '../context/useTheme.ts'
 import {
   SESSION_TOKEN_KEY,
@@ -58,9 +58,12 @@ export function Header() {
         </div>
         <div className={styles.actions}>
           {isLoggedIn && displayName && (
-            <span className={styles.userName} title={displayName}>
+            // The logged-in user's name is a link to their profile page (Story
+            // 2.1): the Profil surface is discoverable from the app shell. It
+            // stays gated on a real session (review finding 1.7-11).
+            <Link to="/profil" className={styles.userName} title={displayName}>
               {displayName}
-            </span>
+            </Link>
           )}
           {isLoggedIn && (
             <button

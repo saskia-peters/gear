@@ -30,6 +30,9 @@ type mockService struct {
 	confirmFunc          func(ctx context.Context, user *core.User, secret, code string) error
 	disableFunc          func(ctx context.Context, user *core.User, code string) error
 	changePasswordFunc   func(ctx context.Context, user *core.User, input core.ChangePasswordInput, rawToken string) (*core.ChangePasswordResult, error)
+	getProfileFunc       func(ctx context.Context, user *core.User) (*core.Profile, error)
+	updateProfileFunc    func(ctx context.Context, user *core.User, input core.UpdateProfileInput) (*core.Profile, error)
+	stageEmailFunc       func(ctx context.Context, user *core.User, newEmail string) (*core.StageEmailResult, error)
 }
 
 func (m *mockService) Register(ctx context.Context, input core.RegisterInput) (*ports.RegisterResult, error) {
@@ -106,6 +109,27 @@ func (m *mockService) ChangePassword(ctx context.Context, user *core.User, input
 		return m.changePasswordFunc(ctx, user, input, rawToken)
 	}
 	return &core.ChangePasswordResult{Message: core.MsgPasswordChanged}, nil
+}
+
+func (m *mockService) GetProfile(ctx context.Context, user *core.User) (*core.Profile, error) {
+	if m.getProfileFunc != nil {
+		return m.getProfileFunc(ctx, user)
+	}
+	return &core.Profile{ID: "u-1", Email: "max@example.com", FirstName: "Max", LastName: "Mustermann", DisplayName: "Max Mustermann"}, nil
+}
+
+func (m *mockService) UpdateProfile(ctx context.Context, user *core.User, input core.UpdateProfileInput) (*core.Profile, error) {
+	if m.updateProfileFunc != nil {
+		return m.updateProfileFunc(ctx, user, input)
+	}
+	return &core.Profile{ID: "u-1", Email: "max@example.com", FirstName: input.FirstName, LastName: input.LastName, DisplayName: input.DisplayName}, nil
+}
+
+func (m *mockService) StageEmailChange(ctx context.Context, user *core.User, newEmail string) (*core.StageEmailResult, error) {
+	if m.stageEmailFunc != nil {
+		return m.stageEmailFunc(ctx, user, newEmail)
+	}
+	return &core.StageEmailResult{Message: core.MsgEmailChangeStaged, PendingEmail: newEmail}, nil
 }
 
 // stubValidator always authenticates the caller as an active user. Used to
@@ -1417,6 +1441,10 @@ type changePasswordRepo struct {
 	user    *core.User
 	audit   []string
 	updated int
+	// freshUserOnProfile makes UpdateUserProfile/StagePendingEmail return a
+	// FRESH user value (like the postgres adapter's userFromRow) instead of the
+	// in-memory pointer, so tests can prove the session snapshot is refreshed.
+	freshUserOnProfile bool
 }
 
 func (r *changePasswordRepo) CreateRegisteredUser(_ context.Context, email, _, _, _, _ string) (*core.User, error) {
@@ -1454,6 +1482,28 @@ func (r *changePasswordRepo) UpdateUserPassword(_ context.Context, _ string, pas
 	r.user.PasswordHash = passwordHash
 	return r.user, nil
 }
+
+func (r *changePasswordRepo) UpdateUserProfile(_ context.Context, userID, firstName, lastName, displayName string) (*core.User, error) {
+	r.user.FirstName = firstName
+	r.user.LastName = lastName
+	r.user.DisplayName = displayName
+	if r.freshUserOnProfile {
+		clone := *r.user
+		return &clone, nil
+	}
+	return r.user, nil
+}
+
+func (r *changePasswordRepo) StagePendingEmail(_ context.Context, _ string, pendingEmail string) (*core.User, error) {
+	r.user.PendingEmail = pendingEmail
+	if r.freshUserOnProfile {
+		clone := *r.user
+		return &clone, nil
+	}
+	return r.user, nil
+}
+
+func (r *changePasswordRepo) ClearPendingEmail(_ context.Context, _ string) error { return nil }
 
 func (r *changePasswordRepo) InsertAuditEvent(_ context.Context, _ string, operation string) error {
 	r.audit = append(r.audit, operation)
@@ -1512,6 +1562,20 @@ func (m *changePasswordSessionStore) DeleteSessionsByUserExcept(_ context.Contex
 	for tokenHash, s := range m.sessions {
 		if s.UserID == userID && tokenHash != exceptTokenHash {
 			delete(m.sessions, tokenHash)
+		}
+	}
+	return nil
+}
+
+// RefreshSessionUser replaces the user snapshot on every session of the given
+// user so a subsequent Validate returns the fresh profile (Story 2.1). This
+// store caches the snapshot strictly (GetSessionByTokenHash returns it without
+// re-reading), so the refresh is the ONLY way a profile edit lands in the
+// session — letting the handler chain test prove the stale-snapshot fix.
+func (m *changePasswordSessionStore) RefreshSessionUser(_ context.Context, user *core.User) error {
+	for _, s := range m.sessions {
+		if s.UserID == user.ID {
+			s.User = user
 		}
 	}
 	return nil
@@ -1596,5 +1660,534 @@ func TestHandlerChangePasswordRealSessionManagerChain(t *testing.T) {
 	}
 	if repo.updated != 1 {
 		t.Errorf("UpdateUserPassword calls = %d, want still 1 after a rejected change", repo.updated)
+	}
+}
+
+// authedProfileRequest builds a profile request carrying an authenticated user
+// in context, mirroring what the RequireAuth middleware injects (Story 2.1).
+func authedProfileRequest(method, target string, body []byte) *http.Request {
+	req := httptest.NewRequest(method, target, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	user := &core.User{ID: "u-1", Email: "max@example.com", FirstName: "Max", LastName: "Mustermann", DisplayName: "Max Mustermann", State: core.StateActive}
+	return req.WithContext(auth.WithUser(req.Context(), user))
+}
+
+func TestHandlerGetProfileHappyPath(t *testing.T) {
+	// PROFILE_VIEW: an authenticated caller receives their base data incl.
+	// pending_email with 200.
+	svc := &mockService{
+		getProfileFunc: func(ctx context.Context, user *core.User) (*core.Profile, error) {
+			return &core.Profile{ID: "u-1", Email: "max@example.com", FirstName: "Max", LastName: "Mustermann", DisplayName: "Max Mustermann", PendingEmail: "neu@example.com"}, nil
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	req := authedProfileRequest(http.MethodGet, "/profile", nil)
+	rec := httptest.NewRecorder()
+
+	h.GetProfile(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var res core.Profile
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.ID != "u-1" || res.Email != "max@example.com" {
+		t.Errorf("profile = %+v, want id/email (u-1, max@example.com)", res)
+	}
+	if res.FirstName != "Max" || res.LastName != "Mustermann" || res.DisplayName != "Max Mustermann" {
+		t.Errorf("profile names = (%q,%q,%q)", res.FirstName, res.LastName, res.DisplayName)
+	}
+	if res.PendingEmail != "neu@example.com" {
+		t.Errorf("pending_email = %q, want neu@example.com", res.PendingEmail)
+	}
+}
+
+func TestHandlerGetProfileUnauthenticatedReturns401(t *testing.T) {
+	// UNAUTHENTICATED: the profile route is wrapped in the auth middleware; a
+	// missing bearer token yields a uniform 401.
+	h := NewHandler(&mockService{}, discardLogger(), &rejectingValidator{})
+	req := httptest.NewRequest(http.MethodGet, "/profile", nil)
+	rec := httptest.NewRecorder()
+
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error.Code != "unauthorized" {
+		t.Errorf("code = %q, want unauthorized", env.Error.Code)
+	}
+}
+
+func TestHandlerUpdateProfileHappyPath(t *testing.T) {
+	// PROFILE_UPDATE: edits to Vorname/Nachname/Anzeigename are forwarded and
+	// the updated profile is returned with 200.
+	var gotUser *core.User
+	var gotInput core.UpdateProfileInput
+	svc := &mockService{
+		updateProfileFunc: func(ctx context.Context, user *core.User, input core.UpdateProfileInput) (*core.Profile, error) {
+			gotUser = user
+			gotInput = input
+			return &core.Profile{ID: "u-1", Email: "max@example.com", FirstName: input.FirstName, LastName: input.LastName, DisplayName: input.DisplayName}, nil
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	body, _ := json.Marshal(map[string]string{
+		"first_name":   "Erika",
+		"last_name":    "Musterfrau",
+		"display_name": "Erika",
+	})
+	req := authedProfileRequest(http.MethodPost, "/profile", body)
+	rec := httptest.NewRecorder()
+
+	h.UpdateProfile(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var res core.Profile
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.FirstName != "Erika" || res.LastName != "Musterfrau" || res.DisplayName != "Erika" {
+		t.Errorf("profile = %+v, want updated names", res)
+	}
+	if gotUser == nil || gotUser.Email != "max@example.com" {
+		t.Errorf("authenticated user not forwarded, got %+v", gotUser)
+	}
+	if gotInput.FirstName != "Erika" || gotInput.LastName != "Musterfrau" || gotInput.DisplayName != "Erika" {
+		t.Errorf("input not forwarded, got %+v", gotInput)
+	}
+}
+
+func TestHandlerUpdateProfileValidationReturns400(t *testing.T) {
+	// PROFILE_UPDATE validation: missing fields and over-long names map to a
+	// uniform 400 invalid_request.
+	tests := []struct {
+		name        string
+		serviceErr  error
+		wantMessage string
+	}{
+		{name: "missing fields", serviceErr: core.ErrMissingFields, wantMessage: core.MsgMissingFields},
+		{name: "name too long", serviceErr: core.ErrProfileNameTooLong, wantMessage: core.MsgProfileNameTooLong},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := &mockService{
+				updateProfileFunc: func(ctx context.Context, user *core.User, input core.UpdateProfileInput) (*core.Profile, error) {
+					return nil, tt.serviceErr
+				},
+			}
+			h := newTestHandler(svc, &stubValidator{})
+
+			body, _ := json.Marshal(map[string]string{"first_name": "", "last_name": "", "display_name": ""})
+			req := authedProfileRequest(http.MethodPost, "/profile", body)
+			rec := httptest.NewRecorder()
+
+			h.UpdateProfile(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", rec.Code)
+			}
+			var env httpapi.ErrorEnvelope
+			if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+				t.Fatal(err)
+			}
+			if env.Error.Code != "invalid_request" {
+				t.Errorf("code = %q, want invalid_request", env.Error.Code)
+			}
+			if env.Error.Message != tt.wantMessage {
+				t.Errorf("message = %q, want %q", env.Error.Message, tt.wantMessage)
+			}
+		})
+	}
+}
+
+func TestHandlerUpdateProfileForbiddenReturns403(t *testing.T) {
+	// NOT_FOUND / self-ownership (AD-12): acting on another user's profile maps
+	// to a uniform 403 forbidden.
+	svc := &mockService{
+		updateProfileFunc: func(ctx context.Context, user *core.User, input core.UpdateProfileInput) (*core.Profile, error) {
+			return nil, core.ErrForbidden
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	body, _ := json.Marshal(map[string]string{"first_name": "Erika", "last_name": "Musterfrau", "display_name": "Erika"})
+	req := authedProfileRequest(http.MethodPost, "/profile", body)
+	rec := httptest.NewRecorder()
+
+	h.UpdateProfile(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error.Code != "forbidden" {
+		t.Errorf("code = %q, want forbidden", env.Error.Code)
+	}
+}
+
+func TestHandlerUpdateProfileUnauthenticatedReturns401(t *testing.T) {
+	// UNAUTHENTICATED: POST /api/v1/auth/profile is wrapped in the auth
+	// middleware; a missing bearer token yields a uniform 401.
+	h := NewHandler(&mockService{}, discardLogger(), &rejectingValidator{})
+	body, _ := json.Marshal(map[string]string{"first_name": "Erika", "last_name": "Musterfrau", "display_name": "Erika"})
+	req := httptest.NewRequest(http.MethodPost, "/profile", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error.Code != "unauthorized" {
+		t.Errorf("code = %q, want unauthorized", env.Error.Code)
+	}
+}
+
+func TestHandlerStageEmailChangeHappyPath(t *testing.T) {
+	// EMAIL_STAGE: a valid new email is staged and the German confirmation is
+	// returned with 200.
+	var gotUser *core.User
+	var gotEmail string
+	svc := &mockService{
+		stageEmailFunc: func(ctx context.Context, user *core.User, newEmail string) (*core.StageEmailResult, error) {
+			gotUser = user
+			gotEmail = newEmail
+			return &core.StageEmailResult{Message: core.MsgEmailChangeStaged, PendingEmail: newEmail}, nil
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	body, _ := json.Marshal(map[string]string{"email": "neu@example.com"})
+	req := authedProfileRequest(http.MethodPost, "/profile/email", body)
+	rec := httptest.NewRecorder()
+
+	h.StageEmailChange(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var res core.StageEmailResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.Message != core.MsgEmailChangeStaged {
+		t.Errorf("message = %q, want %q", res.Message, core.MsgEmailChangeStaged)
+	}
+	if res.PendingEmail != "neu@example.com" {
+		t.Errorf("pending_email = %q, want neu@example.com", res.PendingEmail)
+	}
+	if gotUser == nil || gotUser.Email != "max@example.com" {
+		t.Errorf("authenticated user not forwarded, got %+v", gotUser)
+	}
+	if gotEmail != "neu@example.com" {
+		t.Errorf("email not forwarded, got %q", gotEmail)
+	}
+}
+
+func TestHandlerStageEmailChangeErrorsReturn400(t *testing.T) {
+	// EMAIL_STAGE_INVALID / EMAIL_STAGE_SAME / EMAIL_STAGE_DUPLICATE: all map
+	// to a uniform 400 invalid_request with the matching German microcopy.
+	tests := []struct {
+		name        string
+		serviceErr  error
+		wantMessage string
+	}{
+		{name: "invalid email", serviceErr: core.ErrInvalidEmail, wantMessage: core.MsgInvalidEmail},
+		{name: "same as current", serviceErr: core.ErrEmailUnchanged, wantMessage: core.MsgEmailUnchanged},
+		{name: "already pending", serviceErr: core.ErrEmailAlreadyPending, wantMessage: core.MsgEmailAlreadyPending},
+		{name: "duplicate email", serviceErr: core.ErrEmailInUse, wantMessage: core.MsgEmailInUse},
+		{name: "user not found", serviceErr: core.ErrUserNotFound, wantMessage: "Das Konto wurde nicht gefunden."},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := &mockService{
+				stageEmailFunc: func(ctx context.Context, user *core.User, newEmail string) (*core.StageEmailResult, error) {
+					return nil, tt.serviceErr
+				},
+			}
+			h := newTestHandler(svc, &stubValidator{})
+
+			body, _ := json.Marshal(map[string]string{"email": "neu@example.com"})
+			req := authedProfileRequest(http.MethodPost, "/profile/email", body)
+			rec := httptest.NewRecorder()
+
+			h.StageEmailChange(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400", rec.Code)
+			}
+			var env httpapi.ErrorEnvelope
+			if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+				t.Fatal(err)
+			}
+			if env.Error.Code != "invalid_request" {
+				t.Errorf("code = %q, want invalid_request", env.Error.Code)
+			}
+			if env.Error.Message != tt.wantMessage {
+				t.Errorf("message = %q, want %q", env.Error.Message, tt.wantMessage)
+			}
+		})
+	}
+}
+
+func TestHandlerStageEmailChangeForbiddenReturns403(t *testing.T) {
+	// Self-ownership (AD-12): staging for another user maps to a uniform 403.
+	svc := &mockService{
+		stageEmailFunc: func(ctx context.Context, user *core.User, newEmail string) (*core.StageEmailResult, error) {
+			return nil, core.ErrForbidden
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	body, _ := json.Marshal(map[string]string{"email": "neu@example.com"})
+	req := authedProfileRequest(http.MethodPost, "/profile/email", body)
+	rec := httptest.NewRecorder()
+
+	h.StageEmailChange(rec, req)
+
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403", rec.Code)
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error.Code != "forbidden" {
+		t.Errorf("code = %q, want forbidden", env.Error.Code)
+	}
+}
+
+func TestHandlerStageEmailChangeUnauthenticatedReturns401(t *testing.T) {
+	// UNAUTHENTICATED: POST /api/v1/auth/profile/email is wrapped in the auth
+	// middleware; a missing bearer token yields a uniform 401.
+	h := NewHandler(&mockService{}, discardLogger(), &rejectingValidator{})
+	body, _ := json.Marshal(map[string]string{"email": "neu@example.com"})
+	req := httptest.NewRequest(http.MethodPost, "/profile/email", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error.Code != "unauthorized" {
+		t.Errorf("code = %q, want unauthorized", env.Error.Code)
+	}
+}
+
+func TestHandlerProfileInvalidJSONReturns400(t *testing.T) {
+	svc := &mockService{}
+	h := newTestHandler(svc, &stubValidator{})
+
+	for _, tc := range []struct {
+		target string
+		call   func(*Handler, http.ResponseWriter, *http.Request)
+	}{
+		{target: "/profile", call: func(h *Handler, w http.ResponseWriter, r *http.Request) { h.UpdateProfile(w, r) }},
+		{target: "/profile/email", call: func(h *Handler, w http.ResponseWriter, r *http.Request) { h.StageEmailChange(w, r) }},
+	} {
+		req := authedProfileRequest(http.MethodPost, tc.target, []byte("{bad"))
+		rec := httptest.NewRecorder()
+		tc.call(h, rec, req)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("%s: status = %d, want 400", tc.target, rec.Code)
+		}
+		var env httpapi.ErrorEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+			t.Fatal(err)
+		}
+		if env.Error.Code != "invalid_request" {
+			t.Errorf("%s: code = %q, want invalid_request", tc.target, env.Error.Code)
+		}
+	}
+}
+
+func TestHandlerProfileInternalErrorReturns500(t *testing.T) {
+	svc := &mockService{
+		updateProfileFunc: func(ctx context.Context, user *core.User, input core.UpdateProfileInput) (*core.Profile, error) {
+			return nil, errors.New("db down")
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	body, _ := json.Marshal(map[string]string{"first_name": "Erika", "last_name": "Musterfrau", "display_name": "Erika"})
+	req := authedProfileRequest(http.MethodPost, "/profile", body)
+	rec := httptest.NewRecorder()
+
+	h.UpdateProfile(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error.Code != "internal_error" {
+		t.Errorf("code = %q, want internal_error", env.Error.Code)
+	}
+}
+
+// TestHandlerProfileRealSessionManagerChain drives the REAL user Service over
+// an in-memory SessionStore/repo through the profile routes (view → update →
+// stage email) via the real RequireAuth middleware, asserting the audit rows
+// are written end to end AND that a subsequent GET /profile reflects the edits
+// (freshUserOnProfile makes the repo return fresh user values like the postgres
+// adapter, and the changePasswordSessionStore caches strictly — so the session
+// refresh is what lands the new values, proving the stale-snapshot fix).
+func TestHandlerProfileRealSessionManagerChain(t *testing.T) {
+	user := &core.User{
+		ID:          "u-profile",
+		Email:       "profile@example.com",
+		FirstName:   "Profil",
+		LastName:    "Test",
+		DisplayName: "Profil Test",
+		State:       core.StateActive,
+	}
+
+	store := newChangePasswordSessionStore()
+	store.users = map[string]*core.User{user.ID: user}
+	sm := core.NewSessionManager(store, time.Hour)
+	raw, err := sm.Issue(context.Background(), user)
+	if err != nil {
+		t.Fatalf("Issue failed: %v", err)
+	}
+
+	repo := &changePasswordRepo{user: user, freshUserOnProfile: true}
+	svc := core.NewService(repo, crypto.NewHasher(), sm, nil, discardLogger())
+	h := NewHandler(svc, discardLogger(), sm)
+
+	do := func(method, target string, payload any) *httptest.ResponseRecorder {
+		var body io.Reader
+		if payload != nil {
+			raw, _ := json.Marshal(payload)
+			body = bytes.NewReader(raw)
+		}
+		req := httptest.NewRequest(method, target, body)
+		req.Header.Set("Authorization", "Bearer "+raw)
+		rec := httptest.NewRecorder()
+		h.Routes().ServeHTTP(rec, req)
+		return rec
+	}
+
+	// PROFILE_VIEW via the real chain.
+	rec := do(http.MethodGet, "/profile", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /profile: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var profile core.Profile
+	if err := json.Unmarshal(rec.Body.Bytes(), &profile); err != nil {
+		t.Fatal(err)
+	}
+	if profile.Email != "profile@example.com" || profile.FirstName != "Profil" {
+		t.Errorf("profile = %+v, want base data of the session user", profile)
+	}
+
+	// PROFILE_UPDATE via the real chain: 200 + immediate persistence.
+	rec = do(http.MethodPost, "/profile", map[string]string{"first_name": "Erika", "last_name": "Musterfrau", "display_name": "Erika"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /profile: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if user.FirstName != "Erika" || user.LastName != "Musterfrau" || user.DisplayName != "Erika" {
+		t.Errorf("persisted user = %+v, want immediate base-data update", user)
+	}
+
+	// The SAME token now resolves the FRESH names (session snapshot refreshed).
+	rec = do(http.MethodGet, "/profile", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /profile after update: status = %d, want 200", rec.Code)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &profile); err != nil {
+		t.Fatal(err)
+	}
+	if profile.FirstName != "Erika" || profile.LastName != "Musterfrau" || profile.DisplayName != "Erika" {
+		t.Errorf("GET /profile after update = %+v, want refreshed names", profile)
+	}
+
+	// EMAIL_STAGE via the real chain: 200 + staged pending_email, current email
+	// untouched.
+	rec = do(http.MethodPost, "/profile/email", map[string]string{"email": "neu@example.com"})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /profile/email: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if user.PendingEmail != "neu@example.com" {
+		t.Errorf("pending_email = %q, want neu@example.com", user.PendingEmail)
+	}
+	if user.Email != "profile@example.com" {
+		t.Errorf("current email = %q, want unchanged profile@example.com", user.Email)
+	}
+
+	// The SAME token now resolves pending_email (session snapshot refreshed).
+	rec = do(http.MethodGet, "/profile", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /profile after stage: status = %d, want 200", rec.Code)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &profile); err != nil {
+		t.Fatal(err)
+	}
+	if profile.PendingEmail != "neu@example.com" {
+		t.Errorf("GET /profile after stage pending_email = %q, want neu@example.com", profile.PendingEmail)
+	}
+
+	// EMAIL_STAGE_SAME via the real chain: 400 no-op.
+	rec = do(http.MethodPost, "/profile/email", map[string]string{"email": "profile@example.com"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST /profile/email (same): status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error.Code != "invalid_request" || env.Error.Message != core.MsgEmailUnchanged {
+		t.Errorf("same-email error = %+v, want invalid_request %q", env.Error, core.MsgEmailUnchanged)
+	}
+
+	// EMAIL_STAGE_ALREADY_PENDING via the real chain: re-staging the staged
+	// address is a no-op (400) and writes NO extra audit row.
+	rec = do(http.MethodPost, "/profile/email", map[string]string{"email": "neu@example.com"})
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("POST /profile/email (already pending): status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error.Code != "invalid_request" || env.Error.Message != core.MsgEmailAlreadyPending {
+		t.Errorf("already-pending error = %+v, want invalid_request %q", env.Error, core.MsgEmailAlreadyPending)
+	}
+
+	// Audit rows written end to end (NFR-O1/NFR-O2): profile.update + exactly
+	// ONE email.change.request (the re-stage no-op wrote none).
+	want := []string{core.AuditOperationProfileUpdate, core.AuditOperationEmailChangeRequest}
+	if len(repo.audit) != len(want) {
+		t.Fatalf("audit = %v, want %v", repo.audit, want)
+	}
+	for i, op := range want {
+		if repo.audit[i] != op {
+			t.Errorf("audit[%d] = %q, want %q", i, repo.audit[i], op)
+		}
 	}
 }
