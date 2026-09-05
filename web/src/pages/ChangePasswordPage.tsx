@@ -1,5 +1,5 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { Link, useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import { Header } from '../components/Header.tsx'
 import { SESSION_TOKEN_KEY, clearAuthState } from '../auth/authState.ts'
 import styles from './ChangePasswordPage.module.css'
@@ -160,9 +160,9 @@ export function ChangePasswordPage() {
                   Das Passwort wurde geändert, aber andere Sitzungen konnten nicht beendet werden.
                 </p>
               )}
-              <Link to="/profil" className={styles.primaryLink}>
-                Zurück zum Profil
-              </Link>
+              <button type="button" className={styles.cancelButton} onClick={() => navigate('/profil')}>
+                Abbrechen
+              </button>
             </div>
           ) : (
             <form className={styles.form} onSubmit={handleSubmit} noValidate>
@@ -243,14 +243,6 @@ export function ChangePasswordPage() {
                 Abbrechen
               </button>
             </form>
-          )}
-
-          {!isChanged && (
-            <div className={styles.links}>
-              <Link to="/profil" className={styles.link}>
-                Zurück zum Profil
-              </Link>
-            </div>
           )}
         </div>
       </main>

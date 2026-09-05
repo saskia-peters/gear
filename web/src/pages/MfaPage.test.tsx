@@ -52,7 +52,6 @@ describe('MfaPage', () => {
     renderMfaPage()
 
     expect(screen.getByRole('heading', { level: 2, name: 'Zwei-Faktor-Authentifizierung' })).toBeInTheDocument()
-    expect(screen.getByRole('link', { name: 'Zurück zum Profil' })).toHaveAttribute('href', '/profil')
     expect(screen.getByRole('button', { name: 'Abbrechen' })).toBeInTheDocument()
     await waitFor(() => {
       expect(screen.getByRole('button', { name: /Zwei-Faktor-Authentifizierung aktivieren/i })).toBeInTheDocument()

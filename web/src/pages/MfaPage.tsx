@@ -1,6 +1,6 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
-import { Link, useNavigate } from 'react-router-dom'
+import { useNavigate } from 'react-router-dom'
 import { Header } from '../components/Header.tsx'
 import { SESSION_TOKEN_KEY } from '../auth/authState.ts'
 import styles from './MfaPage.module.css'
@@ -332,12 +332,6 @@ export function MfaPage() {
               Abbrechen
             </button>
           )}
-
-          <div className={styles.links}>
-            <Link to="/profil" className={styles.link}>
-              Zurück zum Profil
-            </Link>
-          </div>
         </div>
       </main>
     </div>
