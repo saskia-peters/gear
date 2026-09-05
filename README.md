@@ -9,6 +9,14 @@ Start the full dev stack (PostgreSQL + API + SPA):
 just dev
 ```
 
+`just dev` also generates a local `GEAR_ENCRYPTION_KEY` into `.env` (gitignored)
+if none exists — this is required for the MFA / TOTP features. To regenerate or
+inspect it:
+
+```bash
+just dev-key
+```
+
 - SPA: http://localhost:5173
 - API: http://localhost:8080/healthz
 

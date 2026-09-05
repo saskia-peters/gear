@@ -79,8 +79,23 @@ migrate-down: db-wait
 web-deps:
     @test -d web/node_modules || npm --prefix web ci
 
+# Local-dev only: generate/persist GEAR_ENCRYPTION_KEY into .env so MFA works
+# locally. The key is never committed (.env is gitignored). Idempotent — reuses
+# an existing key.
+dev-key:
+    @if [ -f .env ] && grep -q '^GEAR_ENCRYPTION_KEY=.\+' .env 2>/dev/null; then \
+        echo "GEAR_ENCRYPTION_KEY already set in .env"; \
+    else \
+        key=$(openssl rand -hex 32 2>/dev/null || od -An -N32 -tx1 /dev/urandom | tr -d ' \n'); \
+        grep -v '^GEAR_ENCRYPTION_KEY=' .env 2>/dev/null > .env.tmp || true; \
+        printf 'GEAR_ENCRYPTION_KEY=%s\n' "$key" >> .env.tmp; \
+        mv .env.tmp .env; \
+        echo "Generated GEAR_ENCRYPTION_KEY in .env"; \
+    fi
+
 # Run the full dev stack: DB + API + Vite SPA
-dev: web-deps db-up
+dev: web-deps dev-key db-up
+    set -a; [ -f .env ] && . ./.env; set +a; \
     npm --prefix web run dev & \
     vite_pid=$!; \
     sleep 2; \
