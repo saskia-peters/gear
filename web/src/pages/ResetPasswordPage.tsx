@@ -1,6 +1,7 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useState, useRef, type FormEvent } from 'react'
 import { Link, useLocation, useParams } from 'react-router-dom'
 import { Header } from '../components/Header.tsx'
+import { focusFirstInvalid } from '../auth/focus.ts'
 import styles from './ResetPasswordPage.module.css'
 
 interface FieldErrors {
@@ -19,6 +20,7 @@ export function ResetPasswordPage() {
   const [isDone, setIsDone] = useState(false)
   // invalidToken is set when the server rejects the token (expired/used/unknown).
   const [invalidToken, setInvalidToken] = useState(false)
+  const formRef = useRef<HTMLFormElement>(null)
   // notice is a German note carried over from the login forced-change flow
   // (review finding 1.8-4): it tells the user their password must be changed
   // and that the admins have been notified / a one-time password was provided.
@@ -66,6 +68,8 @@ export function ResetPasswordPage() {
       return
     }
     if (!validate()) {
+      // UX-DR9 SCREEN_READER: move focus to the first failing field.
+      focusFirstInvalid(formRef.current)
       return
     }
 
@@ -168,7 +172,7 @@ export function ResetPasswordPage() {
               </Link>
             </div>
           ) : (
-            <form className={styles.form} onSubmit={handleSubmit} noValidate>
+            <form ref={formRef} className={styles.form} onSubmit={handleSubmit} noValidate>
               <div className={styles.fieldGroup}>
                 <label htmlFor="newPassword" className={styles.label}>
                   Neues Passwort

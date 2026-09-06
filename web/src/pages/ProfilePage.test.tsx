@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { MemoryRouter, useLocation } from 'react-router-dom'
@@ -525,6 +525,59 @@ describe('ProfilePage', () => {
     await waitFor(() => {
       expect(localStorage.getItem('gear.display_name')).toBe('Erika Musterfrau')
     })
+  })
+
+  it('SUBMITTING_STATE: while saving, the submit button and inputs are disabled and shows "Wird gespeichert..."', async () => {
+    let resolveSave!: (value: unknown) => void
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((_url: string, init?: RequestInit) => {
+        if (!init?.method) {
+          return Promise.resolve({ ok: true, status: 200, json: async () => baseProfile })
+        }
+        return new Promise((resolve) => { resolveSave = resolve })
+      }),
+    )
+    const user = userEvent.setup()
+    renderProfilePage()
+    await screen.findByLabelText('Vorname')
+
+    await user.click(screen.getByRole('button', { name: 'Speichern' }))
+
+    const button = screen.getByRole('button', { name: 'Wird gespeichert...' })
+    expect(button).toBeDisabled()
+    expect(screen.getByLabelText('Vorname')).toBeDisabled()
+    expect(screen.getByLabelText('Nachname')).toBeDisabled()
+    expect(screen.getByLabelText('Anzeigename')).toBeDisabled()
+    expect(screen.getByLabelText('E-Mail-Adresse')).toBeDisabled()
+
+    // Recovery (finding 7): once the request settles, the submit button returns
+    // to its original label and is re-enabled.
+    await act(async () => {
+      resolveSave({ ok: true, status: 200, json: async () => baseProfile })
+    })
+    expect(screen.getByRole('button', { name: 'Speichern' })).toBeEnabled()
+  })
+
+  it('ACCESSIBILITY: every input has an accessible label and inline errors use role="alert" + aria-describedby', async () => {
+    const user = userEvent.setup()
+    vi.stubGlobal('fetch', profileFetch())
+    renderProfilePage()
+
+    expect(await screen.findByLabelText('Vorname')).toHaveAttribute('id', 'firstName')
+    expect(screen.getByLabelText('Nachname')).toHaveAttribute('id', 'lastName')
+    expect(screen.getByLabelText('Anzeigename')).toHaveAttribute('id', 'displayName')
+    expect(screen.getByLabelText('E-Mail-Adresse')).toHaveAttribute('id', 'email')
+
+    await user.clear(screen.getByLabelText('Vorname'))
+    await user.click(screen.getByRole('button', { name: 'Speichern' }))
+
+    const firstNameError = screen.getByText('Bitte gib deinen Vornamen ein.')
+    expect(firstNameError).toHaveAttribute('role', 'alert')
+    expect(firstNameError).toHaveAttribute('id', 'firstName-error')
+    const firstNameInput = screen.getByLabelText('Vorname')
+    expect(firstNameInput).toHaveAttribute('aria-invalid', 'true')
+    expect(firstNameInput).toHaveAttribute('aria-describedby', 'firstName-error')
   })
 })
 

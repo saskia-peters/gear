@@ -1,6 +1,7 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useState, useRef, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { Header } from '../components/Header.tsx'
+import { focusFirstInvalid } from '../auth/focus.ts'
 import styles from './ForgotPasswordPage.module.css'
 
 interface ForgotErrors {
@@ -15,6 +16,7 @@ export function ForgotPasswordPage() {
   // submitted holds the address that was submitted (used only to keep the form
   // stable); the shown confirmation is ALWAYS the uniform text.
   const [submitted, setSubmitted] = useState(false)
+  const formRef = useRef<HTMLFormElement>(null)
 
   useEffect(() => {
     const prevTitle = document.title
@@ -35,6 +37,8 @@ export function ForgotPasswordPage() {
     }
     if (Object.keys(nextErrors).length > 0) {
       setErrors(nextErrors)
+      // UX-DR9 SCREEN_READER: move focus to the first failing field.
+      focusFirstInvalid(formRef.current)
       return
     }
 
@@ -89,7 +93,7 @@ export function ForgotPasswordPage() {
               </p>
             </div>
           ) : (
-            <form className={styles.form} onSubmit={handleSubmit} noValidate>
+            <form ref={formRef} className={styles.form} onSubmit={handleSubmit} noValidate>
               <div className={styles.fieldGroup}>
                 <label htmlFor="email" className={styles.label}>
                   E-Mail-Adresse

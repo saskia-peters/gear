@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
@@ -114,5 +114,70 @@ describe('ForgotPasswordPage', () => {
       'href',
       '/login',
     )
+  })
+
+  it('SUBMITTING_STATE: while the request is in flight the submit button and input are disabled and shows "Wird gesendet..."', async () => {
+    let resolveFetch!: (value: unknown) => void
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() => new Promise((resolve) => { resolveFetch = resolve })),
+    )
+    const user = userEvent.setup()
+    renderForgot()
+
+    await user.type(screen.getByLabelText('E-Mail-Adresse'), 'user@example.com')
+    await user.click(screen.getByRole('button', { name: 'Link anfordern' }))
+
+    const button = screen.getByRole('button', { name: 'Wird gesendet...' })
+    expect(button).toBeDisabled()
+    expect(screen.getByLabelText('E-Mail-Adresse')).toBeDisabled()
+
+    // Recovery (finding 7): once the request settles the uniform confirmation
+    // is shown (submitting state ends).
+    await act(async () => {
+      resolveFetch({ ok: true, status: 200, json: async () => ({ message: UNIFORM }) })
+    })
+    expect(screen.getByText(UNIFORM)).toBeInTheDocument()
+  })
+
+  it('ANTI_ENUM_LEAKY_BODY: a server message that leaks account existence is never rendered', async () => {
+    // Even if the server body says "E-Mail nicht gefunden", the client always
+    // renders the uniform anti-enumeration confirmation (UX-DR7/UX-DR8).
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ message: 'E-Mail nicht gefunden' }),
+    }))
+
+    await submitEmail('nobody@example.com')
+
+    await waitFor(() => {
+      expect(screen.getByText(UNIFORM)).toBeInTheDocument()
+    })
+    expect(screen.queryByText('E-Mail nicht gefunden')).not.toBeInTheDocument()
+  })
+
+  it('FOCUS_FIRST_ERROR: submitting an empty email moves focus to the email input', async () => {
+    const user = userEvent.setup()
+    renderForgot()
+
+    await user.click(screen.getByRole('button', { name: 'Link anfordern' }))
+
+    // UX-DR9 SCREEN_READER: focus lands on the first failing field.
+    expect(screen.getByLabelText('E-Mail-Adresse')).toHaveFocus()
+  })
+
+  it('ACCESSIBILITY: the email inline error uses role="alert" and aria-describedby linkage', async () => {
+    const user = userEvent.setup()
+    renderForgot()
+
+    await user.click(screen.getByRole('button', { name: 'Link anfordern' }))
+
+    const emailInput = screen.getByLabelText('E-Mail-Adresse')
+    const emailError = screen.getByText('Bitte gib deine E-Mail-Adresse ein.')
+    expect(emailError).toHaveAttribute('role', 'alert')
+    expect(emailError).toHaveAttribute('id', 'email-error')
+    expect(emailInput).toHaveAttribute('aria-invalid', 'true')
+    expect(emailInput).toHaveAttribute('aria-describedby', 'email-error')
   })
 })

@@ -2,6 +2,7 @@ import { useState, useEffect, useRef, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { Header } from '../components/Header.tsx'
 import { saveAuthState } from '../auth/authState.ts'
+import { focusFirstInvalid } from '../auth/focus.ts'
 import styles from './LoginPage.module.css'
 
 const LOCKOUT_STORAGE_KEY = 'gear.login_lockout_until'
@@ -49,6 +50,7 @@ export function LoginPage() {
   const [lockout, setLockout] = useState<LockoutState | null>(() => readPersistedLockout().lockout)
   const [countdown, setCountdown] = useState(() => readPersistedLockout().countdown)
   const countdownRef = useRef(countdown)
+  const formRef = useRef<HTMLFormElement>(null)
   const navigate = useNavigate()
 
   useEffect(() => {
@@ -123,11 +125,20 @@ export function LoginPage() {
       return
     }
     if (!validate()) {
+      // UX-DR9 SCREEN_READER: move focus to the first failing field so a
+      // keyboard/screen-reader user lands directly on the first error.
+      focusFirstInvalid(formRef.current)
       return
     }
 
     setIsSubmitting(true)
     setErrors({})
+
+    // Guard against a hung/never-resolving request (UX-DR8/UX-DR9): abort after
+    // 10s so the catch/finally below always restore the submit button — a
+    // stalled network must never leave the form permanently disabled.
+    const controller = new AbortController()
+    const timeoutId = setTimeout(() => controller.abort(), 10_000)
 
     try {
       const payload =
@@ -148,6 +159,7 @@ export function LoginPage() {
           'Content-Type': 'application/json',
         },
         body: JSON.stringify(payload),
+        signal: controller.signal,
       })
 
       const data = await response.json().catch(() => null)
@@ -223,6 +235,7 @@ export function LoginPage() {
         general: 'Verbindung zum Server fehlgeschlagen. Bitte prüfe deine Internetverbindung.',
       })
     } finally {
+      clearTimeout(timeoutId)
       setIsSubmitting(false)
     }
   }
@@ -253,115 +266,133 @@ export function LoginPage() {
             </div>
           )}
 
-          {lockout && (
-            <div className={styles.lockout} role="alert" aria-live="assertive">
-              Zu viele Fehlversuche. Bitte warte {countdown} Sekunden.
+          {lockout ? (
+            // Lockout (Sperre) surface (UX-DR6/UX-DR8): canonical German
+            // microcopy with a live countdown and NO retry button until the
+            // timer expires. The form is hidden so no implicit Enter submit can
+            // clear or restart the window; the countdown state is rehydrated
+            // from localStorage on reload.
+            //
+            // Screen-reader announcement (UX-DR9): the static message lives in
+            // the role="alert" live region (announced ONCE on insertion); the
+            // per-second countdown sits OUTSIDE the live region with
+            // aria-live="off" so the tick is not re-announced every second.
+            <div className={styles.lockout} role="alert">
+              Zu viele Fehlversuche —{' '}
+              <span
+                className={styles.lockoutCountdown}
+                data-testid="lockout-countdown"
+                aria-live="off"
+              >
+                {countdown}
+              </span>{' '}
+              Sekunden warten.
             </div>
-          )}
+          ) : (
+            <>
+              {mfaActive && (
+                <div className={styles.mfaActive} role="status" aria-live="polite">
+                  <span className={styles.mfaActiveDot} aria-hidden="true" />
+                  MFA aktiv — Zwei-Faktor-Authentifizierung erforderlich
+                </div>
+              )}
 
-          {mfaActive && (
-            <div className={styles.mfaActive} role="status" aria-live="polite">
-              <span className={styles.mfaActiveDot} aria-hidden="true" />
-              MFA aktiv — Zwei-Faktor-Authentifizierung erforderlich
-            </div>
-          )}
+              <form ref={formRef} className={styles.form} onSubmit={handleSubmit} noValidate>
+                {mfaActive ? (
+                  <div className={styles.fieldGroup}>
+                    <label htmlFor="totpCode" className={styles.label}>
+                      Code aus der Authenticator-App
+                    </label>
+                    <input
+                      id="totpCode"
+                      type="text"
+                      inputMode="numeric"
+                      autoComplete="one-time-code"
+                      className={`${styles.input} ${styles.totpInput} ${errors.totpCode ? styles.inputError : ''}`}
+                      value={totpCode}
+                      onChange={(e) => setTotpCode(e.target.value)}
+                      aria-invalid={!!errors.totpCode}
+                      aria-describedby={errors.totpCode ? 'totpCode-error' : undefined}
+                      disabled={isSubmitting}
+                      placeholder="123456"
+                      maxLength={6}
+                      required
+                    />
+                    {errors.totpCode && (
+                      <p id="totpCode-error" className={styles.errorText} role="alert">
+                        {errors.totpCode}
+                      </p>
+                    )}
+                  </div>
+                ) : (
+                  <>
+                    <div className={styles.fieldGroup}>
+                      <label htmlFor="email" className={styles.label}>
+                        E-Mail-Adresse
+                      </label>
+                      <input
+                        id="email"
+                        type="email"
+                        className={`${styles.input} ${errors.email ? styles.inputError : ''}`}
+                        value={email}
+                        onChange={(e) => setEmail(e.target.value)}
+                        aria-invalid={!!errors.email}
+                        aria-describedby={errors.email ? 'email-error' : undefined}
+                        disabled={isSubmitting}
+                        autoComplete="email"
+                        required
+                      />
+                      {errors.email && (
+                        <p id="email-error" className={styles.errorText} role="alert">
+                          {errors.email}
+                        </p>
+                      )}
+                    </div>
 
-          <form className={styles.form} onSubmit={handleSubmit} noValidate>
-            {mfaActive ? (
-              <div className={styles.fieldGroup}>
-                <label htmlFor="totpCode" className={styles.label}>
-                  Code aus der Authenticator-App
-                </label>
-                <input
-                  id="totpCode"
-                  type="text"
-                  inputMode="numeric"
-                  autoComplete="one-time-code"
-                  className={`${styles.input} ${styles.totpInput} ${errors.totpCode ? styles.inputError : ''}`}
-                  value={totpCode}
-                  onChange={(e) => setTotpCode(e.target.value)}
-                  aria-invalid={!!errors.totpCode}
-                  aria-describedby={errors.totpCode ? 'totpCode-error' : undefined}
-                  disabled={isSubmitting}
-                  placeholder="123456"
-                  maxLength={6}
-                  required
-                />
-                {errors.totpCode && (
-                  <p id="totpCode-error" className={styles.errorText} role="alert">
-                    {errors.totpCode}
-                  </p>
+                    <div className={styles.fieldGroup}>
+                      <label htmlFor="password" className={styles.label}>
+                        Passwort
+                      </label>
+                      <input
+                        id="password"
+                        type="password"
+                        className={`${styles.input} ${errors.password ? styles.inputError : ''}`}
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        aria-invalid={!!errors.password}
+                        aria-describedby={errors.password ? 'password-error' : undefined}
+                        disabled={isSubmitting}
+                        autoComplete="current-password"
+                        required
+                      />
+                      {errors.password && (
+                        <p id="password-error" className={styles.errorText} role="alert">
+                          {errors.password}
+                        </p>
+                      )}
+                    </div>
+                  </>
                 )}
-              </div>
-            ) : (
-              <>
-                <div className={styles.fieldGroup}>
-                  <label htmlFor="email" className={styles.label}>
-                    E-Mail-Adresse
-                  </label>
-                  <input
-                    id="email"
-                    type="email"
-                    className={`${styles.input} ${errors.email ? styles.inputError : ''}`}
-                    value={email}
-                    onChange={(e) => setEmail(e.target.value)}
-                    aria-invalid={!!errors.email}
-                    aria-describedby={errors.email ? 'email-error' : undefined}
-                    disabled={isSubmitting}
-                    autoComplete="email"
-                    required
-                  />
-                  {errors.email && (
-                    <p id="email-error" className={styles.errorText} role="alert">
-                      {errors.email}
-                    </p>
-                  )}
-                </div>
 
-                <div className={styles.fieldGroup}>
-                  <label htmlFor="password" className={styles.label}>
-                    Passwort
-                  </label>
-                  <input
-                    id="password"
-                    type="password"
-                    className={`${styles.input} ${errors.password ? styles.inputError : ''}`}
-                    value={password}
-                    onChange={(e) => setPassword(e.target.value)}
-                    aria-invalid={!!errors.password}
-                    aria-describedby={errors.password ? 'password-error' : undefined}
-                    disabled={isSubmitting}
-                    autoComplete="current-password"
-                    required
-                  />
-                  {errors.password && (
-                    <p id="password-error" className={styles.errorText} role="alert">
-                      {errors.password}
-                    </p>
-                  )}
-                </div>
-              </>
-            )}
+                <button
+                  type="submit"
+                  className={styles.submitButton}
+                  disabled={isSubmitting}
+                >
+                  {isSubmitting
+                    ? 'Wird gesendet...'
+                    : mfaActive
+                      ? 'Code prüfen'
+                      : 'Anmelden'}
+                </button>
+              </form>
 
-            <button
-              type="submit"
-              className={styles.submitButton}
-              disabled={isSubmitting || lockout !== null}
-            >
-              {isSubmitting
-                ? 'Wird gesendet...'
-                : lockout !== null
-                  ? 'Bitte warten...'
-                  : mfaActive
-                    ? 'Code prüfen'
-                    : 'Anmelden'}
-            </button>
-          </form>
-
-          {mfaActive && (
-            <button type="button" className={styles.backButton} onClick={backToCredentials}>
-              Zurück zur E-Mail-/Passwort-Eingabe
-            </button>
+              {mfaActive && (
+                <button type="button" className={styles.backButton} onClick={backToCredentials}>
+                  Zurück zur E-Mail-/Passwort-Eingabe
+                </button>
+              )}
+            </>
           )}
 
           <div className={styles.links}>

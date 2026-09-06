@@ -317,6 +317,7 @@ export function ProfilePage() {
                   onChange={(e) => setFirstName(e.target.value)}
                   aria-invalid={!!errors.firstName}
                   aria-describedby={errors.firstName ? 'firstName-error' : undefined}
+                  disabled={isSubmitting}
                   autoComplete="given-name"
                   required
                 />
@@ -339,6 +340,7 @@ export function ProfilePage() {
                   onChange={(e) => setLastName(e.target.value)}
                   aria-invalid={!!errors.lastName}
                   aria-describedby={errors.lastName ? 'lastName-error' : undefined}
+                  disabled={isSubmitting}
                   autoComplete="family-name"
                   required
                 />
@@ -361,6 +363,7 @@ export function ProfilePage() {
                   onChange={(e) => setDisplayNameState(e.target.value)}
                   aria-invalid={!!errors.displayName}
                   aria-describedby={errors.displayName ? 'displayName-error' : undefined}
+                  disabled={isSubmitting}
                   required
                 />
                 {errors.displayName && (
@@ -382,6 +385,7 @@ export function ProfilePage() {
                   onChange={(e) => setEmail(e.target.value)}
                   aria-invalid={!!errors.email}
                   aria-describedby={errors.email ? 'email-error' : undefined}
+                  disabled={isSubmitting}
                   autoComplete="email"
                   required
                 />

@@ -94,7 +94,7 @@
 
 .input:focus {
   border-color: var(--gear-color-brand);
-  box-shadow: 0 0 0 2px rgba(0, 51, 153, 0.2);
+  box-shadow: var(--gear-focus-ring-color);
 }
 
 .inputError {
@@ -103,7 +103,7 @@
 
 .inputError:focus {
   border-color: var(--gear-color-status-red);
-  box-shadow: 0 0 0 2px rgba(198, 40, 40, 0.2);
+  box-shadow: var(--gear-focus-ring-error);
 }
 
 .errorText {
@@ -195,7 +195,7 @@
 }
 
 .dangerButton:hover:not(:disabled) {
-  background-color: rgba(198, 40, 40, 0.08);
+  background-color: var(--gear-color-status-red-soft);
 }
 
 .dangerButton:disabled {
@@ -237,7 +237,7 @@
   justify-content: center;
   gap: var(--gear-space-2);
   padding: var(--gear-space-3) var(--gear-space-4);
-  background-color: rgba(46, 125, 50, 0.12);
+  background-color: var(--gear-color-status-green-soft);
   border: 1px solid var(--gear-color-status-green);
   border-radius: var(--gear-radius-md);
   color: var(--gear-color-status-green);
@@ -258,7 +258,7 @@
 
 .generalError {
   padding: var(--gear-space-3) var(--gear-space-4);
-  background-color: rgba(198, 40, 40, 0.1);
+  background-color: var(--gear-color-status-red-soft);
   border: 1px solid var(--gear-color-status-red);
   border-radius: var(--gear-radius-md);
   color: var(--gear-color-status-red);
@@ -268,7 +268,7 @@
 
 .notice {
   padding: var(--gear-space-3) var(--gear-space-4);
-  background-color: rgba(46, 125, 50, 0.12);
+  background-color: var(--gear-color-status-green-soft);
   border: 1px solid var(--gear-color-status-green);
   border-radius: var(--gear-radius-md);
   color: var(--gear-color-status-green);

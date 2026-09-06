@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
@@ -227,6 +227,51 @@ describe('MfaPage', () => {
         }),
       )
     })
+  })
+
+  it('SUBMITTING_STATE: while activating, the activate button is disabled and shows "Wird gesendet..."', async () => {
+    let resolveEnroll!: (value: unknown) => void
+    const fetchMock = vi.fn().mockImplementation((url: string) => {
+      if (url === '/api/v1/auth/mfa/status') {
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({ enabled: false }) })
+      }
+      return new Promise((resolve) => { resolveEnroll = resolve })
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    const user = userEvent.setup()
+    renderMfaPage()
+    await user.click(await screen.findByRole('button', { name: /Zwei-Faktor-Authentifizierung aktivieren/i }))
+
+    const button = screen.getByRole('button', { name: 'Wird gesendet...' })
+    expect(button).toBeDisabled()
+
+    // Recovery (finding 7): once the enroll request settles, the submitting
+    // state ends and the confirm step appears.
+    await act(async () => {
+      resolveEnroll({
+        ok: true,
+        status: 200,
+        json: async () => ({
+          secret: 'JBSWY3DPEHPK3PXP',
+          uri: 'otpauth://totp/G.E.A.R.:max@example.com?secret=JBSWY3DPEHPK3PXP&issuer=G.E.A.R.',
+        }),
+      })
+    })
+    expect(screen.getByRole('button', { name: /Aktivierung bestätigen/i })).toBeInTheDocument()
+  })
+
+  it('ACCESSIBILITY: the MFA-aktiv indicator is announced as status and the code field is labeled', async () => {
+    stubFetch({ ok: true, body: { enabled: true } })
+    renderMfaPage()
+
+    await waitFor(() => {
+      expect(screen.getByText(/MFA aktiv/i)).toBeInTheDocument()
+    })
+    // UX-DR5: the indicator is announced to screen readers via role="status".
+    expect(screen.getByText(/MFA aktiv/i).closest('[role="status"]')).not.toBeNull()
+    expect(screen.getByLabelText('Aktueller Code aus der Authenticator-App')).toHaveAttribute('id', 'disableCode')
+    expect(screen.getByLabelText('Aktueller Code aus der Authenticator-App')).toHaveAttribute('inputMode', 'numeric')
   })
 })
 function renderMfaPageWithRoutes() {

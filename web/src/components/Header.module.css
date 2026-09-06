@@ -50,6 +50,10 @@
 }
 
 .userName {
+  display: inline-flex;
+  align-items: center;
+  min-height: 48px;
+  padding: 0 var(--gear-space-1);
   font-size: var(--gear-font-label-size);
   font-weight: var(--gear-font-label-weight);
   line-height: var(--gear-font-label-line-height);
@@ -123,8 +127,8 @@
   font-weight: var(--gear-font-label-weight);
   line-height: var(--gear-font-meta-line-height);
   padding: var(--gear-space-1) var(--gear-space-2);
-  background-color: rgba(46, 125, 50, 0.2);
-  border: 1px solid rgba(46, 125, 50, 0.6);
+  background-color: var(--gear-color-status-green-soft);
+  border: 1px solid var(--gear-color-status-green);
   border-radius: var(--gear-radius-sm);
   color: inherit;
   white-space: nowrap;

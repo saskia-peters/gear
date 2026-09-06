@@ -12,6 +12,7 @@ interface RequestErrors {
 interface ApproveErrors {
   email?: string
   reason?: string
+  confirmed?: string
   general?: string
 }
 
@@ -166,7 +167,7 @@ export function AdminRecoveryPage() {
       next.reason = 'Bitte gib eine Begründung für die Freigabe an.'
     }
     if (!confirmed) {
-      next.general = 'Bitte bestätige die Freigabe mit der Checkbox.'
+      next.confirmed = 'Bitte bestätige die Freigabe mit der Checkbox.'
     }
     if (Object.keys(next).length > 0) {
       setApprErrors(next)
@@ -295,12 +296,13 @@ export function AdminRecoveryPage() {
                     value={reqEmail}
                     onChange={(e) => setReqEmail(e.target.value)}
                     aria-invalid={!!reqErrors.email}
+                    aria-describedby={reqErrors.email ? 'reqEmail-error' : undefined}
                     disabled={reqSubmitting}
                     autoComplete="email"
                     required
                   />
                   {reqErrors.email && (
-                    <p className={styles.errorText} role="alert">
+                    <p id="reqEmail-error" className={styles.errorText} role="alert">
                       {reqErrors.email}
                     </p>
                   )}
@@ -358,12 +360,13 @@ export function AdminRecoveryPage() {
                     value={apprEmail}
                     onChange={(e) => setApprEmail(e.target.value)}
                     aria-invalid={!!apprErrors.email}
+                    aria-describedby={apprErrors.email ? 'apprEmail-error' : undefined}
                     disabled={apprSubmitting}
                     autoComplete="off"
                     required
                   />
                   {apprErrors.email && (
-                    <p className={styles.errorText} role="alert">
+                    <p id="apprEmail-error" className={styles.errorText} role="alert">
                       {apprErrors.email}
                     </p>
                   )}
@@ -379,29 +382,39 @@ export function AdminRecoveryPage() {
                     value={reason}
                     onChange={(e) => setReason(e.target.value)}
                     aria-invalid={!!apprErrors.reason}
+                    aria-describedby={apprErrors.reason ? 'reason-error' : undefined}
                     disabled={apprSubmitting}
                     rows={3}
                     required
                   />
                   {apprErrors.reason && (
-                    <p className={styles.errorText} role="alert">
+                    <p id="reason-error" className={styles.errorText} role="alert">
                       {apprErrors.reason}
                     </p>
                   )}
                 </div>
 
-                <div className={styles.checkboxGroup}>
-                  <input
-                    id="confirmed"
-                    type="checkbox"
-                    checked={confirmed}
-                    onChange={(e) => setConfirmed(e.target.checked)}
-                    disabled={apprSubmitting}
-                  />
-                  <label htmlFor="confirmed" className={styles.checkboxLabel}>
-                    Ich bestätige, dass ich die Anfrage geprüft habe und der betroffene
-                    Administrator der Freigabe zustimmt.
+                <div className={styles.fieldGroup}>
+                  <label className={styles.checkboxLabel}>
+                    <input
+                      id="confirmed"
+                      type="checkbox"
+                      checked={confirmed}
+                      onChange={(e) => setConfirmed(e.target.checked)}
+                      disabled={apprSubmitting}
+                      aria-invalid={!!apprErrors.confirmed}
+                      aria-describedby={apprErrors.confirmed ? 'confirmed-error' : undefined}
+                    />
+                    <span>
+                      Ich bestätige, dass ich die Anfrage geprüft habe und der betroffene
+                      Administrator der Freigabe zustimmt.
+                    </span>
                   </label>
+                  {apprErrors.confirmed && (
+                    <p id="confirmed-error" className={styles.errorText} role="alert">
+                      {apprErrors.confirmed}
+                    </p>
+                  )}
                 </div>
 
                 <button type="submit" className={styles.approveButton} disabled={apprSubmitting}>
@@ -464,12 +477,13 @@ export function AdminRecoveryPage() {
                     value={completeToken}
                     onChange={(e) => setCompleteToken(e.target.value)}
                     aria-invalid={!!completeErrors.token}
+                    aria-describedby={completeErrors.token ? 'completeToken-error' : undefined}
                     disabled={completeSubmitting}
                     autoComplete="off"
                     required
                   />
                   {completeErrors.token && (
-                    <p className={styles.errorText} role="alert">
+                    <p id="completeToken-error" className={styles.errorText} role="alert">
                       {completeErrors.token}
                     </p>
                   )}
@@ -485,12 +499,13 @@ export function AdminRecoveryPage() {
                     value={newPassword}
                     onChange={(e) => setNewPassword(e.target.value)}
                     aria-invalid={!!completeErrors.newPassword}
+                    aria-describedby={completeErrors.newPassword ? 'newPassword-error' : undefined}
                     disabled={completeSubmitting}
                     autoComplete="new-password"
                     required
                   />
                   {completeErrors.newPassword && (
-                    <p className={styles.errorText} role="alert">
+                    <p id="newPassword-error" className={styles.errorText} role="alert">
                       {completeErrors.newPassword}
                     </p>
                   )}
@@ -506,12 +521,13 @@ export function AdminRecoveryPage() {
                     value={newPasswordConfirm}
                     onChange={(e) => setNewPasswordConfirm(e.target.value)}
                     aria-invalid={!!completeErrors.confirm}
+                    aria-describedby={completeErrors.confirm ? 'newPasswordConfirm-error' : undefined}
                     disabled={completeSubmitting}
                     autoComplete="new-password"
                     required
                   />
                   {completeErrors.confirm && (
-                    <p className={styles.errorText} role="alert">
+                    <p id="newPasswordConfirm-error" className={styles.errorText} role="alert">
                       {completeErrors.confirm}
                     </p>
                   )}

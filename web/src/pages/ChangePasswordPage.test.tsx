@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { MemoryRouter, useLocation } from 'react-router-dom'
@@ -260,5 +260,61 @@ describe('ChangePasswordPage', () => {
         screen.getByText('Verbindung zum Server fehlgeschlagen. Bitte prüfe deine Internetverbindung.'),
       ).toBeInTheDocument()
     })
+  })
+
+  it('SUBMITTING_STATE: while the request is in flight the submit button and inputs are disabled and shows "Wird gesendet..."', async () => {
+    let resolveFetch!: (value: unknown) => void
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() => new Promise((resolve) => { resolveFetch = resolve })),
+    )
+    const user = userEvent.setup()
+    renderChangePasswordPage()
+
+    await user.type(screen.getByLabelText('Aktuelles Passwort'), 'geheim123456')
+    await user.type(screen.getByLabelText('Neues Passwort'), 'neuespasswort123')
+    await user.type(screen.getByLabelText('Wiederholung'), 'neuespasswort123')
+    await user.click(screen.getByRole('button', { name: 'Passwort ändern' }))
+
+    const button = screen.getByRole('button', { name: 'Wird gesendet...' })
+    expect(button).toBeDisabled()
+    expect(screen.getByLabelText('Aktuelles Passwort')).toBeDisabled()
+    expect(screen.getByLabelText('Neues Passwort')).toBeDisabled()
+    expect(screen.getByLabelText('Wiederholung')).toBeDisabled()
+
+    // Recovery (finding 7): once the request settles, the submit button returns
+    // to its original label and is re-enabled.
+    await act(async () => {
+      resolveFetch({
+        ok: false,
+        status: 500,
+        json: async () => ({ error: { code: 'internal_error', message: 'kaputt' } }),
+      })
+    })
+    expect(screen.getByRole('button', { name: 'Passwort ändern' })).toBeEnabled()
+  })
+
+  it('FOCUS_FIRST_ERROR: submitting empty fields moves focus to the first invalid input', async () => {
+    const user = userEvent.setup()
+    renderChangePasswordPage()
+
+    await user.click(screen.getByRole('button', { name: 'Passwort ändern' }))
+
+    // UX-DR9 SCREEN_READER: focus lands on the first failing field.
+    expect(screen.getByLabelText('Aktuelles Passwort')).toHaveFocus()
+  })
+
+  it('ACCESSIBILITY: the current-password inline error uses role="alert" and aria-describedby linkage', async () => {
+    const user = userEvent.setup()
+    renderChangePasswordPage()
+
+    await user.click(screen.getByRole('button', { name: 'Passwort ändern' }))
+
+    const currentInput = screen.getByLabelText('Aktuelles Passwort')
+    const currentError = screen.getByText('Bitte gib dein aktuelles Passwort ein.')
+    expect(currentError).toHaveAttribute('role', 'alert')
+    expect(currentError).toHaveAttribute('id', 'currentPassword-error')
+    expect(currentInput).toHaveAttribute('aria-invalid', 'true')
+    expect(currentInput).toHaveAttribute('aria-describedby', 'currentPassword-error')
   })
 })

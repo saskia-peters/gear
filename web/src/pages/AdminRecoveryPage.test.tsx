@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
@@ -208,5 +208,126 @@ describe('AdminRecoveryPage', () => {
       'href',
       '/admin',
     )
+  })
+
+  it('ACCESSIBILITY: inline errors are linked to their fields via aria-describedby', async () => {
+    const user = userEvent.setup()
+    renderRecovery()
+
+    await user.click(screen.getByRole('button', { name: 'Wiederherstellung anfordern' }))
+
+    const reqEmail = screen.getByLabelText('E-Mail-Adresse')
+    const reqError = screen.getByText('Bitte gib deine E-Mail-Adresse ein.')
+    expect(reqError).toHaveAttribute('role', 'alert')
+    expect(reqError).toHaveAttribute('id', 'reqEmail-error')
+    expect(reqEmail).toHaveAttribute('aria-invalid', 'true')
+    expect(reqEmail).toHaveAttribute('aria-describedby', 'reqEmail-error')
+
+    await user.click(screen.getByRole('button', { name: 'Freigeben' }))
+
+    const apprEmail = screen.getByLabelText('E-Mail-Adresse des betroffenen Administrators')
+    const reason = screen.getByLabelText('Begründung')
+    expect(apprEmail).toHaveAttribute('aria-describedby', 'apprEmail-error')
+    expect(reason).toHaveAttribute('aria-describedby', 'reason-error')
+    // The checkbox error is now field-attributed to the confirmation control.
+    const confirmError = screen.getByText('Bitte bestätige die Freigabe mit der Checkbox.')
+    expect(confirmError).toHaveAttribute('id', 'confirmed-error')
+    const checkbox = screen.getByLabelText(/Ich bestätige, dass ich die Anfrage geprüft habe/)
+    expect(checkbox).toHaveAttribute('aria-invalid', 'true')
+    expect(checkbox).toHaveAttribute('aria-describedby', 'confirmed-error')
+  })
+
+  it('SUBMITTING_STATE_REQUEST: while the request is in flight the request button and input are disabled and shows "Wird gesendet..."', async () => {
+    let resolveFetch!: (value: unknown) => void
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string) => {
+        if (url === '/api/v1/auth/admin/recovery/pending') {
+          return Promise.resolve({ ok: true, status: 200, json: async () => ({ requests: [] }) })
+        }
+        return new Promise((resolve) => { resolveFetch = resolve })
+      }),
+    )
+    const user = userEvent.setup()
+    renderRecovery()
+
+    await user.type(screen.getByLabelText('E-Mail-Adresse'), 'admina@gear.local')
+    await user.click(screen.getByRole('button', { name: 'Wiederherstellung anfordern' }))
+
+    const button = screen.getByRole('button', { name: 'Wird gesendet...' })
+    expect(button).toBeDisabled()
+    expect(screen.getByLabelText('E-Mail-Adresse')).toBeDisabled()
+
+    // Recovery (finding 7): once the request settles, the submitting state ends
+    // and the confirmation box appears.
+    await act(async () => {
+      resolveFetch({
+        ok: true,
+        status: 200,
+        json: async () => ({ message: REQUEST_CONFIRM, target_email: 'admina@gear.local' }),
+      })
+    })
+    expect(screen.getByText(REQUEST_CONFIRM)).toBeInTheDocument()
+  })
+
+  it('SUBMITTING_STATE_APPROVE: while the approve request is in flight the button and fields are disabled', async () => {
+    let resolveFetch!: (value: unknown) => void
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string) => {
+        if (url === '/api/v1/auth/admin/recovery/pending') {
+          return Promise.resolve({ ok: true, status: 200, json: async () => ({ requests: [] }) })
+        }
+        return new Promise((resolve) => { resolveFetch = resolve })
+      }),
+    )
+    const user = userEvent.setup()
+    renderRecovery()
+
+    await user.type(screen.getByLabelText('E-Mail-Adresse des betroffenen Administrators'), 'admina@gear.local')
+    await user.type(screen.getByLabelText('Begründung'), 'Admin A ist ausgesperrt')
+    await user.click(screen.getByLabelText(/Ich bestätige, dass ich die Anfrage geprüft habe/))
+    await user.click(screen.getByRole('button', { name: 'Freigeben' }))
+
+    const button = screen.getByRole('button', { name: 'Wird gesendet...' })
+    expect(button).toBeDisabled()
+    expect(screen.getByLabelText('E-Mail-Adresse des betroffenen Administrators')).toBeDisabled()
+    expect(screen.getByLabelText('Begründung')).toBeDisabled()
+
+    await act(async () => {
+      resolveFetch({ ok: true, status: 200, json: async () => ({ message: 'Freigabe erteilt.', recovery_token: 'raw-token' }) })
+    })
+    expect(screen.getByText('Freigabe erteilt.')).toBeInTheDocument()
+  })
+
+  it('SUBMITTING_STATE_COMPLETE: while the completion request is in flight the button and fields are disabled', async () => {
+    let resolveFetch!: (value: unknown) => void
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string) => {
+        if (url === '/api/v1/auth/admin/recovery/pending') {
+          return Promise.resolve({ ok: true, status: 200, json: async () => ({ requests: [] }) })
+        }
+        return new Promise((resolve) => { resolveFetch = resolve })
+      }),
+    )
+    const user = userEvent.setup()
+    renderRecovery()
+
+    await user.type(screen.getByLabelText('Einmal-Token'), 'raw-recovery-token')
+    await user.type(screen.getByLabelText('Neues Passwort'), 'neuesadminpass123')
+    await user.type(screen.getByLabelText('Passwort bestätigen'), 'neuesadminpass123')
+    await user.click(screen.getByRole('button', { name: 'Passwort setzen' }))
+
+    const button = screen.getByRole('button', { name: 'Wird gesendet...' })
+    expect(button).toBeDisabled()
+    expect(screen.getByLabelText('Einmal-Token')).toBeDisabled()
+    expect(screen.getByLabelText('Neues Passwort')).toBeDisabled()
+    expect(screen.getByLabelText('Passwort bestätigen')).toBeDisabled()
+
+    await act(async () => {
+      resolveFetch({ ok: true, status: 200, json: async () => ({ message: 'Passwort gesetzt.' }) })
+    })
+    expect(screen.getByText('Passwort gesetzt.')).toBeInTheDocument()
   })
 })

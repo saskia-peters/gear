@@ -172,11 +172,14 @@ describe('LoginPage', () => {
     })
 
     expect(screen.getByText('Übersicht')).toBeInTheDocument()
-    expect(fetchMock).toHaveBeenCalledWith('/api/v1/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: 'erika@example.com', password: 'geheim123456' }),
-    })
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/auth/login',
+      expect.objectContaining({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'erika@example.com', password: 'geheim123456' }),
+      }),
+    )
   })
 
   it('HAPPY_PATH_MFA: a successful login persists the is_mfa_enabled flag for the SPA indicator', async () => {
@@ -260,7 +263,7 @@ describe('LoginPage', () => {
     })
   })
 
-  it('LOCKOUT_3_FAILS: shows the German lockout screen and disables the retry button on 429', async () => {
+  it('LOCKOUT_3_FAILS: shows the German lockout screen with countdown and no retry button on 429', async () => {
     const fetchMock = vi.fn().mockResolvedValue({
       ok: false,
       status: 429,
@@ -268,7 +271,7 @@ describe('LoginPage', () => {
       json: async () => ({
         error: {
           code: 'too_many_attempts',
-          message: 'Zu viele Fehlversuche. Bitte warte 30 Sekunden.',
+          message: 'Zu viele Fehlversuche — 30 Sekunden warten.',
         },
       }),
     })
@@ -277,15 +280,20 @@ describe('LoginPage', () => {
     await submitLogin('erika@example.com', 'geheim123456')
 
     await waitFor(() => {
-      expect(screen.getByText('Zu viele Fehlversuche. Bitte warte 30 Sekunden.')).toBeInTheDocument()
+      expect(screen.getByRole('alert')).toHaveTextContent(
+        /Zu viele Fehlversuche — \d+ Sekunden warten\./,
+      )
     })
-    expect(screen.getByRole('button', { name: /Bitte warten/ })).toBeDisabled()
+    expect(screen.getByTestId('lockout-countdown')).toHaveTextContent('30')
+    // UX-DR8: the Sperre surface has NO retry button until the timer expires.
+    expect(screen.queryByRole('button', { name: 'Anmelden' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Bitte warten/ })).not.toBeInTheDocument()
     expect(localStorage.getItem(TOKEN_STORAGE_KEY)).toBeNull()
     expect(localStorage.getItem(LOCKOUT_STORAGE_KEY)).not.toBeNull()
     expect(fetchMock).toHaveBeenCalledTimes(1)
   })
 
-  it('LOCKOUT_EXPIRED: re-enables the retry button once the countdown expires', async () => {
+  it('LOCKOUT_COUNTDOWN_TICK: the displayed countdown decrements live each second (UX-DR6/DR8)', async () => {
     vi.useFakeTimers()
     const fetchMock = vi.fn().mockResolvedValue({
       ok: false,
@@ -301,9 +309,39 @@ describe('LoginPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Anmelden' }))
     await act(async () => {})
 
-    expect(screen.getByText(/Zu viele Fehlversuche/)).toBeInTheDocument()
-    expect(screen.getByText(/bitte warte 30 Sekunden/i)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /Bitte warten/ })).toBeDisabled()
+    expect(screen.getByTestId('lockout-countdown')).toHaveTextContent('30')
+
+    act(() => {
+      vi.advanceTimersByTime(1000)
+    })
+    expect(screen.getByTestId('lockout-countdown')).toHaveTextContent('29')
+
+    act(() => {
+      vi.advanceTimersByTime(2000)
+    })
+    expect(screen.getByTestId('lockout-countdown')).toHaveTextContent('27')
+  })
+
+  it('LOCKOUT_EXPIRED: the form with an enabled retry button returns once the countdown expires', async () => {
+    vi.useFakeTimers()
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 429,
+      headers: { get: (name: string) => (name === 'Retry-After' ? '30' : null) },
+      json: async () => ({ error: { code: 'too_many_attempts' } }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+
+    renderLoginPage()
+    fireEvent.change(screen.getByLabelText('E-Mail-Adresse'), { target: { value: 'erika@example.com' } })
+    fireEvent.change(screen.getByLabelText('Passwort'), { target: { value: 'geheim123456' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Anmelden' }))
+    await act(async () => {})
+
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      /Zu viele Fehlversuche — \d+ Sekunden warten\./,
+    )
+    expect(screen.queryByRole('button', { name: 'Anmelden' })).not.toBeInTheDocument()
 
     act(() => {
       vi.advanceTimersByTime(31_000)
@@ -319,11 +357,14 @@ describe('LoginPage', () => {
     localStorage.setItem(LOCKOUT_STORAGE_KEY, String(Date.now() + 30_000))
     renderLoginPage()
 
-    expect(screen.getByText(/Zu viele Fehlversuche\. Bitte warte \d+ Sekunden\./)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /Bitte warten/ })).toBeDisabled()
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      /Zu viele Fehlversuche — \d+ Sekunden warten\./,
+    )
+    expect(screen.getByTestId('lockout-countdown')).toHaveTextContent(/\d+/)
+    expect(screen.queryByRole('button', { name: 'Anmelden' })).not.toBeInTheDocument()
   })
 
-  it('LOCKOUT_SUBMIT_GUARD: an Enter submit during the countdown does not clear the lockout', async () => {
+  it('LOCKOUT_SUBMIT_GUARD: during the lockout the form is hidden so no submit can clear the window', async () => {
     vi.useFakeTimers()
     const fetchMock = vi.fn().mockResolvedValue({
       ok: false,
@@ -339,20 +380,124 @@ describe('LoginPage', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Anmelden' }))
     await act(async () => {})
 
-    expect(screen.getByRole('button', { name: /Bitte warten/ })).toBeDisabled()
+    // Sperre surface: no form, no submit control while the countdown runs.
+    expect(screen.getByRole('alert')).toHaveTextContent(
+      /Zu viele Fehlversuche — \d+ Sekunden warten\./,
+    )
+    expect(screen.queryByLabelText('E-Mail-Adresse')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Anmelden' })).not.toBeInTheDocument()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
 
-    // A second submit attempt (e.g. implicit Enter submit) while locked must
-    // neither clear nor restart the lockout and must not hit the server.
-    const form = screen.getByLabelText('E-Mail-Adresse').closest('form')
-    if (!form) {
-      throw new Error('login form not found')
-    }
-    fireEvent.submit(form)
+    act(() => {
+      vi.advanceTimersByTime(31_000)
+    })
+
+    expect(screen.queryByText(/Zu viele Fehlversuche/)).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Anmelden' })).toBeEnabled()
+    expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+
+  it('SUBMITTING_STATE: while the request is in flight the submit button is disabled and shows "Wird gesendet..."', async () => {
+    let resolveFetch!: (value: unknown) => void
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() => new Promise((resolve) => { resolveFetch = resolve })),
+    )
+
+    const user = userEvent.setup()
+    renderLoginPage()
+    await user.type(screen.getByLabelText('E-Mail-Adresse'), 'erika@example.com')
+    await user.type(screen.getByLabelText('Passwort'), 'geheim123456')
+    await user.click(screen.getByRole('button', { name: 'Anmelden' }))
+
+    const button = screen.getByRole('button', { name: 'Wird gesendet...' })
+    expect(button).toBeDisabled()
+    expect(screen.getByLabelText('E-Mail-Adresse')).toBeDisabled()
+    expect(screen.getByLabelText('Passwort')).toBeDisabled()
+
+    // Recovery (finding 7): once the request settles, the submit button returns
+    // to its original label and is re-enabled.
+    await act(async () => {
+      resolveFetch({ ok: false, status: 500, json: async () => ({}) })
+    })
+
+    expect(screen.getByRole('button', { name: 'Anmelden' })).toBeEnabled()
+  })
+
+  it('HUNG_REQUEST: an aborted (hung) request restores the submit button (no permanent disabled form)', async () => {
+    vi.useFakeTimers()
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(
+        (_url: string, init?: RequestInit) =>
+          new Promise((_resolve, reject) => {
+            init?.signal?.addEventListener('abort', () => {
+              reject(new DOMException('Aborted', 'AbortError'))
+            })
+          }),
+      ),
+    )
+
+    renderLoginPage()
+    fireEvent.change(screen.getByLabelText('E-Mail-Adresse'), { target: { value: 'erika@example.com' } })
+    fireEvent.change(screen.getByLabelText('Passwort'), { target: { value: 'geheim123456' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Anmelden' }))
     await act(async () => {})
 
-    expect(screen.getByText(/Zu viele Fehlversuche/)).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: /Bitte warten/ })).toBeDisabled()
-    expect(fetchMock).toHaveBeenCalledTimes(1)
+    expect(screen.getByRole('button', { name: 'Wird gesendet...' })).toBeDisabled()
+
+    act(() => {
+      vi.advanceTimersByTime(10_000)
+    })
+    await act(async () => {})
+
+    expect(screen.getByRole('button', { name: 'Anmelden' })).toBeEnabled()
+  })
+
+  it('ANTI_ENUM_LEAKY_BODY: a leaky server message on 401 is never rendered — canonical microcopy only', async () => {
+    // Even if the server body distinguishes "E-Mail nicht gefunden", the client
+    // must render the uniform canonical string (UX-DR7/UX-DR8).
+    stubFetch({
+      ok: false,
+      status: 401,
+      body: { error: { code: 'invalid_credentials', message: 'E-Mail nicht gefunden' } },
+    })
+
+    await submitLogin('nobody@example.com', 'falsches-passwort')
+
+    await waitFor(() => {
+      expect(screen.getByText('E-Mail oder Passwort ist falsch.')).toBeInTheDocument()
+    })
+    expect(screen.queryByText('E-Mail nicht gefunden')).not.toBeInTheDocument()
+    expect(localStorage.getItem(TOKEN_STORAGE_KEY)).toBeNull()
+  })
+
+  it('FOCUS_FIRST_ERROR: submitting invalid fields moves focus to the first invalid input', async () => {
+    const user = userEvent.setup()
+    renderLoginPage()
+
+    await user.click(screen.getByRole('button', { name: 'Anmelden' }))
+
+    // UX-DR9 SCREEN_READER: focus lands on the first failing field.
+    expect(screen.getByLabelText('E-Mail-Adresse')).toHaveFocus()
+  })
+
+  it('ACCESSIBILITY: inline field errors use role="alert" and are linked to the invalid input via aria-describedby', async () => {
+    const user = userEvent.setup()
+    renderLoginPage()
+
+    await user.click(screen.getByRole('button', { name: 'Anmelden' }))
+
+    const emailInput = screen.getByLabelText('E-Mail-Adresse')
+    const emailError = screen.getByText('Bitte gib deine E-Mail-Adresse ein.')
+    expect(emailError).toHaveAttribute('role', 'alert')
+    expect(emailError).toHaveAttribute('id', 'email-error')
+    expect(emailInput).toHaveAttribute('aria-invalid', 'true')
+    expect(emailInput).toHaveAttribute('aria-describedby', 'email-error')
+
+    const passwordInput = screen.getByLabelText('Passwort')
+    expect(passwordInput).toHaveAttribute('aria-invalid', 'true')
+    expect(passwordInput).toHaveAttribute('aria-describedby', 'password-error')
   })
 
   it('MFA_CHALLENGE: a mfa_required response shows the TOTP step and the "MFA aktiv" indicator', async () => {
@@ -375,11 +520,14 @@ describe('LoginPage', () => {
     // No session token is stored yet (two-step login, FR-4).
     expect(localStorage.getItem(TOKEN_STORAGE_KEY)).toBeNull()
     // The first POST must NOT carry a totp_code.
-    expect(fetchMock).toHaveBeenCalledWith('/api/v1/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email: 'erika@example.com', password: 'geheim123456' }),
-    })
+    expect(fetchMock).toHaveBeenCalledWith(
+      '/api/v1/auth/login',
+      expect.objectContaining({
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ email: 'erika@example.com', password: 'geheim123456' }),
+      }),
+    )
   })
 
   it('MFA_VALID_CODE: submitting a valid code stores the token and navigates to the dashboard', async () => {

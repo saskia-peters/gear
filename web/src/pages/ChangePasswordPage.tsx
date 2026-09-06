@@ -1,7 +1,8 @@
-import { useEffect, useState, type FormEvent } from 'react'
+import { useEffect, useState, useRef, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Header } from '../components/Header.tsx'
 import { SESSION_TOKEN_KEY, clearAuthState } from '../auth/authState.ts'
+import { focusFirstInvalid } from '../auth/focus.ts'
 import styles from './ChangePasswordPage.module.css'
 
 interface FieldErrors {
@@ -27,6 +28,7 @@ export function ChangePasswordPage() {
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [isChanged, setIsChanged] = useState(false)
   const [sessionsRevoked, setSessionsRevoked] = useState(true)
+  const formRef = useRef<HTMLFormElement>(null)
   const navigate = useNavigate()
 
   useEffect(() => {
@@ -73,6 +75,8 @@ export function ChangePasswordPage() {
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
     if (!validate()) {
+      // UX-DR9 SCREEN_READER: move focus to the first failing field.
+      focusFirstInvalid(formRef.current)
       return
     }
 
@@ -165,7 +169,7 @@ export function ChangePasswordPage() {
               </button>
             </div>
           ) : (
-            <form className={styles.form} onSubmit={handleSubmit} noValidate>
+            <form ref={formRef} className={styles.form} onSubmit={handleSubmit} noValidate>
               <div className={styles.fieldGroup}>
                 <label htmlFor="currentPassword" className={styles.label}>
                   Aktuelles Passwort

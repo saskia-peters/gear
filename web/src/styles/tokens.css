@@ -155,6 +155,24 @@
 
   --gear-color-header-bg: var(--gear-color-brand-navy);
   --gear-color-header-text: #FFFFFF;
+
+  /* Focus rings — DESIGN.md alpha focus, theme-aware */
+  --gear-focus-ring-color: rgba(0, 51, 153, 0.2);
+  --gear-focus-ring-error: rgba(198, 40, 40, 0.2);
+
+  /* Status soft tints — translucent status fills for inline feedback boxes */
+  --gear-color-status-red-soft: rgba(198, 40, 40, 0.1);
+  --gear-color-status-green-soft: rgba(46, 125, 50, 0.12);
+  --gear-color-status-orange-soft: rgba(245, 130, 31, 0.12);
+
+  /* Dark-mode values for the focus-ring and status-soft tokens. Defined once
+     here and referenced by BOTH dark blocks (system + explicit) so the two
+     never drift. */
+  --gear-dark-focus-ring-color: rgba(122, 162, 255, 0.35);
+  --gear-dark-focus-ring-error: rgba(239, 83, 80, 0.35);
+  --gear-dark-status-red-soft: rgba(239, 83, 80, 0.14);
+  --gear-dark-status-green-soft: rgba(76, 175, 80, 0.16);
+  --gear-dark-status-orange-soft: rgba(255, 167, 38, 0.16);
 }
 
 /* System Dark Mode (when not explicitly set to light) */
@@ -203,6 +221,12 @@
 
     --gear-color-header-bg: var(--gear-color-brand-navy-darkmode);
     --gear-color-header-text: var(--gear-color-ink-primary-dark);
+
+    --gear-focus-ring-color: var(--gear-dark-focus-ring-color);
+    --gear-focus-ring-error: var(--gear-dark-focus-ring-error);
+    --gear-color-status-red-soft: var(--gear-dark-status-red-soft);
+    --gear-color-status-green-soft: var(--gear-dark-status-green-soft);
+    --gear-color-status-orange-soft: var(--gear-dark-status-orange-soft);
   }
 }
 
@@ -251,6 +275,12 @@
 
   --gear-color-header-bg: var(--gear-color-brand-navy-darkmode);
   --gear-color-header-text: var(--gear-color-ink-primary-dark);
+
+  --gear-focus-ring-color: var(--gear-dark-focus-ring-color);
+  --gear-focus-ring-error: var(--gear-dark-focus-ring-error);
+  --gear-color-status-red-soft: var(--gear-dark-status-red-soft);
+  --gear-color-status-green-soft: var(--gear-dark-status-green-soft);
+  --gear-color-status-orange-soft: var(--gear-dark-status-orange-soft);
 }
 
 /* Explicit Light Mode */

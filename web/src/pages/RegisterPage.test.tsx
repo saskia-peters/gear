@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { render, screen, waitFor } from '@testing-library/react'
+import { render, screen, waitFor, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
@@ -219,5 +219,100 @@ describe('RegisterPage', () => {
     await waitFor(() => {
       expect(screen.getByText('Verbindung zum Server fehlgeschlagen. Bitte prüfe deine Internetverbindung.')).toBeInTheDocument()
     })
+  })
+
+  it('SUBMITTING_STATE: while the request is in flight the submit button is disabled and shows "Wird gesendet..."', async () => {
+    let resolveFetch!: (value: unknown) => void
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation(() => new Promise((resolve) => { resolveFetch = resolve })),
+    )
+    const user = userEvent.setup()
+    renderRegisterPage()
+
+    await user.type(screen.getByLabelText('Vorname'), 'Max')
+    await user.type(screen.getByLabelText('Nachname'), 'Mustermann')
+    await user.type(screen.getByLabelText('E-Mail-Adresse'), 'max@example.com')
+    await user.type(screen.getByLabelText('Passwort'), 'sicherespasswort123')
+    await user.type(screen.getByLabelText('Passwort bestätigen'), 'sicherespasswort123')
+    await user.click(screen.getByRole('button', { name: 'Registrieren' }))
+
+    const button = screen.getByRole('button', { name: 'Wird gesendet...' })
+    expect(button).toBeDisabled()
+    expect(screen.getByLabelText('Vorname')).toBeDisabled()
+    expect(screen.getByLabelText('Nachname')).toBeDisabled()
+    expect(screen.getByLabelText('E-Mail-Adresse')).toBeDisabled()
+    expect(screen.getByLabelText('Passwort')).toBeDisabled()
+    expect(screen.getByLabelText('Passwort bestätigen')).toBeDisabled()
+
+    // Recovery (finding 7): once the request settles, the submitting state ends
+    // and the confirmation surface appears.
+    await act(async () => {
+      resolveFetch({ ok: true, status: 200, json: async () => ({ status: 'pending_approval' }) })
+    })
+    expect(
+      screen.getByRole('heading', { level: 2, name: 'Registrierung eingegangen' }),
+    ).toBeInTheDocument()
+  })
+
+  it('ANTI_ENUM_LEAKY_BODY: a server message that leaks account existence is never rendered', async () => {
+    // Even if the server body says "E-Mail existiert bereits", the client shows
+    // the uniform anti-enumeration confirmation (UX-DR7/UX-DR8).
+    const user = userEvent.setup()
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        message: 'E-Mail existiert bereits',
+        status: 'pending_approval',
+      }),
+    }))
+
+    renderRegisterPage()
+
+    await user.type(screen.getByLabelText('Vorname'), 'Max')
+    await user.type(screen.getByLabelText('Nachname'), 'Mustermann')
+    await user.type(screen.getByLabelText('E-Mail-Adresse'), 'existing@example.com')
+    await user.type(screen.getByLabelText('Passwort'), 'sicherespasswort123')
+    await user.type(screen.getByLabelText('Passwort bestätigen'), 'sicherespasswort123')
+
+    await user.click(screen.getByRole('button', { name: 'Registrieren' }))
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('Wenn deine E-Mail bereits registriert ist, erhältst du eine Bestätigung.'),
+      ).toBeInTheDocument()
+    })
+    expect(screen.queryByText('E-Mail existiert bereits')).not.toBeInTheDocument()
+  })
+
+  it('FOCUS_FIRST_ERROR: submitting invalid fields moves focus to the first invalid input', async () => {
+    const user = userEvent.setup()
+    renderRegisterPage()
+
+    await user.click(screen.getByRole('button', { name: 'Registrieren' }))
+
+    // UX-DR9 SCREEN_READER: focus lands on the first failing field (Vorname).
+    expect(screen.getByLabelText('Vorname')).toHaveFocus()
+  })
+
+  it('ACCESSIBILITY: every input has an accessible label and inline errors use role="alert" + aria-describedby', async () => {
+    const user = userEvent.setup()
+    renderRegisterPage()
+
+    expect(screen.getByLabelText('Vorname')).toHaveAttribute('id', 'firstName')
+    expect(screen.getByLabelText('Nachname')).toHaveAttribute('id', 'lastName')
+    expect(screen.getByLabelText('E-Mail-Adresse')).toHaveAttribute('id', 'email')
+    expect(screen.getByLabelText('Passwort')).toHaveAttribute('id', 'password')
+    expect(screen.getByLabelText('Passwort bestätigen')).toHaveAttribute('id', 'passwordConfirm')
+
+    await user.click(screen.getByRole('button', { name: 'Registrieren' }))
+
+    const firstNameInput = screen.getByLabelText('Vorname')
+    const firstNameError = screen.getByText('Bitte gib deinen Vornamen ein.')
+    expect(firstNameError).toHaveAttribute('role', 'alert')
+    expect(firstNameError).toHaveAttribute('id', 'firstName-error')
+    expect(firstNameInput).toHaveAttribute('aria-invalid', 'true')
+    expect(firstNameInput).toHaveAttribute('aria-describedby', 'firstName-error')
   })
 })

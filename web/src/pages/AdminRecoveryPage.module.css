@@ -115,7 +115,7 @@
 .input:focus,
 .textarea:focus {
   border-color: var(--gear-color-brand);
-  box-shadow: 0 0 0 2px rgba(0, 51, 153, 0.2);
+  box-shadow: var(--gear-focus-ring-color);
 }
 
 .inputError {
@@ -124,7 +124,7 @@
 
 .inputError:focus {
   border-color: var(--gear-color-status-red);
-  box-shadow: 0 0 0 2px rgba(198, 40, 40, 0.2);
+  box-shadow: var(--gear-focus-ring-error);
 }
 
 .errorText {
@@ -136,7 +136,7 @@
 
 .generalError {
   padding: var(--gear-space-3) var(--gear-space-4);
-  background-color: rgba(198, 40, 40, 0.1);
+  background-color: var(--gear-color-status-red-soft);
   border: 1px solid var(--gear-color-status-red);
   border-radius: var(--gear-radius-md);
   color: var(--gear-color-status-red);
@@ -173,21 +173,34 @@
   cursor: not-allowed;
 }
 
-.checkboxGroup {
+.checkboxLabel {
   display: flex;
   align-items: flex-start;
   gap: var(--gear-space-2);
-}
-
-.checkboxLabel {
+  min-height: 48px;
+  padding: var(--gear-space-2) 0;
   font-size: var(--gear-font-label-size);
   line-height: var(--gear-font-label-line-height);
   color: var(--gear-color-ink-primary);
+  cursor: pointer;
+}
+
+.checkboxLabel input {
+  margin: 0;
+  flex-shrink: 0;
+  width: 20px;
+  height: 20px;
+  accent-color: var(--gear-color-brand);
+}
+
+.checkboxLabel:focus-within {
+  outline: 2px solid var(--gear-color-brand);
+  outline-offset: 2px;
 }
 
 .successBox {
   padding: var(--gear-space-4) var(--gear-space-4);
-  background-color: rgba(46, 125, 50, 0.12);
+  background-color: var(--gear-color-status-green-soft);
   border: 1px solid var(--gear-color-status-green);
   border-radius: var(--gear-radius-md);
   display: flex;

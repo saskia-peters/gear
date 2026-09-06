@@ -47,8 +47,8 @@ development_status:
   profile-page-edit-base-data: done
   1-8-self-service-password-reset-forgot-password: done
   1-9-flexible-user-attributes: done
-  1-10-dual-admin-credential-recovery: review
-  1-11-auth-ux-foundation: backlog
+  1-10-dual-admin-credential-recovery: done
+  1-11-auth-ux-foundation: review
   epic-1-retrospective: optional
 
   epic-2: backlog

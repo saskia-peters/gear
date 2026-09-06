@@ -1,6 +1,7 @@
-import { useState, useEffect, type FormEvent } from 'react'
+import { useState, useEffect, useRef, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { Header } from '../components/Header.tsx'
+import { focusFirstInvalid } from '../auth/focus.ts'
 import styles from './RegisterPage.module.css'
 
 interface FieldErrors {
@@ -22,6 +23,7 @@ export function RegisterPage() {
   const [errors, setErrors] = useState<FieldErrors>({})
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [isSubmitted, setIsSubmitted] = useState(false)
+  const formRef = useRef<HTMLFormElement>(null)
 
   useEffect(() => {
     const prevTitle = document.title
@@ -77,6 +79,8 @@ export function RegisterPage() {
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault()
     if (!validate()) {
+      // UX-DR9 SCREEN_READER: move focus to the first failing field.
+      focusFirstInvalid(formRef.current)
       return
     }
 
@@ -161,7 +165,7 @@ export function RegisterPage() {
                 </div>
               )}
 
-              <form className={styles.form} onSubmit={handleSubmit} noValidate>
+              <form ref={formRef} className={styles.form} onSubmit={handleSubmit} noValidate>
                 <div className={styles.fieldGroup}>
                   <label htmlFor="firstName" className={styles.label}>
                     Vorname
