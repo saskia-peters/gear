@@ -113,6 +113,98 @@ func TestGatewayForbidden(t *testing.T) {
 	}
 }
 
+// basePermissionCodes is the full AD-12 base series (Story 2.2): the 21 codes
+// the seeded admin role resolves.
+func basePermissionCodes() []string {
+	return []string{
+		"dashboard.view",
+		"inspection.submit",
+		"inspection.history.view",
+		"report.export",
+		"tool.reinstate",
+		"tools.manage",
+		"tool_types.manage",
+		"users.view",
+		"users.approve",
+		"users.manage",
+		"user_groups.manage",
+		"roles.create",
+		"roles.edit",
+		"roles.assign",
+		"qualifications.manage",
+		"dsgvo.access_report",
+		"dsgvo.delete",
+		"admin.recovery.approve",
+		"admin.settings.email",
+		"admin.settings.backup",
+		"schedules.manage",
+	}
+}
+
+// basePermissionCodesExcept returns the full base series with the given code
+// removed. An empty excluded code returns the full series unchanged.
+func basePermissionCodesExcept(excluded string) []string {
+	codes := basePermissionCodes()
+	if excluded == "" {
+		return codes
+	}
+	out := make([]string, 0, len(codes)-1)
+	for _, c := range codes {
+		if c != excluded {
+			out = append(out, c)
+		}
+	}
+	return out
+}
+
+// TestGatewayForbiddenWithMissingRequiredCode (Story 2.2): even when the
+// resolver returns 20 of the 21 base codes — everything EXCEPT the single
+// required code — the gateway still answers 403. It checks the exact code,
+// never a wildcard, prefix or "mostly allowed" heuristic.
+func TestGatewayForbiddenWithMissingRequiredCode(t *testing.T) {
+	v := &mockValidator{session: &core.Session{User: activeUser()}}
+	r := &mockResolver{perms: basePermissionCodesExcept(protectedCode)}
+	h := newProtectedRouter(v, r)
+
+	rec := doRequest(h, "valid-token")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 with the required code missing", rec.Code)
+	}
+	var env httpapi.ErrorEnvelope
+	_ = json.Unmarshal(rec.Body.Bytes(), &env)
+	if env.Error.Code != "forbidden" {
+		t.Errorf("code = %q, want forbidden", env.Error.Code)
+	}
+}
+
+// TestGatewayAllowedWithFullSeed confirms a caller carrying all 21 base codes
+// (the seeded admin, AD-12) passes the gateway.
+func TestGatewayAllowedWithFullSeed(t *testing.T) {
+	v := &mockValidator{session: &core.Session{User: activeUser()}}
+	r := &mockResolver{perms: basePermissionCodes()}
+	h := newProtectedRouter(v, r)
+
+	rec := doRequest(h, "valid-token")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 with the full base series", rec.Code)
+	}
+}
+
+// TestGatewayAllowedWithUnrelatedCodeMissing pins down that authorization is
+// EXACT-code based: removing a base code that is NOT the required one (while
+// the required code remains) still passes. A missing sibling code must never
+// revoke the required permission.
+func TestGatewayAllowedWithUnrelatedCodeMissing(t *testing.T) {
+	v := &mockValidator{session: &core.Session{User: activeUser()}}
+	r := &mockResolver{perms: basePermissionCodesExcept("dashboard.view")}
+	h := newProtectedRouter(v, r)
+
+	rec := doRequest(h, "valid-token")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200: removing an unrelated code must not revoke the required one", rec.Code)
+	}
+}
+
 func TestGatewayAllowed(t *testing.T) {
 	user := activeUser()
 	v := &mockValidator{session: &core.Session{User: user}}

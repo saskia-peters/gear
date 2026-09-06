@@ -40,6 +40,7 @@ type mockService struct {
 	denyAdminRecoveryFunc    func(ctx context.Context, approver *core.User, targetEmail, reason string) (*core.AdminRecoveryDenyResult, error)
 	listAdminRecoveryFunc    func(ctx context.Context, caller *core.User) ([]*core.AdminRecoveryRequest, error)
 	completeAdminRecoveryFunc func(ctx context.Context, rawToken, newPassword, confirm string) (*core.AdminRecoveryCompleteResult, error)
+	resolvePermissionFunc    func(ctx context.Context, user *core.User) ([]string, error)
 	revokeOtherCalls     *int
 	revokeAllCalls       *int
 }
@@ -159,6 +160,13 @@ func (m *mockService) CompletePasswordReset(ctx context.Context, rawToken, newPa
 		return m.completeResetFunc(ctx, rawToken, newPassword, confirm)
 	}
 	return &core.ResetCompleteResult{Message: core.MsgPasswordResetComplete}, nil
+}
+
+func (m *mockService) ResolvePermissionSet(ctx context.Context, user *core.User) ([]string, error) {
+	if m.resolvePermissionFunc != nil {
+		return m.resolvePermissionFunc(ctx, user)
+	}
+	return []string{}, nil
 }
 
 func (m *mockService) RequestAdminRecovery(ctx context.Context, caller *core.User, targetEmail string) (*core.AdminRecoveryResult, error) {
@@ -2911,5 +2919,196 @@ func TestHandlerUpdateProfileNonObjectAttributesReturns400(t *testing.T) {
 	}
 	if env.Error.Code != "invalid_request" {
 		t.Errorf("code = %q, want invalid_request", env.Error.Code)
+	}
+}
+
+// authedPermissionsRequest builds a GET /me/permissions request carrying an
+// authenticated user in context, mirroring what the RequireAuth middleware
+// injects.
+func authedPermissionsRequest() *http.Request {
+	req := httptest.NewRequest(http.MethodGet, "/me/permissions", nil)
+	user := &core.User{ID: "u-1", Email: "max@example.com", State: core.StateActive}
+	return req.WithContext(auth.WithUser(req.Context(), user))
+}
+
+func TestHandlerMyPermissionsResolvesLiveSet(t *testing.T) {
+	// Story 2.2: GET /api/v1/auth/me/permissions returns the caller's resolved
+	// permission set, server-authoritative (never a client snapshot).
+	want := []string{"dashboard.view", "inspection.submit"}
+	svc := &mockService{
+		resolvePermissionFunc: func(ctx context.Context, user *core.User) ([]string, error) {
+			return want, nil
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	req := authedPermissionsRequest()
+	rec := httptest.NewRecorder()
+	h.MyPermissions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &wire); err != nil {
+		t.Fatal(err)
+	}
+	perms, ok := wire["permissions"].([]any)
+	if !ok {
+		t.Fatalf("permissions = %T, want an array", wire["permissions"])
+	}
+	if len(perms) != len(want) || perms[0] != want[0] || perms[1] != want[1] {
+		t.Errorf("permissions = %v, want %v", perms, want)
+	}
+}
+
+func TestHandlerMyPermissionsEmptySetSerializesAsArray(t *testing.T) {
+	// A caller with no roles/grants gets an empty JSON array, never null.
+	svc := &mockService{
+		resolvePermissionFunc: func(ctx context.Context, user *core.User) ([]string, error) {
+			return []string{}, nil
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	req := authedPermissionsRequest()
+	rec := httptest.NewRecorder()
+	h.MyPermissions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &wire); err != nil {
+		t.Fatal(err)
+	}
+	perms, ok := wire["permissions"].([]any)
+	if !ok {
+		t.Fatalf("permissions = %T, want an array", wire["permissions"])
+	}
+	if len(perms) != 0 {
+		t.Errorf("permissions = %v, want an empty array", perms)
+	}
+}
+
+func TestHandlerMyPermissionsNilUserReturns401(t *testing.T) {
+	svc := &mockService{}
+	h := newTestHandler(svc, &stubValidator{})
+
+	req := httptest.NewRequest(http.MethodGet, "/me/permissions", nil)
+	rec := httptest.NewRecorder()
+	h.MyPermissions(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 without an authenticated user", rec.Code)
+	}
+}
+
+func TestHandlerMyPermissionsServiceErrorReturns500(t *testing.T) {
+	svc := &mockService{
+		resolvePermissionFunc: func(ctx context.Context, user *core.User) ([]string, error) {
+			return nil, errors.New("db down")
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	req := authedPermissionsRequest()
+	rec := httptest.NewRecorder()
+	h.MyPermissions(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error.Code != "internal_error" {
+		t.Errorf("code = %q, want internal_error", env.Error.Code)
+	}
+}
+
+func TestHandlerMyPermissionsClientAbortedSkipsErrorWrite(t *testing.T) {
+	// Client-abort guard: when the request context is already canceled, the
+	// handler must NOT write a spurious 500 (or an error log) — the caller is
+	// gone, so the recorder stays untouched.
+	svc := &mockService{
+		resolvePermissionFunc: func(ctx context.Context, user *core.User) ([]string, error) {
+			return nil, errors.New("db down")
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	req := authedPermissionsRequest()
+	ctx, cancel := context.WithCancel(req.Context())
+	cancel()
+	req = req.WithContext(ctx)
+	rec := httptest.NewRecorder()
+	h.MyPermissions(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want untouched 200 on a canceled request (body=%q)", rec.Code, rec.Body.String())
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("body = %q, want empty (no error envelope written)", rec.Body.String())
+	}
+}
+
+func TestHandlerMyPermissionsRouteContract(t *testing.T) {
+	// Story 2.2, route-level: GET /api/v1/auth/me/permissions is inside the
+	// RequireAuth group — the REAL middleware validates the bearer token and
+	// injects the user, then the handler resolves and returns the set. This
+	// mirrors TestHandlerMFAStatusContract's use of Routes() + a real validator.
+	want := []string{"dashboard.view", "inspection.submit"}
+	svc := &mockService{
+		resolvePermissionFunc: func(ctx context.Context, user *core.User) ([]string, error) {
+			if user == nil || user.ID != "u-1" {
+				t.Errorf("handler received user %+v, want the middleware-injected u-1", user)
+			}
+			return want, nil
+		},
+	}
+	h := NewHandler(svc, discardLogger(), &stubValidator{user: &core.User{ID: "u-1", Email: "max@example.com", State: core.StateActive}})
+
+	req := httptest.NewRequest(http.MethodGet, "/me/permissions", nil)
+	req.Header.Set("Authorization", "Bearer valid-token")
+	rec := httptest.NewRecorder()
+
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &wire); err != nil {
+		t.Fatal(err)
+	}
+	perms, ok := wire["permissions"].([]any)
+	if !ok {
+		t.Fatalf("permissions = %T, want an array", wire["permissions"])
+	}
+	if len(perms) != len(want) || perms[0] != want[0] || perms[1] != want[1] {
+		t.Errorf("permissions = %v, want %v", perms, want)
+	}
+}
+
+func TestHandlerMyPermissionsAuthGated(t *testing.T) {
+	// The route is wrapped in RequireAuth: no valid bearer token must yield a
+	// uniform 401 (Story 2.2 server-authoritative inspection surface).
+	h := NewHandler(&mockService{}, discardLogger(), &rejectingValidator{})
+	req := httptest.NewRequest(http.MethodGet, "/me/permissions", nil)
+	rec := httptest.NewRecorder()
+
+	h.Routes().ServeHTTP(rec, req)
+
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 from the auth middleware", rec.Code)
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error.Code != "unauthorized" {
+		t.Errorf("code = %q, want unauthorized", env.Error.Code)
 	}
 }

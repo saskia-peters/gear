@@ -1335,3 +1335,228 @@ func TestPostgresAdminRecoveryRepository(t *testing.T) {
 		t.Errorf("restoring admin.1 password hash failed: %v", err)
 	}
 }
+
+// basePermissionCodes is the AD-12 base series seeded by migration 000010
+// (Story 2.2): the 21 codes the architecture spine maps every action to.
+func basePermissionCodes() []string {
+	return []string{
+		"admin.recovery.approve",
+		"admin.settings.backup",
+		"admin.settings.email",
+		"dashboard.view",
+		"dsgvo.access_report",
+		"dsgvo.delete",
+		"inspection.history.view",
+		"inspection.submit",
+		"qualifications.manage",
+		"report.export",
+		"roles.assign",
+		"roles.create",
+		"roles.edit",
+		"schedules.manage",
+		"tool.reinstate",
+		"tool_types.manage",
+		"tools.manage",
+		"user_groups.manage",
+		"users.approve",
+		"users.manage",
+		"users.view",
+	}
+}
+
+// sameCodeSet reports whether a and b contain the same codes regardless of
+// order (used to assert resolved permission sets against the AD-12 matrix).
+// Each matched code is consumed as it is used, so a duplicate in `a` that is
+// not matched by a duplicate in `b` fails (a=["x","x"], b=["x","y"] returns
+// false) instead of slipping through the membership check.
+func sameCodeSet(a, b []string) bool {
+	if len(a) != len(b) {
+		return false
+	}
+	set := make(map[string]int, len(b))
+	for _, c := range b {
+		set[c]++
+	}
+	for _, c := range a {
+		if set[c] == 0 {
+			return false
+		}
+		set[c]--
+	}
+	return true
+}
+
+// containsAllCodes reports whether got contains every code in want (a subset
+// check: a DB that already holds unrelated permission rows must not break the
+// base-series assertion).
+func containsAllCodes(got, want []string) bool {
+	present := make(map[string]bool, len(got))
+	for _, c := range got {
+		present[c] = true
+	}
+	for _, c := range want {
+		if !present[c] {
+			return false
+		}
+	}
+	return true
+}
+
+// TestPostgresBasePermissionSeedResolution verifies the seed migration 000010
+// end to end (Story 2.2, I/O matrix): all 21 base codes are installed, each
+// base role resolves its matrix, a multi-role user resolves a DEDUPLICATED
+// union, a direct grant joins the union, and revocation is immediate (no
+// cache). Test users are deleted via t.Cleanup (CASCADE removes memberships
+// and direct grants).
+func TestPostgresBasePermissionSeedResolution(t *testing.T) {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Skipf("skipping db integration test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping db integration test (db ping failed): %v", err)
+	}
+
+	queries := New(pool)
+	repo := NewRepository(queries)
+
+	// A dedicated pool for t.Cleanup: the test's own pool and context are torn
+	// down (deferred cancel/close) BEFORE cleanup callbacks run, so the user
+	// deletions must use independent resources. Registered first so it closes
+	// LAST (t.Cleanup is LIFO).
+	cleanupPool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("creating cleanup pool failed: %v", err)
+	}
+	t.Cleanup(func() { cleanupPool.Close() })
+
+	// 1. All 21 base codes are present in the permissions table. A set
+	// comparison (subset check), so a DB that already holds unrelated
+	// permission rows does not break the assertion.
+	var permCodes []string
+	codeRows, err := pool.Query(ctx, `SELECT code FROM permissions`)
+	if err != nil {
+		t.Fatalf("listing permissions failed: %v", err)
+	}
+	for codeRows.Next() {
+		var c string
+		if err := codeRows.Scan(&c); err != nil {
+			t.Fatalf("scanning permission code failed: %v", err)
+		}
+		permCodes = append(permCodes, c)
+	}
+	codeRows.Close()
+	if err := codeRows.Err(); err != nil {
+		t.Fatalf("reading permissions failed: %v", err)
+	}
+	if !containsAllCodes(permCodes, basePermissionCodes()) {
+		t.Errorf("permissions table = %v, missing base codes from the AD-12 series", permCodes)
+	}
+
+	// 2. The seeded admin resolves ALL 21 codes via the admin-group matrix.
+	admin, err := repo.GetUserByEmail(ctx, "admin.1@gear.local")
+	if err != nil || admin == nil {
+		t.Skip("seeded admin not present — skipping admin resolution assertion")
+	}
+	adminPerms, err := repo.ListPermissionsByUser(ctx, admin.ID)
+	if err != nil {
+		t.Fatalf("ListPermissionsByUser(admin) failed: %v", err)
+	}
+	if !sameCodeSet(adminPerms, basePermissionCodes()) {
+		t.Errorf("admin permissions = %v, want the full 21-code base series", adminPerms)
+	}
+
+	// newGroupUser creates a fresh user, assigns it to the named group(s) and
+	// registers a cleanup that deletes it (CASCADE removes memberships and
+	// direct grants).
+	ts := time.Now().Format("20060102150405.000000")
+	n := 0
+	newGroupUser := func(groups ...string) *core.User {
+		t.Helper()
+		n++
+		email := fmt.Sprintf("perm.test.%s.%d@gear.local", ts, n)
+		u, err := repo.CreateRegisteredUser(ctx, email, "Perm Test", "Perm", "Test", "$argon2id$v=19$dummyhash")
+		if err != nil {
+			t.Fatalf("CreateRegisteredUser failed: %v", err)
+		}
+		for _, g := range groups {
+			if _, err := pool.Exec(ctx, `
+				INSERT INTO user_permission_groups (user_id, permission_group_id)
+				SELECT $1, g.id FROM permission_groups g WHERE g.name = $2`, u.ID, g); err != nil {
+				t.Fatalf("assigning %s group failed: %v", g, err)
+			}
+		}
+		t.Cleanup(func() {
+			// Runs after the test's deferred cancel()/pool.Close(), so use the
+			// dedicated cleanup pool with a fresh context.
+			if _, err := cleanupPool.Exec(context.Background(), `DELETE FROM users WHERE id = $1`, u.ID); err != nil {
+				t.Errorf("cleaning up test user %s failed: %v", u.ID, err)
+			}
+		})
+		return u
+	}
+
+	resolve := func(u *core.User) []string {
+		t.Helper()
+		perms, err := repo.ListPermissionsByUser(ctx, u.ID)
+		if err != nil {
+			t.Fatalf("ListPermissionsByUser failed: %v", err)
+		}
+		return perms
+	}
+
+	// 3. Base-role matrix resolution (AD-12).
+	helfende := newGroupUser("helfende")
+	if got := resolve(helfende); !sameCodeSet(got, []string{"dashboard.view", "inspection.submit"}) {
+		t.Errorf("helfende permissions = %v, want [dashboard.view inspection.submit]", got)
+	}
+
+	schirrmeister := newGroupUser("schirrmeister")
+	if got := resolve(schirrmeister); !sameCodeSet(got, []string{"dashboard.view", "inspection.submit", "tools.manage", "tool_types.manage"}) {
+		t.Errorf("schirrmeister permissions = %v, want [dashboard.view inspection.submit tools.manage tool_types.manage]", got)
+	}
+
+	fuehrende := newGroupUser("fuehrende")
+	if got := resolve(fuehrende); !sameCodeSet(got, []string{"dashboard.view", "inspection.submit", "inspection.history.view", "report.export", "tool.reinstate"}) {
+		t.Errorf("fuehrende permissions = %v, want [dashboard.view inspection.submit inspection.history.view report.export tool.reinstate]", got)
+	}
+
+	// 4. UNION/DISTINCT: a user in helfende + schirrmeister (BOTH grant
+	// dashboard.view + inspection.submit) resolves a DEDUPLICATED set — no
+	// repeated codes.
+	multi := newGroupUser("helfende", "schirrmeister")
+	if got := resolve(multi); !sameCodeSet(got, []string{"dashboard.view", "inspection.submit", "tools.manage", "tool_types.manage"}) {
+		t.Errorf("multi-role permissions = %v, want the deduplicated union (no repeated codes)", got)
+	}
+
+	// 5. A direct grant joins the union (user_permissions, AD-12).
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO user_permissions (user_id, permission_id)
+		SELECT $1, p.id FROM permissions p WHERE p.code = 'report.export'`, helfende.ID); err != nil {
+		t.Fatalf("granting direct permission failed: %v", err)
+	}
+	if got := resolve(helfende); !sameCodeSet(got, []string{"dashboard.view", "inspection.submit", "report.export"}) {
+		t.Errorf("permissions after direct grant = %v, want [dashboard.view inspection.submit report.export]", got)
+	}
+
+	// 6. Revocation is immediate: removing the direct grant is reflected on the
+	// very next resolution (no cache, AD-2/FR-21/FR-22).
+	if _, err := pool.Exec(ctx, `
+		DELETE FROM user_permissions
+		WHERE user_id = $1 AND permission_id IN (SELECT id FROM permissions WHERE code = 'report.export')`, helfende.ID); err != nil {
+		t.Fatalf("revoking direct permission failed: %v", err)
+	}
+	if got := resolve(helfende); !sameCodeSet(got, []string{"dashboard.view", "inspection.submit"}) {
+		t.Errorf("permissions after revoke = %v, want [dashboard.view inspection.submit]", got)
+	}
+}

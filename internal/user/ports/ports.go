@@ -52,6 +52,12 @@ type Service interface {
 	// via a valid single-use token.
 	RequestPasswordReset(ctx context.Context, email string) (*core.ResetRequestResult, error)
 	CompletePasswordReset(ctx context.Context, rawToken, newPassword, confirm string) (*core.ResetCompleteResult, error)
+	// ResolvePermissionSet resolves a user's live permission set (AD-12, Story
+	// 2.2): the additive union of permission-group memberships + direct grants,
+	// resolved per request — never cached — so revocation is immediate
+	// (AD-2/AD-6/FR-21/FR-22). Other modules (Tool, Admin) authorize against it
+	// through this port; the gateway enforces the same live set per request.
+	ResolvePermissionSet(ctx context.Context, user *core.User) ([]string, error)
 	// Dual-admin credential recovery (FR-27): RequestAdminRecovery creates a
 	// recovery request for a target admin (actor = caller);
 	// ApproveAdminRecovery approves it with a mandatory Begründung + confirmation

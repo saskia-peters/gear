@@ -57,3 +57,7 @@ Triage output of review loops — real, non-story-blocking findings that are not
 ## Process convention (2026-09-06)
 
 - **Avoid god classes.** Standing convention: keep files small and focused; split large handler/service/repository/test files proactively instead of growing them across stories. Motivating evidence: Epic 1 god-class finding (`handler_test.go` 2915, `repository_test.go` 1337, `service_test.go` 847, `handler.go` 892 lines). Applies to all new code from Epic 2 onward; later epic retros re-check file sizes against this.
+
+## Deferred from: code review (2026-09-06) of spec-2-2-resolution-of-active-permission-set.md
+
+- `TestComposedAdminRouteGroup` (Story 2.1, `internal/user/adapters/http/admin_composition_test.go`) fails only when the Go test runner executes the `internal/user/adapters/http` and `internal/user/adapters/postgres` suites **in parallel** against the shared live DB (reproduced identically at the pre-Story-2.2 baseline, so it is pre-existing, not a 2.2 regression). Symptom: a freshly-created admin whose admin role is revoked during the test is answered `401` instead of `403` — cross-package interference on shared `users`/`sessions` rows. With `-p 1` the suite is green; `just test` (which passes `-p 1`) is unaffected. Verify against the DB, and if `go test ./...` parallel mode becomes a gate, add package-level isolation (e.g. per-suite test schemas or unique-row namespacing).

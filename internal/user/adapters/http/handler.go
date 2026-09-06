@@ -52,6 +52,7 @@ func (h *Handler) Routes() http.Handler {
 		r.Get("/profile", h.GetProfile)
 		r.Post("/profile", h.UpdateProfile)
 		r.Post("/profile/email", h.StageEmailChange)
+		r.Get("/me/permissions", h.MyPermissions)
 		// The admin-recovery surface (request/approve/deny/pending, FR-27) is a
 		// member of the isolated admin module group: it is mounted via
 		// AdminRoutes at /api/v1/admin/recovery in the composition root, behind
@@ -540,6 +541,41 @@ func (h *Handler) AdminRecoveryPending(w http.ResponseWriter, r *http.Request) {
 		res = []*core.AdminRecoveryRequest{}
 	}
 	httpapi.WriteJSON(w, http.StatusOK, map[string]any{"requests": res})
+}
+
+// MyPermissions handles GET /api/v1/auth/me/permissions (Story 2.2). It
+// resolves the caller's live permission set server-side and returns it, so the
+// SPA and other modules can inspect the server-authoritative set (AD-12). No
+// caching — each request re-derives the set, so revocation is immediate
+// (AD-2/AD-6/FR-21/FR-22). It is auth-gated via RequireAuth (any authenticated
+// caller), never a client-supplied snapshot.
+//
+// Error mapping (uniform envelope):
+//   - 401 unauthorized when the caller is not authenticated (middleware) or
+//     the request carries no usable session token
+func (h *Handler) MyPermissions(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFrom(r.Context())
+	if user == nil {
+		httpapi.WriteError(w, http.StatusUnauthorized, "unauthorized", "Authentifizierung erforderlich.")
+		return
+	}
+
+	perms, err := h.service.ResolvePermissionSet(r.Context(), user)
+	if err != nil {
+		// The client-abort guard: when the caller has gone away (request
+		// context canceled) there is no one to answer — writing a spurious 500
+		// and an error log on a canceled request is wrong.
+		if r.Context().Err() != nil {
+			return
+		}
+		h.logger.Error("permission resolution failed unexpectedly", "error", err)
+		httpapi.WriteError(w, http.StatusInternalServerError, "internal_error", "Ein interner Fehler ist aufgetreten.")
+		return
+	}
+	if perms == nil {
+		perms = []string{}
+	}
+	httpapi.WriteJSON(w, http.StatusOK, map[string]any{"permissions": perms})
 }
 
 // mfaEnrollRequest is the body of POST /api/v1/auth/mfa/enroll.
