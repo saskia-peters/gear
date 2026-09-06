@@ -32,10 +32,10 @@ INSERT INTO users (
     $5,
     'pending_approval'
 )
-RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email;
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password;
 
 -- name: GetUserByEmail :one
-SELECT id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email
+SELECT id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password
 FROM users
 WHERE email = $1;
 
@@ -50,7 +50,7 @@ RETURNING id, user_id, token_hash, expires_at, created_at;
 -- as it carries the encrypted TOTP secret for MFA disable (FR-4). The hash is
 -- never serialized to clients (core.User.PasswordHash is json:"-").
 SELECT s.id, s.user_id, s.token_hash, s.expires_at, s.created_at,
-       u.email, u.display_name, u.first_name, u.last_name, u.state, u.is_mfa_enabled, u.password_hash, u.totp_secret_encrypted, u.pending_totp_secret_encrypted, u.pending_totp_expires_at, u.attributes, u.pending_email
+       u.email, u.display_name, u.first_name, u.last_name, u.state, u.is_mfa_enabled, u.password_hash, u.totp_secret_encrypted, u.pending_totp_secret_encrypted, u.pending_totp_expires_at, u.attributes, u.pending_email, u.must_change_password
 FROM sessions s
 JOIN users u ON u.id = s.user_id
 WHERE s.token_hash = $1;
@@ -167,7 +167,7 @@ UPDATE users
 SET password_hash = $2,
     updated_at    = now()
 WHERE id = $1
-RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email;
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password;
 
 -- name: UpdateUserProfile :one
 -- Persist the user's editable base data (first/last/display name, Story 2.1):
@@ -179,7 +179,7 @@ SET first_name   = $2,
     display_name = $4,
     updated_at   = now()
 WHERE id = $1
-RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email;
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password;
 
 -- name: StagePendingEmail :one
 -- Persist a STAGED email change (Story 2.1): the new address is stored in
@@ -203,7 +203,7 @@ WHERE users.id = $1
       WHERE other.id <> $1
         AND (lower(other.email) = lower($2) OR lower(other.pending_email) = lower($2))
   )
-RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email;
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password;
 
 -- name: ClearPendingEmail :exec
 -- Clear a staged email change (pending_email -> NULL). Used by the Epic 2
@@ -221,3 +221,92 @@ WHERE id = $1;
 -- rolled back into the triggering operation (availability).
 INSERT INTO audit_log (actor_user_id, operation)
 VALUES ($1, $2);
+
+-- name: InsertAuditEventAnonymous :exec
+-- Append an audit row WITHOUT an actor (actor_user_id stays NULL). Used for
+-- anti-enumeration paths that have no authenticated user, e.g. a forgot-password
+-- request for an unknown email (review findings 1.8-3 / 1.8-10): enumeration
+-- attempts leave a trail (NFR-O1) and the path performs comparable-cost work.
+INSERT INTO audit_log (operation)
+VALUES ($1);
+
+-- name: CreatePasswordResetToken :exec
+-- Issue a fresh single-use reset token (FR-26/AD-13): the data-modifying CTE
+-- first invalidates EVERY earlier token of the user (only the latest request
+-- stays valid), then stores the new one. Only the SHA-256 hash is persisted —
+-- never the raw token.
+WITH invalidated AS (
+    DELETE FROM password_reset_tokens
+    WHERE user_id = $1
+)
+INSERT INTO password_reset_tokens (user_id, token_hash, expires_at)
+VALUES ($1, $2, $3);
+
+-- name: GetPasswordResetTokenByHash :one
+-- Resolve a reset token by its stored hash, joining the owning user so the
+-- completion step can verify the account is still active (FR-26). The token is
+-- looked up ONLY by hash; the raw token is never stored or queried.
+SELECT t.id, t.user_id, t.token_hash, t.expires_at, t.created_at,
+       u.email, u.display_name, u.first_name, u.last_name, u.state,
+       u.is_mfa_enabled, u.password_hash, u.must_change_password
+FROM password_reset_tokens t
+JOIN users u ON u.id = t.user_id
+WHERE t.token_hash = $1;
+
+-- name: ConsumePasswordResetToken :one
+-- Atomic single-use consumption of a reset token (review finding 1.8-5): the
+-- data-modifying CTE deletes the token in the SAME statement that reads it, so
+-- two concurrent completions with the same token cannot both succeed — the
+-- losing statement sees no row in the CTE and the caller maps the resulting
+-- no-rows to ErrResetTokenInvalid. The owning user is joined so the completion
+-- step can verify the account is still active.
+WITH consumed AS (
+    DELETE FROM password_reset_tokens
+    WHERE token_hash = $1
+    RETURNING id, user_id, token_hash, expires_at, created_at
+)
+SELECT c.id, c.user_id, c.token_hash, c.expires_at, c.created_at,
+       u.email, u.display_name, u.first_name, u.last_name, u.state,
+       u.is_mfa_enabled, u.password_hash, u.must_change_password
+FROM consumed c
+JOIN users u ON u.id = c.user_id;
+
+-- name: DeletePasswordResetToken :exec
+-- Invalidate a single reset token after use (single-use, FR-26).
+DELETE FROM password_reset_tokens
+WHERE token_hash = $1;
+
+-- name: DeleteExpiredPasswordResetTokens :exec
+-- Lazy purge of a user's expired reset tokens (review finding 1.8-7): run on
+-- each reset request so expired rows do not accumulate indefinitely. A
+-- background sweeper is deferred.
+DELETE FROM password_reset_tokens
+WHERE user_id = $1 AND expires_at < now();
+
+-- name: SetUserMustChangePassword :exec
+-- Flag an active account so the next successful login forces a mandatory
+-- password change (FR-26, SMTP-not-configured fallback / Epic 2 one-time
+-- password).
+UPDATE users
+SET must_change_password = true,
+    updated_at           = now()
+WHERE id = $1;
+
+-- name: ClearUserMustChangePassword :exec
+-- Clear the mandatory-change flag once the user completes a password change
+-- (via the forced flow or a reset link, FR-26).
+UPDATE users
+SET must_change_password = false,
+    updated_at           = now()
+WHERE id = $1;
+
+-- name: IsUserInPermissionGroup :one
+-- Reports whether the user is a member of the named permission group (AD-12),
+-- e.g. the 'admin' group. Drives server-authoritative ADMIN module visibility
+-- in the SPA (Story 1.8).
+SELECT EXISTS (
+    SELECT 1
+    FROM user_permission_groups upg
+    JOIN permission_groups pg ON pg.id = upg.permission_group_id
+    WHERE upg.user_id = $1 AND pg.name = $2
+);

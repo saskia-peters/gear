@@ -1,0 +1,145 @@
+// @vitest-environment jsdom
+import { render, screen, waitFor } from '@testing-library/react'
+import userEvent from '@testing-library/user-event'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
+import { MemoryRouter, Routes, Route } from 'react-router-dom'
+import { ResetPasswordPage } from './ResetPasswordPage.tsx'
+import { ThemeProvider } from '../context/ThemeContext.tsx'
+
+function renderReset(token = 'opaque-token', state?: { notice?: string }) {
+  const entry = state
+    ? { pathname: `/reset-password/${token}`, state }
+    : `/reset-password/${token}`
+  return render(
+    <ThemeProvider>
+      <MemoryRouter initialEntries={[entry]}>
+        <Routes>
+          <Route path="/reset-password/:token" element={<ResetPasswordPage />} />
+          <Route path="/forgot-password" element={<div>Passwort vergessen</div>} />
+          <Route path="/login" element={<div>Anmeldung</div>} />
+        </Routes>
+      </MemoryRouter>
+    </ThemeProvider>,
+  )
+}
+
+function stubFetch(response: { ok: boolean; status: number; body: unknown }) {
+  const mock = vi.fn().mockResolvedValue({
+    ok: response.ok,
+    status: response.status,
+    json: async () => response.body,
+  })
+  vi.stubGlobal('fetch', mock)
+  return mock
+}
+
+async function submitNewPassword(pw: string, confirm = pw) {
+  const user = userEvent.setup()
+  renderReset()
+  await user.type(screen.getByLabelText('Neues Passwort'), pw)
+  await user.type(screen.getByLabelText('Wiederholung'), confirm)
+  await user.click(screen.getByRole('button', { name: 'Passwort ändern' }))
+}
+
+describe('ResetPasswordPage', () => {
+  beforeEach(() => {
+    localStorage.clear()
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('HAPPY_PATH: a valid token + new password shows the success confirmation', async () => {
+    const fetchMock = stubFetch({
+      ok: true,
+      status: 200,
+      body: { message: 'Passwort geändert. Du kannst dich jetzt anmelden.' },
+    })
+
+    await submitNewPassword('neuespasswort123')
+
+    await waitFor(() => {
+      expect(screen.getByText(/Passwort geändert/)).toBeInTheDocument()
+    })
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/auth/password/reset', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        token: 'opaque-token',
+        new_password: 'neuespasswort123',
+        new_password_confirm: 'neuespasswort123',
+      }),
+    })
+  })
+
+  it('INVALID_TOKEN: an expired/used token shows the invalid-link screen with a request-new-link action', async () => {
+    stubFetch({
+      ok: false,
+      status: 400,
+      body: {
+        error: { code: 'invalid_token', message: 'Dieser Link ist ungültig oder abgelaufen. Bitte fordere einen neuen Link an.' },
+      },
+    })
+
+    await submitNewPassword('neuespasswort123')
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { level: 2, name: 'Link ungültig' })).toBeInTheDocument()
+    })
+    expect(screen.getByRole('link', { name: 'Neuen Link anfordern' })).toHaveAttribute(
+      'href',
+      '/forgot-password',
+    )
+  })
+
+  it('SHORT_PASSWORD: a new password under 10 characters is rejected client-side', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await submitNewPassword('kurz')
+
+    expect(
+      await screen.findByText('Das Passwort muss mindestens 10 Zeichen lang sein.'),
+    ).toBeInTheDocument()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('MISMATCH: differing password and confirmation is rejected client-side', async () => {
+    const fetchMock = vi.fn()
+    vi.stubGlobal('fetch', fetchMock)
+
+    await submitNewPassword('neuespasswort123', 'anderspasswort456')
+
+    expect(await screen.findByText('Die Passwörter stimmen nicht überein.')).toBeInTheDocument()
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
+  it('NETWORK_ERROR: a fetch failure shows the connection error', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockRejectedValue(new Error('Network error')))
+
+    await submitNewPassword('neuespasswort123')
+
+    await waitFor(() => {
+      expect(
+        screen.getByText('Verbindung zum Server fehlgeschlagen. Bitte prüfe deine Internetverbindung.'),
+      ).toBeInTheDocument()
+    })
+  })
+
+  it('NAVIGATION: a link back to /login is present', () => {
+    renderReset()
+    expect(screen.getByRole('link', { name: 'Zurück zur Anmeldung' })).toHaveAttribute(
+      'href',
+      '/login',
+    )
+  })
+
+  it('FORCED_CHANGE_NOTICE: a notice from the login forced-change flow is shown (review finding 1.8-4)', () => {
+    const notice =
+      'Dein Passwort muss geändert werden, bevor du die Anwendung nutzen kannst. Die Administratoren wurden benachrichtigt.'
+    renderReset('forced-change-token', { notice })
+
+    expect(screen.getByRole('status')).toHaveTextContent(notice)
+  })
+})

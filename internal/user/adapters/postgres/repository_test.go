@@ -740,3 +740,280 @@ func TestPostgresProfileRepository(t *testing.T) {
 		t.Errorf("StagePendingEmail(unknown) err = %v, want ErrEmailInUse", err)
 	}
 }
+
+func TestPostgresPasswordResetRepository(t *testing.T) {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Skipf("skipping db integration test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping db integration test (db ping failed): %v", err)
+	}
+
+	queries := New(pool)
+	repo := NewRepository(queries)
+
+	testEmail := "reset.test." + time.Now().Format("20060102150405.000000") + "@gear.local"
+	suffix := time.Now().Format("20060102150405.000000")
+	created, err := repo.CreateRegisteredUser(ctx, testEmail, "Reset Test", "Reset", "Test", "$argon2id$v=19$m=65536,t=3,p=4$c2FsdHNhbHRzYWx0$8U3f5yO8JUpfGT5WmljHhL8n2nWlVEhL2fj7EXpS9gM")
+	if err != nil {
+		t.Fatalf("CreateRegisteredUser failed: %v", err)
+	}
+	if created.MustChangePassword {
+		t.Error("fresh user must not carry must_change_password=true")
+	}
+
+	// 1. CreatePasswordResetToken stores the hash with a 30-min expiry; a second
+	// request for the same user invalidates the first (only the latest valid).
+	tokenHash1 := "hash-of-reset-token-1." + suffix
+	if err := repo.CreatePasswordResetToken(ctx, created.ID, tokenHash1, time.Now().UTC().Add(30*time.Minute)); err != nil {
+		t.Fatalf("CreatePasswordResetToken(1) failed: %v", err)
+	}
+	tokenHash2 := "hash-of-reset-token-2." + suffix
+	if err := repo.CreatePasswordResetToken(ctx, created.ID, tokenHash2, time.Now().UTC().Add(30*time.Minute)); err != nil {
+		t.Fatalf("CreatePasswordResetToken(2) failed: %v", err)
+	}
+	if _, err := repo.GetPasswordResetTokenByHash(ctx, tokenHash1); !errors.Is(err, core.ErrResetTokenInvalid) {
+		t.Errorf("earlier token must be invalidated, got %v", err)
+	}
+
+	// 2. GetPasswordResetTokenByHash resolves the live token with its owner
+	// (JOIN on users), including state and must_change_password.
+	tok, err := repo.GetPasswordResetTokenByHash(ctx, tokenHash2)
+	if err != nil {
+		t.Fatalf("GetPasswordResetTokenByHash failed: %v", err)
+	}
+	if tok.UserID != created.ID {
+		t.Errorf("token user = %q, want %q", tok.UserID, created.ID)
+	}
+	if tok.User == nil || tok.User.State != core.StatePendingApproval {
+		t.Errorf("token owner = %+v, want the pending_approval owner", tok.User)
+	}
+	if tok.ExpiresAt.IsZero() {
+		t.Error("token must carry an expiry")
+	}
+
+	// 3. Unknown hash maps to ErrResetTokenInvalid.
+	if _, err := repo.GetPasswordResetTokenByHash(ctx, "no-such-hash"); !errors.Is(err, core.ErrResetTokenInvalid) {
+		t.Errorf("unknown token error = %v, want ErrResetTokenInvalid", err)
+	}
+
+	// 4. Set/ClearUserMustChangePassword flip the forced-change flag.
+	if err := repo.SetUserMustChangePassword(ctx, created.ID); err != nil {
+		t.Fatalf("SetUserMustChangePassword failed: %v", err)
+	}
+	fetched, err := repo.GetUserByEmail(ctx, testEmail)
+	if err != nil {
+		t.Fatalf("GetUserByEmail failed: %v", err)
+	}
+	if !fetched.MustChangePassword {
+		t.Error("must_change_password must be true after SetUserMustChangePassword")
+	}
+	if err := repo.ClearUserMustChangePassword(ctx, created.ID); err != nil {
+		t.Fatalf("ClearUserMustChangePassword failed: %v", err)
+	}
+	fetched, err = repo.GetUserByEmail(ctx, testEmail)
+	if err != nil {
+		t.Fatalf("GetUserByEmail failed: %v", err)
+	}
+	if fetched.MustChangePassword {
+		t.Error("must_change_password must be false after ClearUserMustChangePassword")
+	}
+
+	// 5. DeletePasswordResetToken invalidates the token (single-use).
+	if err := repo.DeletePasswordResetToken(ctx, tokenHash2); err != nil {
+		t.Fatalf("DeletePasswordResetToken failed: %v", err)
+	}
+	if _, err := repo.GetPasswordResetTokenByHash(ctx, tokenHash2); !errors.Is(err, core.ErrResetTokenInvalid) {
+		t.Errorf("deleted token error = %v, want ErrResetTokenInvalid", err)
+	}
+
+	// 6. IsUserInPermissionGroup: the fresh user is in no group; the seeded
+	// admin IS in the admin group (Story 1.8).
+	member, err := repo.IsUserInPermissionGroup(ctx, created.ID, "admin")
+	if err != nil {
+		t.Fatalf("IsUserInPermissionGroup(fresh) failed: %v", err)
+	}
+	if member {
+		t.Error("fresh user must not be an admin-group member")
+	}
+	admin, err := repo.GetUserByEmail(ctx, "admin.1@gear.local")
+	if err != nil {
+		t.Fatalf("GetUserByEmail(admin) failed: %v", err)
+	}
+	if admin != nil {
+		member, err = repo.IsUserInPermissionGroup(ctx, admin.ID, "admin")
+		if err != nil {
+			t.Fatalf("IsUserInPermissionGroup(admin) failed: %v", err)
+		}
+		if !member {
+			t.Error("seeded admin must be an admin-group member")
+		}
+		member, err = repo.IsUserInPermissionGroup(ctx, admin.ID, "helfende")
+		if err != nil {
+			t.Fatalf("IsUserInPermissionGroup(admin, helfende) failed: %v", err)
+		}
+		if member {
+			t.Error("admin must not be a member of the helfende group")
+		}
+	}
+}
+
+func TestPostgresConsumePasswordResetTokenAtomic(t *testing.T) {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Skipf("skipping db integration test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping db integration test (db ping failed): %v", err)
+	}
+
+	queries := New(pool)
+	repo := NewRepository(queries)
+
+	testEmail := "consume.test." + time.Now().Format("20060102150405.000000") + "@gear.local"
+	created, err := repo.CreateRegisteredUser(ctx, testEmail, "Consume Test", "Consume", "Test", "$argon2id$v=19$dummyhash")
+	if err != nil {
+		t.Fatalf("CreateRegisteredUser failed: %v", err)
+	}
+
+	// 1. Sequential atomic consumption: the first Consume returns the token (and
+	// deletes it); the second sees no row and maps to ErrResetTokenInvalid.
+	tokenHash := "hash-of-consume-token." + time.Now().Format("20060102150405.000000")
+	if err := repo.CreatePasswordResetToken(ctx, created.ID, tokenHash, time.Now().UTC().Add(30*time.Minute)); err != nil {
+		t.Fatalf("CreatePasswordResetToken failed: %v", err)
+	}
+	consumed, err := repo.ConsumePasswordResetToken(ctx, tokenHash)
+	if err != nil {
+		t.Fatalf("ConsumePasswordResetToken(1) failed: %v", err)
+	}
+	if consumed == nil || consumed.UserID != created.ID {
+		t.Fatalf("consumed token = %+v, want owner %q", consumed, created.ID)
+	}
+	if consumed.User == nil || consumed.User.State != core.StatePendingApproval {
+		t.Errorf("consumed token owner = %+v, want the pending_approval owner", consumed.User)
+	}
+	if _, err := repo.ConsumePasswordResetToken(ctx, tokenHash); !errors.Is(err, core.ErrResetTokenInvalid) {
+		t.Errorf("second consume error = %v, want ErrResetTokenInvalid (single-use)", err)
+	}
+
+	// 2. Concurrent atomic consumption: with a fresh token, exactly ONE of two
+	// racing completions wins; the loser sees no row (review finding 1.8-5).
+	raceHash := "hash-of-race-token." + time.Now().Format("20060102150405.000000")
+	if err := repo.CreatePasswordResetToken(ctx, created.ID, raceHash, time.Now().UTC().Add(30*time.Minute)); err != nil {
+		t.Fatalf("CreatePasswordResetToken(race) failed: %v", err)
+	}
+	results := make(chan error, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			_, err := repo.ConsumePasswordResetToken(context.Background(), raceHash)
+			results <- err
+		}()
+	}
+	wins, rejects := 0, 0
+	for i := 0; i < 2; i++ {
+		switch err := <-results; {
+		case err == nil:
+			wins++
+		case errors.Is(err, core.ErrResetTokenInvalid):
+			rejects++
+		default:
+			t.Fatalf("unexpected consume error: %v", err)
+		}
+	}
+	if wins != 1 || rejects != 1 {
+		t.Errorf("concurrent consumes: wins=%d rejects=%d, want exactly 1 win and 1 reject", wins, rejects)
+	}
+	if _, err := repo.ConsumePasswordResetToken(ctx, raceHash); !errors.Is(err, core.ErrResetTokenInvalid) {
+		t.Errorf("post-race consume error = %v, want ErrResetTokenInvalid", err)
+	}
+}
+
+func TestPostgresExpiredTokenPurgeAndAnonymousAudit(t *testing.T) {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Skipf("skipping db integration test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping db integration test (db ping failed): %v", err)
+	}
+
+	queries := New(pool)
+	repo := NewRepository(queries)
+
+	testEmail := "purge.test." + time.Now().Format("20060102150405.000000") + "@gear.local"
+	created, err := repo.CreateRegisteredUser(ctx, testEmail, "Purge Test", "Purge", "Test", "$argon2id$v=19$dummyhash")
+	if err != nil {
+		t.Fatalf("CreateRegisteredUser failed: %v", err)
+	}
+
+	// 1. DeleteExpiredPasswordResetTokens removes only EXPIRED tokens of the
+	// user (review finding 1.8-7); fresh ones survive.
+	if err := repo.CreatePasswordResetToken(ctx, created.ID, "purge-expired."+time.Now().Format("20060102150405.000000"), time.Now().UTC().Add(-time.Hour)); err != nil {
+		t.Fatalf("CreatePasswordResetToken(expired) failed: %v", err)
+	}
+	freshHash := "purge-fresh." + time.Now().Format("20060102150405.000000")
+	if err := repo.CreatePasswordResetToken(ctx, created.ID, freshHash, time.Now().UTC().Add(30*time.Minute)); err != nil {
+		t.Fatalf("CreatePasswordResetToken(fresh) failed: %v", err)
+	}
+	if err := repo.DeleteExpiredPasswordResetTokens(ctx, created.ID); err != nil {
+		t.Fatalf("DeleteExpiredPasswordResetTokens failed: %v", err)
+	}
+	if _, err := repo.GetPasswordResetTokenByHash(ctx, freshHash); err != nil {
+		t.Errorf("fresh token must survive the purge, got %v", err)
+	}
+	var remaining int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM password_reset_tokens WHERE user_id = $1`, created.ID).Scan(&remaining); err != nil {
+		t.Fatalf("counting tokens failed: %v", err)
+	}
+	if remaining != 1 {
+		t.Errorf("remaining tokens = %d, want 1 (expired purged, fresh kept)", remaining)
+	}
+
+	// 2. InsertAuditEventAnonymous writes a row with a NULL actor (review
+	// findings 1.8-3 / 1.8-10): unknown-email enumeration attempts leave a
+	// trail (NFR-O1).
+	op := core.AuditOperationPasswordResetRequestUnknown
+	if err := repo.InsertAuditEventAnonymous(ctx, op); err != nil {
+		t.Fatalf("InsertAuditEventAnonymous failed: %v", err)
+	}
+	var actorIsNull bool
+	if err := pool.QueryRow(ctx,
+		`SELECT actor_user_id IS NULL FROM audit_log WHERE operation = $1 ORDER BY created_at DESC LIMIT 1`,
+		op).Scan(&actorIsNull); err != nil {
+		t.Fatalf("reading anonymous audit row failed: %v", err)
+	}
+	if !actorIsNull {
+		t.Error("anonymous audit row must have a NULL actor")
+	}
+}

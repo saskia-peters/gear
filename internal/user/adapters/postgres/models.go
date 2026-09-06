@@ -22,6 +22,14 @@ type LoginAttempt struct {
 	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
 }
 
+type PasswordResetToken struct {
+	ID        pgtype.UUID        `json:"id"`
+	UserID    pgtype.UUID        `json:"user_id"`
+	TokenHash string             `json:"token_hash"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
 type Permission struct {
 	ID          pgtype.UUID        `json:"id"`
 	Code        string             `json:"code"`
@@ -69,6 +77,7 @@ type User struct {
 	PendingTotpSecretEncrypted pgtype.Text        `json:"pending_totp_secret_encrypted"`
 	PendingTotpExpiresAt       pgtype.Timestamptz `json:"pending_totp_expires_at"`
 	PendingEmail               pgtype.Text        `json:"pending_email"`
+	MustChangePassword         bool               `json:"must_change_password"`
 }
 
 type UserPermission struct {

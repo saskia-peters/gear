@@ -1,7 +1,12 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { Header } from '../components/Header.tsx'
-import { SESSION_TOKEN_KEY, clearAuthState, setDisplayName } from '../auth/authState.ts'
+import {
+  SESSION_TOKEN_KEY,
+  clearAuthState,
+  setDisplayName,
+  setIsAdmin,
+} from '../auth/authState.ts'
 import styles from './ProfilePage.module.css'
 
 interface Profile {
@@ -11,6 +16,7 @@ interface Profile {
   last_name: string
   display_name: string
   pending_email?: string
+  is_admin?: boolean
 }
 
 interface FieldErrors {
@@ -94,6 +100,11 @@ export function ProfilePage() {
           setEmail(data.email)
           setCurrentEmail(data.email)
           setPendingEmail(data.pending_email || undefined)
+          // Keep the cached admin flag in sync with the server (Story 1.8);
+          // the sidebar visibility follows.
+          if (typeof data.is_admin === 'boolean') {
+            setIsAdmin(data.is_admin)
+          }
           setLoaded(true)
         } else {
           setLoadError(true)

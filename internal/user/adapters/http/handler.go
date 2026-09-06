@@ -41,6 +41,8 @@ func (h *Handler) Routes() http.Handler {
 	r.Post("/register", h.Register)
 	r.Post("/login", h.Login)
 	r.Post("/logout", h.Logout)
+	r.Post("/password/forgot", h.ForgotPassword)
+	r.Post("/password/reset", h.ResetPassword)
 	r.Group(func(r chi.Router) {
 		r.Use(auth.RequireAuth(h.validator))
 		r.Get("/mfa/status", h.MFAStatus)
@@ -153,6 +155,22 @@ func (h *Handler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	if res.MustChangePassword {
+		// LOGIN_MUST_CHANGE (FR-26): valid credentials but the account is
+		// flagged for a mandatory password change (SMTP-not-configured fallback
+		// / Epic 2 one-time password). NO app session is issued; the response
+		// carries the single-use reset token that drives the forced change flow
+		// (/reset-password/<token>) and a German note telling the user the
+		// admins have been notified (review finding 1.8-4).
+		h.logger.Info("must-change password signalled", "email", input.Email)
+		httpapi.WriteJSON(w, http.StatusOK, map[string]any{
+			"must_change_password": true,
+			"reset_token":          res.ResetToken,
+			"message":              core.MsgMustChangePassword,
+		})
+		return
+	}
+
 	// The challenge-success event only fires when MFA was actually involved
 	// (review finding 1.6-11): a spurious totp_code on an account without MFA
 	// must not be logged as an MFA challenge success.
@@ -173,6 +191,95 @@ func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+// forgotPasswordRequest is the body of POST /api/v1/auth/password/forgot
+// (FR-26): the account email.
+type forgotPasswordRequest struct {
+	Email string `json:"email"`
+}
+
+// ForgotPassword handles POST /api/v1/auth/password/forgot (FR-26). It ALWAYS
+// returns the uniform 200 anti-enumeration confirmation
+// "Wenn deine E-Mail registriert ist, erhältst du einen Link." (UX-DR7) — the
+// body is identical whether the account exists, its state, and whether SMTP is
+// configured — so account existence cannot be probed. The per-email rate gate
+// (review finding 1.8-2) answers repeat requests for the same email with a
+// uniform 429 that never depends on account existence. Only unparseable JSON is
+// rejected with 400 invalid_request. Server-side: an active account gets a
+// single-use hashed 30-min token (mailed via the sender port when configured)
+// or is flagged must_change_password (SMTP not configured); every request is
+// audited and logged (NFR-O1).
+func (h *Handler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var input forgotPasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", "Ungültiges JSON-Format.")
+		return
+	}
+
+	res, err := h.service.RequestPasswordReset(r.Context(), input.Email)
+	if err != nil {
+		switch {
+		case errors.Is(err, core.ErrForgotThrottled):
+			// Rate limited (review finding 1.8-2): a uniform 429 for the email
+			// string regardless of account existence — like the login lockout, a
+			// 429 is not discriminating (anti-enumeration).
+			h.logger.Warn("password reset request throttled")
+			httpapi.WriteError(w, http.StatusTooManyRequests, "too_many_attempts", "Zu viele Anfragen. Bitte warte einen Moment und versuche es erneut.")
+		default:
+			h.logger.Error("password reset request failed unexpectedly", "error", err)
+			httpapi.WriteError(w, http.StatusInternalServerError, "internal_error", "Ein interner Fehler ist aufgetreten.")
+		}
+		return
+	}
+
+	h.logger.Info("password reset requested")
+	httpapi.WriteJSON(w, http.StatusOK, res)
+}
+
+// resetPasswordRequest is the body of POST /api/v1/auth/password/reset
+// (FR-26): the single-use token plus the new password and its confirmation.
+type resetPasswordRequest struct {
+	Token              string `json:"token"`
+	NewPassword        string `json:"new_password"`
+	NewPasswordConfirm string `json:"new_password_confirm"`
+}
+
+// ResetPassword handles POST /api/v1/auth/password/reset (FR-26). A valid
+// single-use token sets the new password (Argon2id, ≥10 chars FR-2), invalidates
+// the token, clears must_change_password and revokes all sessions. Error mapping
+// (uniform envelope): 400 invalid_token for an expired/used/unknown token;
+// 400 invalid_request for a short/oversized/mismatched new password.
+func (h *Handler) ResetPassword(w http.ResponseWriter, r *http.Request) {
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var input resetPasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", "Ungültiges JSON-Format.")
+		return
+	}
+
+	res, err := h.service.CompletePasswordReset(r.Context(), input.Token, input.NewPassword, input.NewPasswordConfirm)
+	if err != nil {
+		switch {
+		case errors.Is(err, core.ErrResetTokenInvalid):
+			h.logger.Warn("password reset rejected: invalid token")
+			httpapi.WriteError(w, http.StatusBadRequest, "invalid_token", core.MsgResetTokenInvalid)
+		case errors.Is(err, core.ErrShortPassword):
+			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", core.MsgShortPassword)
+		case errors.Is(err, core.ErrPasswordTooLong):
+			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", core.MsgPasswordTooLong)
+		case errors.Is(err, core.ErrPasswordMismatch):
+			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", core.MsgPasswordMismatch)
+		default:
+			h.logger.Error("password reset failed unexpectedly", "error", err)
+			httpapi.WriteError(w, http.StatusInternalServerError, "internal_error", "Ein interner Fehler ist aufgetreten.")
+		}
+		return
+	}
+
+	h.logger.Info("password reset completed")
+	httpapi.WriteJSON(w, http.StatusOK, res)
 }
 
 // mfaEnrollRequest is the body of POST /api/v1/auth/mfa/enroll.

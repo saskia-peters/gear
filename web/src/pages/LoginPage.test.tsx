@@ -1,4 +1,5 @@
 // @vitest-environment jsdom
+import type { ReactNode } from 'react'
 import { render, screen, fireEvent, waitFor, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
@@ -9,13 +10,14 @@ import { ThemeProvider } from '../context/ThemeContext.tsx'
 const TOKEN_STORAGE_KEY = 'gear.session_token'
 const LOCKOUT_STORAGE_KEY = 'gear.login_lockout_until'
 
-function renderLoginPage() {
+function renderLoginPage(extraRoutes?: ReactNode) {
   return render(
     <ThemeProvider>
       <MemoryRouter initialEntries={['/login']}>
         <Routes>
           <Route path="/login" element={<LoginPage />} />
           <Route path="/" element={<div>Übersicht</div>} />
+          {extraRoutes}
         </Routes>
       </MemoryRouter>
     </ThemeProvider>,
@@ -85,6 +87,72 @@ describe('LoginPage', () => {
     await user.click(screen.getByRole('button', { name: 'Anmelden' }))
 
     expect(screen.getByText('Bitte gib eine gültige E-Mail-Adresse ein.')).toBeInTheDocument()
+  })
+
+  it('FORGOT_LINK: the login page links to the forgot-password page', () => {
+    renderLoginPage()
+
+    expect(screen.getByRole('link', { name: 'Passwort vergessen?' })).toHaveAttribute(
+      'href',
+      '/forgot-password',
+    )
+  })
+
+  it('MUST_CHANGE_PASSWORD: a must_change_password response forces the reset flow (no session stored)', async () => {
+    const fetchMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ must_change_password: true, reset_token: 'forced-change-token' }),
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderLoginPage(
+      <Route path="/reset-password/:token" element={<div>Reset-Token-Seite</div>} />,
+    )
+
+    const user = userEvent.setup()
+    await user.type(screen.getByLabelText('E-Mail-Adresse'), 'active@example.com')
+    await user.type(screen.getByLabelText('Passwort'), 'geheim123456')
+    await user.click(screen.getByRole('button', { name: 'Anmelden' }))
+
+    await waitFor(() => {
+      expect(screen.getByText('Reset-Token-Seite')).toBeInTheDocument()
+    })
+    expect(localStorage.getItem(TOKEN_STORAGE_KEY)).toBeNull()
+  })
+
+  it('IS_ADMIN_PERSISTED: a successful admin login caches the is_admin flag for the sidebar', async () => {
+    stubFetch({
+      ok: true,
+      status: 200,
+      body: {
+        token: 'opaque-session-token',
+        user: { id: 'u-1', email: 'admin@example.com', display_name: 'Admin', is_admin: true },
+      },
+    })
+
+    await submitLogin('admin@example.com', 'geheim123456')
+
+    await waitFor(() => {
+      expect(localStorage.getItem('gear.is_admin')).toBe('true')
+    })
+  })
+
+  it('IS_ADMIN_NOT_PERSISTED: a non-admin login does not set the admin flag', async () => {
+    localStorage.setItem('gear.is_admin', 'true')
+    stubFetch({
+      ok: true,
+      status: 200,
+      body: {
+        token: 'opaque-session-token',
+        user: { id: 'u-1', email: 'max@example.com', display_name: 'Max', is_admin: false },
+      },
+    })
+
+    await submitLogin('max@example.com', 'geheim123456')
+
+    await waitFor(() => {
+      expect(localStorage.getItem('gear.is_admin')).toBeNull()
+    })
   })
 
   it('HAPPY_PATH: successful login stores token and navigates to the dashboard', async () => {

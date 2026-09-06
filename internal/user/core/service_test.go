@@ -23,6 +23,16 @@ type mockRepo struct {
 	audit       map[string][]string
 	auditErr    error
 	updateCalls int
+	// resetTokens holds the minted reset tokens keyed by token_hash (FR-26).
+	resetTokens map[string]*PasswordResetToken
+	resetErr    error
+	// mustChange users flagged for a forced password change, keyed by user ID.
+	mustChange map[string]bool
+	// adminGroup is the set of user IDs considered members of the admin group
+	// (Story 1.8); IsUserInPermissionGroup resolves against it.
+	adminGroup map[string]bool
+	// groupName is the only permission group name IsUserInPermissionGroup
+	// resolves (tests only ever ask about the admin group).
 	// mismatchProfileUser makes UpdateUserProfile/StagePendingEmail return a
 	// DIFFERENT user than the caller, exercising the self-ownership
 	// defense-in-depth guard (AD-12 → ErrForbidden).
@@ -36,10 +46,13 @@ type mockRepo struct {
 
 func newMockRepo() *mockRepo {
 	return &mockRepo{
-		users:    make(map[string]*User),
-		perms:    make(map[string][]string),
-		attempts: make(map[string]*LoginAttempts),
-		audit:    make(map[string][]string),
+		users:       make(map[string]*User),
+		perms:       make(map[string][]string),
+		attempts:    make(map[string]*LoginAttempts),
+		audit:       make(map[string][]string),
+		resetTokens: make(map[string]*PasswordResetToken),
+		mustChange:  make(map[string]bool),
+		adminGroup:  make(map[string]bool),
 	}
 }
 
@@ -215,6 +228,20 @@ func (m *mockRepo) InsertAuditEvent(_ context.Context, userID, operation string)
 	return nil
 }
 
+// InsertAuditEventAnonymous appends an audit row without an actor (review
+// findings 1.8-3 / 1.8-10): the row is keyed under the empty-string pseudo
+// actor so tests can assert unknown-email enumeration attempts leave a trail.
+func (m *mockRepo) InsertAuditEventAnonymous(_ context.Context, operation string) error {
+	if m.auditErr != nil {
+		return m.auditErr
+	}
+	if m.audit == nil {
+		m.audit = make(map[string][]string)
+	}
+	m.audit[""] = append(m.audit[""], operation)
+	return nil
+}
+
 // UpdateUserProfile persists the user's editable base data (first/last/display
 // name, Story 2.1) and returns the updated user. An unknown user ID maps to
 // ErrUserNotFound.
@@ -278,6 +305,112 @@ func (m *mockRepo) ClearPendingEmail(_ context.Context, userID string) error {
 		}
 	}
 	return ErrUserNotFound
+}
+
+// CreatePasswordResetToken stores the hash of a fresh reset token, invalidating
+// earlier tokens of the user (only the latest stays valid, FR-26).
+func (m *mockRepo) CreatePasswordResetToken(_ context.Context, userID, tokenHash string, expiresAt time.Time) error {
+	if m.resetErr != nil {
+		return m.resetErr
+	}
+	for hash := range m.resetTokens {
+		if m.resetTokens[hash].UserID == userID {
+			delete(m.resetTokens, hash)
+		}
+	}
+	m.resetTokens[tokenHash] = &PasswordResetToken{
+		ID:        "token-" + tokenHash[:8],
+		UserID:    userID,
+		TokenHash: tokenHash,
+		ExpiresAt: expiresAt,
+		CreatedAt: time.Now().UTC(),
+		User:      m.userByID(userID),
+	}
+	return nil
+}
+
+// GetPasswordResetTokenByHash resolves a reset token by hash with its owner.
+// Unknown hashes map to ErrResetTokenInvalid.
+func (m *mockRepo) GetPasswordResetTokenByHash(_ context.Context, tokenHash string) (*PasswordResetToken, error) {
+	t, ok := m.resetTokens[tokenHash]
+	if !ok {
+		return nil, ErrResetTokenInvalid
+	}
+	t.User = m.userByID(t.UserID)
+	return t, nil
+}
+
+// ConsumePasswordResetToken atomically invalidates + returns a reset token
+// (review finding 1.8-5): the delete happens with the read, so the losing
+// concurrent completion sees no row and maps to ErrResetTokenInvalid.
+func (m *mockRepo) ConsumePasswordResetToken(_ context.Context, tokenHash string) (*PasswordResetToken, error) {
+	t, ok := m.resetTokens[tokenHash]
+	if !ok {
+		return nil, ErrResetTokenInvalid
+	}
+	delete(m.resetTokens, tokenHash)
+	t.User = m.userByID(t.UserID)
+	return t, nil
+}
+
+// DeleteExpiredPasswordResetTokens lazily purges a user's expired tokens
+// (review finding 1.8-7).
+func (m *mockRepo) DeleteExpiredPasswordResetTokens(_ context.Context, userID string) error {
+	now := time.Now().UTC()
+	for hash, t := range m.resetTokens {
+		if t.UserID == userID && now.After(t.ExpiresAt) {
+			delete(m.resetTokens, hash)
+		}
+	}
+	return nil
+}
+
+// DeletePasswordResetToken invalidates a reset token after use (single-use).
+func (m *mockRepo) DeletePasswordResetToken(_ context.Context, tokenHash string) error {
+	delete(m.resetTokens, tokenHash)
+	return nil
+}
+
+// SetUserMustChangePassword flags the user for a forced password change.
+func (m *mockRepo) SetUserMustChangePassword(_ context.Context, userID string) error {
+	m.mustChange[userID] = true
+	for _, u := range m.users {
+		if u.ID == userID {
+			u.MustChangePassword = true
+		}
+	}
+	return nil
+}
+
+// ClearUserMustChangePassword clears the forced-change flag.
+func (m *mockRepo) ClearUserMustChangePassword(_ context.Context, userID string) error {
+	delete(m.mustChange, userID)
+	for _, u := range m.users {
+		if u.ID == userID {
+			u.MustChangePassword = false
+		}
+	}
+	return nil
+}
+
+// IsUserInPermissionGroup reports admin-group membership (Story 1.8). Tests
+// only ever ask about the admin group, so any other name resolves false.
+func (m *mockRepo) IsUserInPermissionGroup(_ context.Context, userID, groupName string) (bool, error) {
+	if groupName != AdminGroupName {
+		return false, nil
+	}
+	return m.adminGroup[userID], nil
+}
+
+// userByID finds a user by ID across the email-keyed map (the mock repository
+// keys users by email; lookups by ID iterate the values).
+func (m *mockRepo) userByID(userID string) *User {
+	for _, u := range m.users {
+		if u.ID == userID {
+			return u
+		}
+	}
+	return nil
 }
 
 type mockHasher struct {
@@ -423,7 +556,9 @@ func (mockCipher) Decrypt(encoded string) (string, error) {
 }
 
 // newTestService builds a Service with in-memory repo/hasher/session store.
-// The logger is nil (the core falls back to slog.Default()).
+// The logger is nil (the core falls back to slog.Default()) and the forgot
+// rate gate is DISABLED so tests can drive multiple reset requests per email
+// (the throttle is exercised explicitly by the rate-limit tests).
 func newTestService(repo *mockRepo, hasher *mockHasher) (*Service, *mockSessionStore) {
 	store := newMockSessionStore()
 	var users []*User
@@ -432,7 +567,9 @@ func newTestService(repo *mockRepo, hasher *mockHasher) (*Service, *mockSessionS
 	}
 	store.withUsers(users...)
 	sm := NewSessionManager(store, time.Hour)
-	return NewService(repo, hasher, sm, mockCipher{}, nil), store
+	svc := NewService(repo, hasher, sm, mockCipher{}, nil)
+	svc.SetForgotThrottleInterval(0)
+	return svc, store
 }
 
 func TestServiceRegisterHappyPath(t *testing.T) {

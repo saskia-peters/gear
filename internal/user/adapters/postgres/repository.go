@@ -44,7 +44,7 @@ func (r *Repository) CreateRegisteredUser(ctx context.Context, email, displayNam
 	}
 
 	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
-		row.PasswordHash, row.State, row.IsMfaEnabled, row.TotpSecretEncrypted,
+		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
 		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail), nil
 }
 
@@ -59,7 +59,7 @@ func (r *Repository) GetUserByEmail(ctx context.Context, email string) (*core.Us
 	}
 
 	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
-		row.PasswordHash, row.State, row.IsMfaEnabled, row.TotpSecretEncrypted,
+		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
 		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail), nil
 }
 
@@ -130,28 +130,29 @@ func (r *Repository) GetSessionByTokenHash(ctx context.Context, tokenHash string
 		pendingEmail = row.PendingEmail.String
 	}
 
-	return &core.Session{
-		ID:        uuidToString(row.ID.Bytes),
-		UserID:    uuidToString(row.UserID.Bytes),
-		TokenHash: row.TokenHash,
-		ExpiresAt: row.ExpiresAt.Time,
-		CreatedAt: row.CreatedAt.Time,
-		User: &core.User{
-			ID:                         uuidToString(row.UserID.Bytes),
-			Email:                      row.Email,
-			PendingEmail:               pendingEmail,
-			DisplayName:                row.DisplayName,
-			FirstName:                  row.FirstName,
-			LastName:                   row.LastName,
-			State:                      core.UserState(row.State),
-			IsMFAEnabled:               row.IsMfaEnabled,
-			PasswordHash:               row.PasswordHash,
-			TotpSecretEncrypted:        secret,
-			PendingTotpSecretEncrypted: pendingSecret,
-			PendingTotpExpiresAt:       pendingExpiry,
-			Attributes:                 attrs,
-		},
-	}, nil
+return &core.Session{
+			ID:        uuidToString(row.ID.Bytes),
+			UserID:    uuidToString(row.UserID.Bytes),
+			TokenHash: row.TokenHash,
+			ExpiresAt: row.ExpiresAt.Time,
+			CreatedAt: row.CreatedAt.Time,
+			User: &core.User{
+				ID:                         uuidToString(row.UserID.Bytes),
+				Email:                      row.Email,
+				PendingEmail:               pendingEmail,
+				DisplayName:                row.DisplayName,
+				FirstName:                  row.FirstName,
+				LastName:                   row.LastName,
+				State:                      core.UserState(row.State),
+				IsMFAEnabled:               row.IsMfaEnabled,
+				MustChangePassword:         row.MustChangePassword,
+				PasswordHash:               row.PasswordHash,
+				TotpSecretEncrypted:        secret,
+				PendingTotpSecretEncrypted: pendingSecret,
+				PendingTotpExpiresAt:       pendingExpiry,
+				Attributes:                 attrs,
+			},
+		}, nil
 }
 
 // DeleteSessionByTokenHash removes a session row server-side by its hashed
@@ -278,7 +279,7 @@ func (r *Repository) UpdateUserPassword(ctx context.Context, userID, passwordHas
 		return nil, err
 	}
 	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
-		row.PasswordHash, row.State, row.IsMfaEnabled, row.TotpSecretEncrypted,
+		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
 		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail), nil
 }
 
@@ -303,7 +304,7 @@ func (r *Repository) UpdateUserProfile(ctx context.Context, userID, firstName, l
 		return nil, err
 	}
 	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
-		row.PasswordHash, row.State, row.IsMfaEnabled, row.TotpSecretEncrypted,
+		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
 		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail), nil
 }
 
@@ -333,7 +334,7 @@ func (r *Repository) StagePendingEmail(ctx context.Context, userID, pendingEmail
 		return nil, err
 	}
 	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
-		row.PasswordHash, row.State, row.IsMfaEnabled, row.TotpSecretEncrypted,
+		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
 		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail), nil
 }
 
@@ -370,6 +371,145 @@ func (r *Repository) InsertAuditEvent(ctx context.Context, userID, operation str
 	})
 }
 
+// InsertAuditEventAnonymous appends an audit row WITHOUT an actor (actor_user_id
+// stays NULL). Used for anti-enumeration paths with no authenticated user, e.g.
+// a forgot-password request for an unknown email (review findings 1.8-3/1.8-10):
+// enumeration attempts leave a trail (NFR-O1) and the path performs
+// comparable-cost work.
+func (r *Repository) InsertAuditEventAnonymous(ctx context.Context, operation string) error {
+	return r.queries.InsertAuditEventAnonymous(ctx, operation)
+}
+
+// CreatePasswordResetToken stores the SHA-256 hash of a fresh single-use reset
+// token, atomically invalidating every earlier token of the user (only the
+// latest request stays valid, FR-26/AD-13). The raw token is never persisted.
+func (r *Repository) CreatePasswordResetToken(ctx context.Context, userID, tokenHash string, expiresAt time.Time) error {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return err
+	}
+	return r.queries.CreatePasswordResetToken(ctx, CreatePasswordResetTokenParams{
+		UserID:    uid,
+		TokenHash: tokenHash,
+		ExpiresAt: pgtype.Timestamptz{Time: expiresAt, Valid: true},
+	})
+}
+
+// GetPasswordResetTokenByHash resolves a reset token by its stored hash with
+// its owning user (JOIN on users), so the completion step can verify the
+// account is still active. An unknown hash maps to core.ErrResetTokenInvalid.
+func (r *Repository) GetPasswordResetTokenByHash(ctx context.Context, tokenHash string) (*core.PasswordResetToken, error) {
+	row, err := r.queries.GetPasswordResetTokenByHash(ctx, tokenHash)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, core.ErrResetTokenInvalid
+		}
+		return nil, err
+	}
+	return &core.PasswordResetToken{
+		ID:        uuidToString(row.ID.Bytes),
+		UserID:    uuidToString(row.UserID.Bytes),
+		TokenHash: row.TokenHash,
+		ExpiresAt: row.ExpiresAt.Time,
+		CreatedAt: row.CreatedAt.Time,
+		User: &core.User{
+			ID:                 uuidToString(row.UserID.Bytes),
+			Email:              row.Email,
+			DisplayName:        row.DisplayName,
+			FirstName:          row.FirstName,
+			LastName:           row.LastName,
+			State:              core.UserState(row.State),
+			IsMFAEnabled:       row.IsMfaEnabled,
+			MustChangePassword: row.MustChangePassword,
+			PasswordHash:       row.PasswordHash,
+		},
+	}, nil
+}
+
+// ConsumePasswordResetToken atomically invalidates a reset token and returns it
+// with its owning user (review finding 1.8-5): the DELETE and the read happen in
+// one statement, so two concurrent completions with the same token cannot both
+// succeed — the loser sees no row and this maps to core.ErrResetTokenInvalid.
+func (r *Repository) ConsumePasswordResetToken(ctx context.Context, tokenHash string) (*core.PasswordResetToken, error) {
+	row, err := r.queries.ConsumePasswordResetToken(ctx, tokenHash)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, core.ErrResetTokenInvalid
+		}
+		return nil, err
+	}
+	return &core.PasswordResetToken{
+		ID:        uuidToString(row.ID.Bytes),
+		UserID:    uuidToString(row.UserID.Bytes),
+		TokenHash: row.TokenHash,
+		ExpiresAt: row.ExpiresAt.Time,
+		CreatedAt: row.CreatedAt.Time,
+		User: &core.User{
+			ID:                 uuidToString(row.UserID.Bytes),
+			Email:              row.Email,
+			DisplayName:        row.DisplayName,
+			FirstName:          row.FirstName,
+			LastName:           row.LastName,
+			State:              core.UserState(row.State),
+			IsMFAEnabled:       row.IsMfaEnabled,
+			MustChangePassword: row.MustChangePassword,
+			PasswordHash:       row.PasswordHash,
+		},
+	}, nil
+}
+
+// DeletePasswordResetToken invalidates a single reset token after use
+// (single-use, FR-26). Unknown hashes are a no-op.
+func (r *Repository) DeletePasswordResetToken(ctx context.Context, tokenHash string) error {
+	return r.queries.DeletePasswordResetToken(ctx, tokenHash)
+}
+
+// DeleteExpiredPasswordResetTokens lazily purges a user's expired reset tokens
+// (review finding 1.8-7): run on each reset request so expired rows do not
+// accumulate indefinitely. Unknown users are a no-op.
+func (r *Repository) DeleteExpiredPasswordResetTokens(ctx context.Context, userID string) error {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return err
+	}
+	return r.queries.DeleteExpiredPasswordResetTokens(ctx, uid)
+}
+
+// SetUserMustChangePassword flags an active account so the next login forces a
+// mandatory password change (FR-26, SMTP-not-configured fallback / Epic 2
+// one-time password).
+func (r *Repository) SetUserMustChangePassword(ctx context.Context, userID string) error {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return err
+	}
+	return r.queries.SetUserMustChangePassword(ctx, uid)
+}
+
+// ClearUserMustChangePassword clears the mandatory-change flag once the user
+// completes a password change via the forced flow or a reset link (FR-26).
+func (r *Repository) ClearUserMustChangePassword(ctx context.Context, userID string) error {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return err
+	}
+	return r.queries.ClearUserMustChangePassword(ctx, uid)
+}
+
+// IsUserInPermissionGroup reports whether the user is a member of the named
+// permission group (AD-12), e.g. the 'admin' group. It drives the
+// server-authoritative IsAdmin flag for ADMIN module visibility (Story 1.8).
+func (r *Repository) IsUserInPermissionGroup(ctx context.Context, userID, groupName string) (bool, error) {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return false, err
+	}
+	return r.queries.IsUserInPermissionGroup(ctx, IsUserInPermissionGroupParams{
+		UserID: uid,
+		Name:   groupName,
+	})
+}
+
 func uuidToString(b [16]byte) string {
 	return fmt.Sprintf("%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
 		b[0], b[1], b[2], b[3],
@@ -381,7 +521,7 @@ func uuidToString(b [16]byte) string {
 }
 
 // userFromRow maps an sqlc user row to the core.User domain entity.
-func userFromRow(id pgtype.UUID, email, displayName, firstName, lastName, passwordHash, state string, isMfa bool, totpSecret pgtype.Text, pendingSecret pgtype.Text, pendingExpiry pgtype.Timestamptz, attributes []byte, createdAt, updatedAt pgtype.Timestamptz, pendingEmail pgtype.Text) *core.User {
+func userFromRow(id pgtype.UUID, email, displayName, firstName, lastName, passwordHash, state string, isMfa, mustChange bool, totpSecret pgtype.Text, pendingSecret pgtype.Text, pendingExpiry pgtype.Timestamptz, attributes []byte, createdAt, updatedAt pgtype.Timestamptz, pendingEmail pgtype.Text) *core.User {
 	var attrs map[string]any
 	if len(attributes) > 0 {
 		_ = json.Unmarshal(attributes, &attrs)
@@ -412,6 +552,7 @@ func userFromRow(id pgtype.UUID, email, displayName, firstName, lastName, passwo
 		PasswordHash:               passwordHash,
 		State:                      core.UserState(state),
 		IsMFAEnabled:               isMfa,
+		MustChangePassword:         mustChange,
 		TotpSecretEncrypted:        secret,
 		PendingTotpSecretEncrypted: pending,
 		PendingTotpExpiresAt:       expiry,

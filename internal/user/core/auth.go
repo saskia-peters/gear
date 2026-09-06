@@ -62,6 +62,8 @@ func (in *LoginInput) Validate() error {
 // LoginUser is the safe user snapshot returned on a successful login. The
 // resolved permission set is deliberately NOT included: permissions are always
 // re-derived server-side per request (AD-2/AD-6) and must never be client-trusted.
+// IsAdmin is server-authoritative (resolved from admin-group membership) and
+// drives the ADMIN module visibility in the SPA (Story 1.8).
 type LoginUser struct {
 	ID           string `json:"id"`
 	Email        string `json:"email"`
@@ -69,17 +71,34 @@ type LoginUser struct {
 	FirstName    string `json:"first_name"`
 	LastName     string `json:"last_name"`
 	IsMFAEnabled bool   `json:"is_mfa_enabled"`
+	IsAdmin      bool   `json:"is_admin"`
 }
 
 // LoginResult is the payload returned on successful login: an opaque session
 // token plus the caller's user snapshot. When MFA is enabled and the client
 // has not yet submitted a TOTP code, MFARequired is true and NO token is
-// issued (two-step login, FR-4).
+// issued (two-step login, FR-4). When the account is flagged
+// must_change_password (FR-26), MustChangePassword is true and NO app session
+// is issued; ResetToken carries a single-use reset token the client uses to
+// run the forced change flow (/reset-password/<token>).
 type LoginResult struct {
-	Token       string    `json:"token,omitempty"`
-	MFARequired bool      `json:"mfa_required,omitempty"`
-	User        LoginUser `json:"user,omitempty"`
+	Token              string    `json:"token,omitempty"`
+	MFARequired        bool      `json:"mfa_required,omitempty"`
+	MustChangePassword bool      `json:"must_change_password,omitempty"`
+	ResetToken         string    `json:"reset_token,omitempty"`
+	User               LoginUser `json:"user,omitempty"`
 }
+
+// AdminGroupName is the permission group whose membership makes an account an
+// admin (AD-12). Membership is resolved server-side; the client only ever sees
+// the derived IsAdmin flag (Story 1.8).
+const AdminGroupName = "admin"
+
+// MsgMustChangePassword is the German note surfaced when a login succeeds but
+// the account is flagged for a mandatory password change (FR-26 fallback /
+// Epic 2 one-time password). It tells the user the admins have been notified
+// and that an admin-provided one-time password unlocks the forced change flow.
+const MsgMustChangePassword = "Dein Passwort muss geändert werden, bevor du die Anwendung nutzen kannst. Die Administratoren wurden benachrichtigt; falls dir ein Einmal-Passwort bereitgestellt wurde, melde dich damit an und lege ein neues Passwort fest."
 
 // Login authenticates a user with email + password, enforces the active
 // account state and issues an opaque session token (AD-2/AD-6). When MFA is
@@ -179,10 +198,29 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (*LoginResult, er
 		}
 	}
 
-	// Resolve the permission set before creating the session: a failure here
-	// must not leave an orphaned session behind.
+	// Forced password change (FR-26): when the account is flagged
+	// must_change_password (SMTP-not-configured fallback / Epic 2 one-time
+	// password), authentication SUCCEEDS but no app session is issued. Instead
+	// a fresh single-use reset token is minted and returned so the client runs
+	// the forced-change flow (/reset-password/<token>); completing it clears
+	// the flag and revokes sessions, forcing a clean re-login. Ordering: the
+	// MFA step above has already validated the second factor.
+	if user.MustChangePassword {
+		raw, err := s.mintResetToken(ctx, user.ID)
+		if err != nil {
+			return nil, fmt.Errorf("user core: failed to issue forced-change token: %w", err)
+		}
+		return &LoginResult{MustChangePassword: true, ResetToken: raw}, nil
+	}
+
+	// Resolve the permission set and admin-group membership before creating the
+	// session: a failure here must not leave an orphaned session behind.
 	if _, err := s.repo.ListPermissionsByUser(ctx, user.ID); err != nil {
 		return nil, fmt.Errorf("user core: failed to resolve permissions: %w", err)
+	}
+	isAdmin, err := s.resolveIsAdmin(ctx, user.ID)
+	if err != nil {
+		return nil, fmt.Errorf("user core: failed to resolve admin group membership: %w", err)
 	}
 
 	token, err := s.sessions.Issue(ctx, user)
@@ -199,6 +237,7 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (*LoginResult, er
 			FirstName:    user.FirstName,
 			LastName:     user.LastName,
 			IsMFAEnabled: user.IsMFAEnabled,
+			IsAdmin:      isAdmin,
 		},
 	}, nil
 }

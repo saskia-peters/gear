@@ -28,6 +28,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.SessionIdle != 8*time.Hour {
 		t.Errorf("SessionIdle = %v, want 8h default", cfg.SessionIdle)
 	}
+	if cfg.AppOrigin != DefaultAppOrigin {
+		t.Errorf("AppOrigin = %q, want default %q", cfg.AppOrigin, DefaultAppOrigin)
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {
@@ -36,6 +39,7 @@ func TestLoadOverrides(t *testing.T) {
 		"GEAR_HTTP_ADDR":    "127.0.0.1:9999",
 		"GEAR_LOG_LEVEL":    "debug",
 		"GEAR_SESSION_IDLE": "30m",
+		"GEAR_APP_ORIGIN":   "https://gear.example.com",
 	}
 	cfg := Load(mapEnv(env))
 
@@ -50,6 +54,9 @@ func TestLoadOverrides(t *testing.T) {
 	}
 	if cfg.SessionIdle != 30*time.Minute {
 		t.Errorf("SessionIdle = %v, want 30m", cfg.SessionIdle)
+	}
+	if cfg.AppOrigin != env["GEAR_APP_ORIGIN"] {
+		t.Errorf("AppOrigin = %q, want %q", cfg.AppOrigin, env["GEAR_APP_ORIGIN"])
 	}
 }
 

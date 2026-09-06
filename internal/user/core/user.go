@@ -77,6 +77,11 @@ type User struct {
 	// to clients (json:"-") and never the plaintext secret.
 	PendingTotpSecretEncrypted string    `json:"-"`
 	PendingTotpExpiresAt       time.Time `json:"-"`
+	// MustChangePassword flags an account whose next login must force a
+	// mandatory password change before app access (FR-26, SMTP-not-configured
+	// fallback / Epic 2 one-time password). It is cleared once the user
+	// completes a change via a reset link. Never serialized to clients.
+	MustChangePassword bool `json:"-"`
 	Attributes                 map[string]any `json:"attributes,omitempty"`
 	CreatedAt                  time.Time      `json:"created_at"`
 	UpdatedAt                  time.Time      `json:"updated_at"`

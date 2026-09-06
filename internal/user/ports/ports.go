@@ -15,6 +15,13 @@ type RegisterResult = core.RegisterResult
 // LoginResult is the payload returned on a successful login.
 type LoginResult = core.LoginResult
 
+// ResetRequestResult is the uniform confirmation returned by the forgot
+// endpoint (FR-26).
+type ResetRequestResult = core.ResetRequestResult
+
+// ResetCompleteResult is the confirmation returned when a reset is completed.
+type ResetCompleteResult = core.ResetCompleteResult
+
 // Service is the User Directory & Auth inbound port (AD-2).
 type Service interface {
 	Register(ctx context.Context, input core.RegisterInput) (*core.RegisterResult, error)
@@ -40,6 +47,11 @@ type Service interface {
 	GetProfile(ctx context.Context, user *core.User) (*core.Profile, error)
 	UpdateProfile(ctx context.Context, user *core.User, input core.UpdateProfileInput) (*core.Profile, error)
 	StageEmailChange(ctx context.Context, user *core.User, newEmail string) (*core.StageEmailResult, error)
+	// Password reset (FR-26): RequestPasswordReset returns the uniform
+	// anti-enumeration confirmation; CompletePasswordReset sets a new password
+	// via a valid single-use token.
+	RequestPasswordReset(ctx context.Context, email string) (*core.ResetRequestResult, error)
+	CompletePasswordReset(ctx context.Context, rawToken, newPassword, confirm string) (*core.ResetCompleteResult, error)
 }
 
 // Repository is the outbound persistence port for User data.
@@ -59,6 +71,13 @@ type Repository interface {
 	UpdateUserProfile(ctx context.Context, userID, firstName, lastName, displayName string) (*core.User, error)
 	StagePendingEmail(ctx context.Context, userID, pendingEmail string) (*core.User, error)
 	ClearPendingEmail(ctx context.Context, userID string) error
+	CreatePasswordResetToken(ctx context.Context, userID, tokenHash string, expiresAt time.Time) error
+	ConsumePasswordResetToken(ctx context.Context, tokenHash string) (*core.PasswordResetToken, error)
+	DeleteExpiredPasswordResetTokens(ctx context.Context, userID string) error
+	SetUserMustChangePassword(ctx context.Context, userID string) error
+	ClearUserMustChangePassword(ctx context.Context, userID string) error
+	InsertAuditEventAnonymous(ctx context.Context, operation string) error
+	IsUserInPermissionGroup(ctx context.Context, userID, groupName string) (bool, error)
 }
 
 // PasswordHasher is the outbound password hashing port (AD-13).
@@ -71,4 +90,14 @@ type PasswordHasher interface {
 type SecretCipher interface {
 	Encrypt(plaintext string) (string, error)
 	Decrypt(encoded string) (string, error)
+}
+
+// ResetEmailSender is the outbound reset-email delivery port (FR-26/AD-14):
+// the User module never owns SMTP. This story ships a stub that reports
+// NOT-configured (so the must-change-password fallback is the active default);
+// Story 3.1 supplies the real SMTP sender. The sender receives the FULL
+// clickable reset link (built from GEAR_APP_ORIGIN, review finding 1.8-6).
+type ResetEmailSender interface {
+	SendPasswordResetEmail(ctx context.Context, email, resetLink string) error
+	Configured() bool
 }

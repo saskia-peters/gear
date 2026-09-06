@@ -70,7 +70,9 @@ var (
 // Profile is the base-data payload of the authenticated user (Story 2.1):
 // the editable fields plus the current email and any staged email awaiting
 // admin approval. It is built from the authenticated session user, so it
-// never carries password hashes or TOTP secrets.
+// never carries password hashes or TOTP secrets. IsAdmin is resolved
+// server-side from admin-group membership (AD-12) and drives the ADMIN module
+// visibility in the SPA (Story 1.8).
 type Profile struct {
 	ID           string `json:"id"`
 	Email        string `json:"email"`
@@ -78,6 +80,7 @@ type Profile struct {
 	LastName     string `json:"last_name"`
 	DisplayName  string `json:"display_name"`
 	PendingEmail string `json:"pending_email,omitempty"`
+	IsAdmin      bool   `json:"is_admin"`
 }
 
 // UpdateProfileInput captures the editable base-data payload (Story 2.1):
@@ -136,11 +139,13 @@ type StageEmailResult struct {
 // session Validate (JOIN), and the Service refreshes it after every profile
 // write (RefreshSessionUser), so the endpoint and the header both reflect
 // edits immediately.
-func (s *Service) GetProfile(_ context.Context, user *User) (*Profile, error) {
+func (s *Service) GetProfile(ctx context.Context, user *User) (*Profile, error) {
 	if user == nil {
 		return nil, ErrInvalidCredentials
 	}
-	return profileFromUser(user), nil
+	profile := profileFromUser(user)
+	profile.IsAdmin = s.isAdminSafe(ctx, user.ID)
+	return profile, nil
 }
 
 // UpdateProfile validates and persists the user's editable base data
@@ -194,7 +199,9 @@ func (s *Service) UpdateProfile(ctx context.Context, user *User, input UpdatePro
 		s.log().Warn("profile update audit write failed", "error", err)
 	}
 
-	return profileFromUser(updated), nil
+	profile := profileFromUser(updated)
+	profile.IsAdmin = s.isAdminSafe(ctx, user.ID)
+	return profile, nil
 }
 
 // StageEmailChange validates a new email, rejects no-ops (same as current, or
@@ -300,4 +307,26 @@ func profileFromUser(u *User) *Profile {
 		DisplayName:  u.DisplayName,
 		PendingEmail: u.PendingEmail,
 	}
+}
+
+// resolveIsAdmin resolves whether the user is a member of the admin permission
+// group (AD-12). It is server-authoritative: the client only ever receives the
+// derived IsAdmin flag, never the group membership itself (Story 1.8). Callers
+// decide how to treat a resolution failure: reads log it and report false
+// (availability), while Login propagates it so no session is orphaned.
+func (s *Service) resolveIsAdmin(ctx context.Context, userID string) (bool, error) {
+	return s.repo.IsUserInPermissionGroup(ctx, userID, AdminGroupName)
+}
+
+// isAdminSafe resolves IsAdmin for read paths (profile view/update): a failure
+// is logged and reports false — the read must not fail because admin resolution
+// failed, and a false result grants nothing (the real permission checks still
+// run server-side).
+func (s *Service) isAdminSafe(ctx context.Context, userID string) bool {
+	isAdmin, err := s.resolveIsAdmin(ctx, userID)
+	if err != nil {
+		s.log().Warn("admin group membership resolution failed", "error", err)
+		return false
+	}
+	return isAdmin
 }

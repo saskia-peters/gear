@@ -33,6 +33,8 @@ type mockService struct {
 	getProfileFunc       func(ctx context.Context, user *core.User) (*core.Profile, error)
 	updateProfileFunc    func(ctx context.Context, user *core.User, input core.UpdateProfileInput) (*core.Profile, error)
 	stageEmailFunc       func(ctx context.Context, user *core.User, newEmail string) (*core.StageEmailResult, error)
+	requestResetFunc     func(ctx context.Context, email string) (*core.ResetRequestResult, error)
+	completeResetFunc    func(ctx context.Context, rawToken, newPassword, confirm string) (*core.ResetCompleteResult, error)
 	revokeOtherCalls     *int
 	revokeAllCalls       *int
 }
@@ -138,6 +140,20 @@ func (m *mockService) StageEmailChange(ctx context.Context, user *core.User, new
 		return m.stageEmailFunc(ctx, user, newEmail)
 	}
 	return &core.StageEmailResult{Message: core.MsgEmailChangeStaged, PendingEmail: newEmail}, nil
+}
+
+func (m *mockService) RequestPasswordReset(ctx context.Context, email string) (*core.ResetRequestResult, error) {
+	if m.requestResetFunc != nil {
+		return m.requestResetFunc(ctx, email)
+	}
+	return &core.ResetRequestResult{Message: core.MsgPasswordResetRequested}, nil
+}
+
+func (m *mockService) CompletePasswordReset(ctx context.Context, rawToken, newPassword, confirm string) (*core.ResetCompleteResult, error) {
+	if m.completeResetFunc != nil {
+		return m.completeResetFunc(ctx, rawToken, newPassword, confirm)
+	}
+	return &core.ResetCompleteResult{Message: core.MsgPasswordResetComplete}, nil
 }
 
 // stubValidator always authenticates the caller as an active user. Used to
@@ -1522,6 +1538,30 @@ func (r *changePasswordRepo) StagePendingEmail(_ context.Context, _ string, pend
 
 func (r *changePasswordRepo) ClearPendingEmail(_ context.Context, _ string) error { return nil }
 
+func (r *changePasswordRepo) CreatePasswordResetToken(_ context.Context, _, _ string, _ time.Time) error {
+	return nil
+}
+
+func (r *changePasswordRepo) ConsumePasswordResetToken(_ context.Context, _ string) (*core.PasswordResetToken, error) {
+	return nil, core.ErrResetTokenInvalid
+}
+
+func (r *changePasswordRepo) DeleteExpiredPasswordResetTokens(_ context.Context, _ string) error {
+	return nil
+}
+
+func (r *changePasswordRepo) InsertAuditEventAnonymous(_ context.Context, _ string) error { return nil }
+
+func (r *changePasswordRepo) DeletePasswordResetToken(_ context.Context, _ string) error { return nil }
+
+func (r *changePasswordRepo) SetUserMustChangePassword(_ context.Context, _ string) error { return nil }
+
+func (r *changePasswordRepo) ClearUserMustChangePassword(_ context.Context, _ string) error { return nil }
+
+func (r *changePasswordRepo) IsUserInPermissionGroup(_ context.Context, _, _ string) (bool, error) {
+	return false, nil
+}
+
 func (r *changePasswordRepo) InsertAuditEvent(_ context.Context, _ string, operation string) error {
 	r.audit = append(r.audit, operation)
 	return nil
@@ -2206,5 +2246,349 @@ func TestHandlerProfileRealSessionManagerChain(t *testing.T) {
 		if repo.audit[i] != op {
 			t.Errorf("audit[%d] = %q, want %q", i, repo.audit[i], op)
 		}
+	}
+}
+
+func TestHandlerForgotPasswordUniformConfirmation(t *testing.T) {
+	// FR-26: POST /api/v1/auth/password/forgot ALWAYS returns the uniform
+	// anti-enumeration confirmation — the handler passes the service result
+	// through unchanged (the service is responsible for the invariant).
+	var gotEmail string
+	svc := &mockService{
+		requestResetFunc: func(ctx context.Context, email string) (*core.ResetRequestResult, error) {
+			gotEmail = email
+			return &core.ResetRequestResult{Message: core.MsgPasswordResetRequested}, nil
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	body, _ := json.Marshal(map[string]string{"email": "user@example.com"})
+	req := httptest.NewRequest(http.MethodPost, "/password/forgot", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.ForgotPassword(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var res core.ResetRequestResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.Message != core.MsgPasswordResetRequested {
+		t.Errorf("message = %q, want %q", res.Message, core.MsgPasswordResetRequested)
+	}
+	if gotEmail != "user@example.com" {
+		t.Errorf("email = %q, want user@example.com", gotEmail)
+	}
+}
+
+func TestHandlerForgotPasswordInvalidJSONReturns400(t *testing.T) {
+	svc := &mockService{}
+	h := newTestHandler(svc, &stubValidator{})
+
+	req := httptest.NewRequest(http.MethodPost, "/password/forgot", bytes.NewReader([]byte("{bad")))
+	rec := httptest.NewRecorder()
+	h.ForgotPassword(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error.Code != "invalid_request" {
+		t.Errorf("code = %q, want invalid_request", env.Error.Code)
+	}
+}
+
+func TestHandlerForgotPasswordThrottledReturns429(t *testing.T) {
+	// Review finding 1.8-2: a throttled forgot request maps to a uniform 429
+	// (too_many_attempts), never a 200/500.
+	svc := &mockService{
+		requestResetFunc: func(ctx context.Context, email string) (*core.ResetRequestResult, error) {
+			return nil, core.ErrForgotThrottled
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	body, _ := json.Marshal(map[string]string{"email": "user@example.com"})
+	req := httptest.NewRequest(http.MethodPost, "/password/forgot", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ForgotPassword(rec, req)
+
+	if rec.Code != http.StatusTooManyRequests {
+		t.Fatalf("status = %d, want 429 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error.Code != "too_many_attempts" {
+		t.Errorf("code = %q, want too_many_attempts", env.Error.Code)
+	}
+}
+
+func TestHandlerForgotPasswordInternalErrorReturns500(t *testing.T) {
+	svc := &mockService{
+		requestResetFunc: func(ctx context.Context, email string) (*core.ResetRequestResult, error) {
+			return nil, errors.New("db down")
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	body, _ := json.Marshal(map[string]string{"email": "user@example.com"})
+	req := httptest.NewRequest(http.MethodPost, "/password/forgot", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ForgotPassword(rec, req)
+
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
+	}
+}
+
+func TestHandlerResetPasswordHappyPath(t *testing.T) {
+	var gotToken, gotNew, gotConfirm string
+	svc := &mockService{
+		completeResetFunc: func(ctx context.Context, rawToken, newPassword, confirm string) (*core.ResetCompleteResult, error) {
+			gotToken, gotNew, gotConfirm = rawToken, newPassword, confirm
+			return &core.ResetCompleteResult{Message: core.MsgPasswordResetComplete}, nil
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	body, _ := json.Marshal(map[string]string{
+		"token": "opaque-reset-token", "new_password": "neuespasswort123", "new_password_confirm": "neuespasswort123",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/password/reset", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.ResetPassword(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var res core.ResetCompleteResult
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.Message != core.MsgPasswordResetComplete {
+		t.Errorf("message = %q, want %q", res.Message, core.MsgPasswordResetComplete)
+	}
+	if gotToken != "opaque-reset-token" || gotNew != "neuespasswort123" || gotConfirm != "neuespasswort123" {
+		t.Errorf("payload not forwarded: (%q,%q,%q)", gotToken, gotNew, gotConfirm)
+	}
+}
+
+func TestHandlerResetPasswordInvalidTokenReturns400(t *testing.T) {
+	// RESET_EXPIRED / RESET_USED: 400 invalid_token with German microcopy.
+	svc := &mockService{
+		completeResetFunc: func(ctx context.Context, rawToken, newPassword, confirm string) (*core.ResetCompleteResult, error) {
+			return nil, core.ErrResetTokenInvalid
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	body, _ := json.Marshal(map[string]string{
+		"token": "expired", "new_password": "neuespasswort123", "new_password_confirm": "neuespasswort123",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/password/reset", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ResetPassword(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error.Code != "invalid_token" {
+		t.Errorf("code = %q, want invalid_token", env.Error.Code)
+	}
+	if env.Error.Message != core.MsgResetTokenInvalid {
+		t.Errorf("message = %q, want %q", env.Error.Message, core.MsgResetTokenInvalid)
+	}
+}
+
+func TestHandlerResetPasswordShortPasswordReturns400(t *testing.T) {
+	// RESET_SHORT_PW: 400 invalid_request with the FR-2 microcopy.
+	svc := &mockService{
+		completeResetFunc: func(ctx context.Context, rawToken, newPassword, confirm string) (*core.ResetCompleteResult, error) {
+			return nil, core.ErrShortPassword
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	body, _ := json.Marshal(map[string]string{
+		"token": "opaque", "new_password": "kurz", "new_password_confirm": "kurz",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/password/reset", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ResetPassword(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error.Code != "invalid_request" || env.Error.Message != core.MsgShortPassword {
+		t.Errorf("error = %+v, want invalid_request %q", env.Error, core.MsgShortPassword)
+	}
+}
+
+func TestHandlerResetPasswordMismatchReturns400(t *testing.T) {
+	// RESET_MISMATCH: 400 invalid_request with the mismatch microcopy.
+	svc := &mockService{
+		completeResetFunc: func(ctx context.Context, rawToken, newPassword, confirm string) (*core.ResetCompleteResult, error) {
+			return nil, core.ErrPasswordMismatch
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	body, _ := json.Marshal(map[string]string{
+		"token": "opaque", "new_password": "neuespasswort123", "new_password_confirm": "anders123456",
+	})
+	req := httptest.NewRequest(http.MethodPost, "/password/reset", bytes.NewReader(body))
+	rec := httptest.NewRecorder()
+	h.ResetPassword(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error.Code != "invalid_request" || env.Error.Message != core.MsgPasswordMismatch {
+		t.Errorf("error = %+v, want invalid_request %q", env.Error, core.MsgPasswordMismatch)
+	}
+}
+
+func TestHandlerResetPasswordInvalidJSONReturns400(t *testing.T) {
+	svc := &mockService{}
+	h := newTestHandler(svc, &stubValidator{})
+
+	req := httptest.NewRequest(http.MethodPost, "/password/reset", bytes.NewReader([]byte("{bad")))
+	rec := httptest.NewRecorder()
+	h.ResetPassword(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400", rec.Code)
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error.Code != "invalid_request" {
+		t.Errorf("code = %q, want invalid_request", env.Error.Code)
+	}
+}
+
+func TestHandlerLoginMustChangePasswordResponse(t *testing.T) {
+	// LOGIN_MUST_CHANGE: no app session is issued; the response carries only the
+	// must_change_password marker plus the single-use reset token that drives
+	// the forced change flow, and a German note that the admins have been
+	// notified (review finding 1.8-4).
+	svc := &mockService{
+		loginFunc: func(ctx context.Context, input core.LoginInput) (*ports.LoginResult, error) {
+			return &ports.LoginResult{MustChangePassword: true, ResetToken: "forced-change-raw-token"}, nil
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	body, _ := json.Marshal(map[string]string{"email": "active@example.com", "password": "geheim123456"})
+	req := httptest.NewRequest(http.MethodPost, "/login", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.Login(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &wire); err != nil {
+		t.Fatal(err)
+	}
+	if wire["must_change_password"] != true {
+		t.Errorf("must_change_password = %v, want true", wire["must_change_password"])
+	}
+	if wire["reset_token"] != "forced-change-raw-token" {
+		t.Errorf("reset_token = %v, want forced-change-raw-token", wire["reset_token"])
+	}
+	if wire["message"] != core.MsgMustChangePassword {
+		t.Errorf("message = %v, want %q", wire["message"], core.MsgMustChangePassword)
+	}
+	if _, present := wire["token"]; present {
+		t.Error("forced-change login must not carry an app session token")
+	}
+	if _, present := wire["user"]; present {
+		t.Error("forced-change login must not carry a user snapshot (no session issued)")
+	}
+}
+
+func TestHandlerLoginIncludesIsAdmin(t *testing.T) {
+	// Story 1.8: the login response carries is_admin from LoginUser.
+	svc := &mockService{
+		loginFunc: func(ctx context.Context, input core.LoginInput) (*ports.LoginResult, error) {
+			return &ports.LoginResult{
+				Token: "opaque-token",
+				User:  core.LoginUser{ID: "u-1", Email: "admin@example.com", DisplayName: "Admin", IsAdmin: true},
+			}, nil
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	body, _ := json.Marshal(map[string]string{"email": "admin@example.com", "password": "geheim123456"})
+	req := httptest.NewRequest(http.MethodPost, "/login", bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+
+	h.Login(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &wire); err != nil {
+		t.Fatal(err)
+	}
+	user, ok := wire["user"].(map[string]any)
+	if !ok {
+		t.Fatalf("expected user object, got %T", wire["user"])
+	}
+	if user["is_admin"] != true {
+		t.Errorf("user.is_admin = %v, want true", user["is_admin"])
+	}
+}
+
+func TestHandlerGetProfileIncludesIsAdmin(t *testing.T) {
+	// Story 1.8: GET /profile carries is_admin resolved server-side.
+	svc := &mockService{
+		getProfileFunc: func(ctx context.Context, user *core.User) (*core.Profile, error) {
+			return &core.Profile{ID: "u-1", Email: "admin@example.com", FirstName: "Max", LastName: "Mustermann", DisplayName: "Max", IsAdmin: true}, nil
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	req := authedProfileRequest(http.MethodGet, "/profile", nil)
+	rec := httptest.NewRecorder()
+	h.GetProfile(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &wire); err != nil {
+		t.Fatal(err)
+	}
+	if wire["is_admin"] != true {
+		t.Errorf("is_admin = %v, want true", wire["is_admin"])
 	}
 }

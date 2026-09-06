@@ -159,10 +159,31 @@ export function LoginPage() {
         return
       }
 
+      if (response.ok && data?.must_change_password) {
+        // LOGIN_MUST_CHANGE (FR-26): credentials are valid but the account is
+        // flagged for a mandatory password change (SMTP-not-configured
+        // fallback / Epic 2 one-time password). NO app session was issued; the
+        // server returned a single-use reset token that drives the forced
+        // change flow. Completing it clears the flag and requires a re-login.
+        // The server's German note (review finding 1.8-4) is carried to the
+        // reset page via navigation state.
+        if (data?.reset_token) {
+          navigate(`/reset-password/${data.reset_token}`, {
+            state: { notice: data?.message },
+          })
+        } else {
+          setErrors({ general: 'Bitte wende dich an deinen Administrator.' })
+        }
+        return
+      }
+
       if (response.ok && data?.token) {
-        saveAuthState(data.token, Boolean(data.user?.is_mfa_enabled), {
-          displayName: data.user?.display_name,
-        })
+        saveAuthState(
+          data.token,
+          Boolean(data.user?.is_mfa_enabled),
+          { displayName: data.user?.display_name },
+          Boolean(data.user?.is_admin),
+        )
         navigate('/')
         return
       }
@@ -344,6 +365,9 @@ export function LoginPage() {
           )}
 
           <div className={styles.links}>
+            <Link to="/forgot-password" className={styles.link}>
+              Passwort vergessen?
+            </Link>
             <Link to="/register" className={styles.link}>
               Noch kein Konto? Jetzt registrieren
             </Link>

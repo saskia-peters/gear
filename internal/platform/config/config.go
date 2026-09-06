@@ -32,6 +32,9 @@ const (
 	DefaultHTTPAddr    = ":8080"
 	DefaultLogLevel    = "info"
 	DefaultSessionIdle = "8h"
+	// DefaultAppOrigin is the public origin of the SPA used to build clickable
+	// password-reset links (review finding 1.8-6). Matches the Vite dev server.
+	DefaultAppOrigin = "http://localhost:5173"
 )
 
 // ErrEncryptionKeyInvalid is returned when GEAR_ENCRYPTION_KEY is missing,
@@ -45,6 +48,9 @@ type Config struct {
 	HTTPAddr    string
 	LogLevel    slog.Level
 	SessionIdle time.Duration
+	// AppOrigin is the public origin of the SPA used to build password-reset
+	// links (GEAR_APP_ORIGIN, review finding 1.8-6).
+	AppOrigin string
 	// EncryptionKey is the raw GEAR_ENCRYPTION_KEY value (hex or base64) and
 	// EncryptionKeyErr the parse result. When set, EncryptionKeyErr is nil.
 	EncryptionKey    string
@@ -59,6 +65,7 @@ func Load(getenv func(string) string) Config {
 		HTTPAddr:         envOr(getenv, "GEAR_HTTP_ADDR", DefaultHTTPAddr),
 		LogLevel:         logger.ParseLevel(envOr(getenv, "GEAR_LOG_LEVEL", DefaultLogLevel)),
 		SessionIdle:      durationOr(getenv, "GEAR_SESSION_IDLE", DefaultSessionIdle),
+		AppOrigin:        envOr(getenv, "GEAR_APP_ORIGIN", DefaultAppOrigin),
 		EncryptionKey:    encKey,
 		EncryptionKeyErr: parseEncryptionKey(encKey),
 	}

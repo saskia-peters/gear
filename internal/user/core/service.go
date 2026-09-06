@@ -37,6 +37,24 @@ type Repository interface {
 	UpdateUserProfile(ctx context.Context, userID, firstName, lastName, displayName string) (*User, error)
 	StagePendingEmail(ctx context.Context, userID, pendingEmail string) (*User, error)
 	ClearPendingEmail(ctx context.Context, userID string) error
+	// Password reset persistence (FR-26/AD-13): CreatePasswordResetToken stores
+	// the SHA-256 hash of a single-use 30-min token (invalidating earlier ones);
+	// ConsumePasswordResetToken atomically invalidates + returns a token (the
+	// losing concurrent completion sees no row, review finding 1.8-5);
+	// DeleteExpiredPasswordResetTokens lazily purges expired rows (review
+	// finding 1.8-7); Set/ClearUserMustChangePassword flip the forced-change
+	// flag (SMTP-not-configured fallback / Epic 2); InsertAuditEventAnonymous
+	// writes an audit row without an actor (unknown-email reset requests).
+	CreatePasswordResetToken(ctx context.Context, userID, tokenHash string, expiresAt time.Time) error
+	ConsumePasswordResetToken(ctx context.Context, tokenHash string) (*PasswordResetToken, error)
+	DeleteExpiredPasswordResetTokens(ctx context.Context, userID string) error
+	SetUserMustChangePassword(ctx context.Context, userID string) error
+	ClearUserMustChangePassword(ctx context.Context, userID string) error
+	InsertAuditEventAnonymous(ctx context.Context, operation string) error
+	// IsUserInPermissionGroup reports whether the user is a member of the named
+	// permission group (AD-12); the admin-group membership drives the
+	// server-authoritative IsAdmin flag (Story 1.8).
+	IsUserInPermissionGroup(ctx context.Context, userID, groupName string) (bool, error)
 }
 
 // SecretCipher encrypts/decrypts the TOTP shared secret at rest (NFR-S4). The
@@ -66,6 +84,16 @@ type Service struct {
 	sessions *SessionManager
 	cipher   SecretCipher
 	logger   *slog.Logger
+	// resetSender is the reset-email delivery port (FR-26/AD-14). When nil or
+	// reporting NOT-configured, RequestPasswordReset falls back to flagging the
+	// account must_change_password (this story's default).
+	resetSender ResetEmailSender
+	// appOrigin is the public origin used to build reset links (GEAR_APP_ORIGIN,
+	// review finding 1.8-6). Empty → relative links.
+	appOrigin string
+	// forgotThrottle is the per-email forgot-request rate gate (review finding
+	// 1.8-2). Disabled when nil.
+	forgotThrottle *forgotThrottle
 }
 
 // NewService constructs a User domain Service. logger is used for structured
@@ -74,12 +102,32 @@ type Service struct {
 // falls back to slog.Default().
 func NewService(repo Repository, hasher PasswordHasher, sessions *SessionManager, cipher SecretCipher, logger *slog.Logger) *Service {
 	return &Service{
-		repo:     repo,
-		hasher:   hasher,
-		sessions: sessions,
-		cipher:   cipher,
-		logger:   logger,
+		repo:           repo,
+		hasher:         hasher,
+		sessions:       sessions,
+		cipher:         cipher,
+		logger:         logger,
+		forgotThrottle: newForgotThrottle(ForgotPasswordMinInterval),
 	}
+}
+
+// SetResetEmailSender configures the reset-email delivery port (FR-26). When
+// unset, RequestPasswordReset falls back to the must_change_password flag (SMTP
+// not configured — the active default until Story 3.1 wires a real sender).
+func (s *Service) SetResetEmailSender(sender ResetEmailSender) {
+	s.resetSender = sender
+}
+
+// SetAppOrigin configures the public origin used to build clickable reset links
+// (GEAR_APP_ORIGIN, review finding 1.8-6). A trailing slash is trimmed.
+func (s *Service) SetAppOrigin(origin string) {
+	s.appOrigin = origin
+}
+
+// SetForgotThrottleInterval overrides the forgot-request rate-gate window
+// (review finding 1.8-2). An interval <= 0 disables throttling (used by tests).
+func (s *Service) SetForgotThrottleInterval(interval time.Duration) {
+	s.forgotThrottle = newForgotThrottle(interval)
 }
 
 // UniformSuccessMessage is the German microcopy returned for anti-enumeration.

@@ -3,6 +3,11 @@
   <head>
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <!-- Review finding 1.8-13: the password-reset link carries the raw token in
+         the URL, so no-referrer prevents it leaking to offsite links via the
+         Referer header. The token is single-use, hashed at rest, expires after
+         30 minutes, and completion/use invalidates it. -->
+    <meta name="referrer" content="no-referrer" />
     <link rel="preconnect" href="https://fonts.googleapis.com" />
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
     <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700&display=swap" rel="stylesheet" />

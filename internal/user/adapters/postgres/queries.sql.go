@@ -37,6 +37,20 @@ func (q *Queries) ClearPendingEmail(ctx context.Context, id pgtype.UUID) error {
 	return err
 }
 
+const clearUserMustChangePassword = `-- name: ClearUserMustChangePassword :exec
+UPDATE users
+SET must_change_password = false,
+    updated_at           = now()
+WHERE id = $1
+`
+
+// Clear the mandatory-change flag once the user completes a password change
+// (via the forced flow or a reset link, FR-26).
+func (q *Queries) ClearUserMustChangePassword(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, clearUserMustChangePassword, id)
+	return err
+}
+
 const clearUserPendingTotpSecret = `-- name: ClearUserPendingTotpSecret :exec
 UPDATE users
 SET pending_totp_secret_encrypted = NULL,
@@ -68,6 +82,86 @@ func (q *Queries) ClearUserTotpSecret(ctx context.Context, id pgtype.UUID) error
 	return err
 }
 
+const consumePasswordResetToken = `-- name: ConsumePasswordResetToken :one
+WITH consumed AS (
+    DELETE FROM password_reset_tokens
+    WHERE token_hash = $1
+    RETURNING id, user_id, token_hash, expires_at, created_at
+)
+SELECT c.id, c.user_id, c.token_hash, c.expires_at, c.created_at,
+       u.email, u.display_name, u.first_name, u.last_name, u.state,
+       u.is_mfa_enabled, u.password_hash, u.must_change_password
+FROM consumed c
+JOIN users u ON u.id = c.user_id
+`
+
+type ConsumePasswordResetTokenRow struct {
+	ID                 pgtype.UUID        `json:"id"`
+	UserID             pgtype.UUID        `json:"user_id"`
+	TokenHash          string             `json:"token_hash"`
+	ExpiresAt          pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	Email              string             `json:"email"`
+	DisplayName        string             `json:"display_name"`
+	FirstName          string             `json:"first_name"`
+	LastName           string             `json:"last_name"`
+	State              string             `json:"state"`
+	IsMfaEnabled       bool               `json:"is_mfa_enabled"`
+	PasswordHash       string             `json:"password_hash"`
+	MustChangePassword bool               `json:"must_change_password"`
+}
+
+// Atomic single-use consumption of a reset token (review finding 1.8-5): the
+// data-modifying CTE deletes the token in the SAME statement that reads it, so
+// two concurrent completions with the same token cannot both succeed — the
+// losing statement sees no row in the CTE and the caller maps the resulting
+// no-rows to ErrResetTokenInvalid. The owning user is joined so the completion
+// step can verify the account is still active.
+func (q *Queries) ConsumePasswordResetToken(ctx context.Context, tokenHash string) (ConsumePasswordResetTokenRow, error) {
+	row := q.db.QueryRow(ctx, consumePasswordResetToken, tokenHash)
+	var i ConsumePasswordResetTokenRow
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.TokenHash,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+		&i.Email,
+		&i.DisplayName,
+		&i.FirstName,
+		&i.LastName,
+		&i.State,
+		&i.IsMfaEnabled,
+		&i.PasswordHash,
+		&i.MustChangePassword,
+	)
+	return i, err
+}
+
+const createPasswordResetToken = `-- name: CreatePasswordResetToken :exec
+WITH invalidated AS (
+    DELETE FROM password_reset_tokens
+    WHERE user_id = $1
+)
+INSERT INTO password_reset_tokens (user_id, token_hash, expires_at)
+VALUES ($1, $2, $3)
+`
+
+type CreatePasswordResetTokenParams struct {
+	UserID    pgtype.UUID        `json:"user_id"`
+	TokenHash string             `json:"token_hash"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+}
+
+// Issue a fresh single-use reset token (FR-26/AD-13): the data-modifying CTE
+// first invalidates EVERY earlier token of the user (only the latest request
+// stays valid), then stores the new one. Only the SHA-256 hash is persisted —
+// never the raw token.
+func (q *Queries) CreatePasswordResetToken(ctx context.Context, arg CreatePasswordResetTokenParams) error {
+	_, err := q.db.Exec(ctx, createPasswordResetToken, arg.UserID, arg.TokenHash, arg.ExpiresAt)
+	return err
+}
+
 const createRegisteredUser = `-- name: CreateRegisteredUser :one
 INSERT INTO users (
     email,
@@ -84,7 +178,7 @@ INSERT INTO users (
     $5,
     'pending_approval'
 )
-RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password
 `
 
 type CreateRegisteredUserParams struct {
@@ -111,6 +205,7 @@ type CreateRegisteredUserRow struct {
 	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt                  pgtype.Timestamptz `json:"updated_at"`
 	PendingEmail               pgtype.Text        `json:"pending_email"`
+	MustChangePassword         bool               `json:"must_change_password"`
 }
 
 func (q *Queries) CreateRegisteredUser(ctx context.Context, arg CreateRegisteredUserParams) (CreateRegisteredUserRow, error) {
@@ -138,6 +233,7 @@ func (q *Queries) CreateRegisteredUser(ctx context.Context, arg CreateRegistered
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.PendingEmail,
+		&i.MustChangePassword,
 	)
 	return i, err
 }
@@ -165,6 +261,30 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (S
 		&i.CreatedAt,
 	)
 	return i, err
+}
+
+const deleteExpiredPasswordResetTokens = `-- name: DeleteExpiredPasswordResetTokens :exec
+DELETE FROM password_reset_tokens
+WHERE user_id = $1 AND expires_at < now()
+`
+
+// Lazy purge of a user's expired reset tokens (review finding 1.8-7): run on
+// each reset request so expired rows do not accumulate indefinitely. A
+// background sweeper is deferred.
+func (q *Queries) DeleteExpiredPasswordResetTokens(ctx context.Context, userID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteExpiredPasswordResetTokens, userID)
+	return err
+}
+
+const deletePasswordResetToken = `-- name: DeletePasswordResetToken :exec
+DELETE FROM password_reset_tokens
+WHERE token_hash = $1
+`
+
+// Invalidate a single reset token after use (single-use, FR-26).
+func (q *Queries) DeletePasswordResetToken(ctx context.Context, tokenHash string) error {
+	_, err := q.db.Exec(ctx, deletePasswordResetToken, tokenHash)
+	return err
 }
 
 const deleteSessionByTokenHash = `-- name: DeleteSessionByTokenHash :exec
@@ -227,6 +347,55 @@ func (q *Queries) GetLoginAttempts(ctx context.Context, email string) (LoginAtte
 	return i, err
 }
 
+const getPasswordResetTokenByHash = `-- name: GetPasswordResetTokenByHash :one
+SELECT t.id, t.user_id, t.token_hash, t.expires_at, t.created_at,
+       u.email, u.display_name, u.first_name, u.last_name, u.state,
+       u.is_mfa_enabled, u.password_hash, u.must_change_password
+FROM password_reset_tokens t
+JOIN users u ON u.id = t.user_id
+WHERE t.token_hash = $1
+`
+
+type GetPasswordResetTokenByHashRow struct {
+	ID                 pgtype.UUID        `json:"id"`
+	UserID             pgtype.UUID        `json:"user_id"`
+	TokenHash          string             `json:"token_hash"`
+	ExpiresAt          pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	Email              string             `json:"email"`
+	DisplayName        string             `json:"display_name"`
+	FirstName          string             `json:"first_name"`
+	LastName           string             `json:"last_name"`
+	State              string             `json:"state"`
+	IsMfaEnabled       bool               `json:"is_mfa_enabled"`
+	PasswordHash       string             `json:"password_hash"`
+	MustChangePassword bool               `json:"must_change_password"`
+}
+
+// Resolve a reset token by its stored hash, joining the owning user so the
+// completion step can verify the account is still active (FR-26). The token is
+// looked up ONLY by hash; the raw token is never stored or queried.
+func (q *Queries) GetPasswordResetTokenByHash(ctx context.Context, tokenHash string) (GetPasswordResetTokenByHashRow, error) {
+	row := q.db.QueryRow(ctx, getPasswordResetTokenByHash, tokenHash)
+	var i GetPasswordResetTokenByHashRow
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.TokenHash,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+		&i.Email,
+		&i.DisplayName,
+		&i.FirstName,
+		&i.LastName,
+		&i.State,
+		&i.IsMfaEnabled,
+		&i.PasswordHash,
+		&i.MustChangePassword,
+	)
+	return i, err
+}
+
 const getPermissionByCode = `-- name: GetPermissionByCode :one
 
 SELECT id, code, description
@@ -254,7 +423,7 @@ func (q *Queries) GetPermissionByCode(ctx context.Context, code string) (GetPerm
 
 const getSessionByTokenHash = `-- name: GetSessionByTokenHash :one
 SELECT s.id, s.user_id, s.token_hash, s.expires_at, s.created_at,
-       u.email, u.display_name, u.first_name, u.last_name, u.state, u.is_mfa_enabled, u.password_hash, u.totp_secret_encrypted, u.pending_totp_secret_encrypted, u.pending_totp_expires_at, u.attributes, u.pending_email
+       u.email, u.display_name, u.first_name, u.last_name, u.state, u.is_mfa_enabled, u.password_hash, u.totp_secret_encrypted, u.pending_totp_secret_encrypted, u.pending_totp_expires_at, u.attributes, u.pending_email, u.must_change_password
 FROM sessions s
 JOIN users u ON u.id = s.user_id
 WHERE s.token_hash = $1
@@ -278,6 +447,7 @@ type GetSessionByTokenHashRow struct {
 	PendingTotpExpiresAt       pgtype.Timestamptz `json:"pending_totp_expires_at"`
 	Attributes                 []byte             `json:"attributes"`
 	PendingEmail               pgtype.Text        `json:"pending_email"`
+	MustChangePassword         bool               `json:"must_change_password"`
 }
 
 // The session user snapshot carries the password hash so the authenticated
@@ -305,12 +475,13 @@ func (q *Queries) GetSessionByTokenHash(ctx context.Context, tokenHash string) (
 		&i.PendingTotpExpiresAt,
 		&i.Attributes,
 		&i.PendingEmail,
+		&i.MustChangePassword,
 	)
 	return i, err
 }
 
 const getUserByEmail = `-- name: GetUserByEmail :one
-SELECT id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email
+SELECT id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password
 FROM users
 WHERE email = $1
 `
@@ -331,6 +502,7 @@ type GetUserByEmailRow struct {
 	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt                  pgtype.Timestamptz `json:"updated_at"`
 	PendingEmail               pgtype.Text        `json:"pending_email"`
+	MustChangePassword         bool               `json:"must_change_password"`
 }
 
 func (q *Queries) GetUserByEmail(ctx context.Context, email string) (GetUserByEmailRow, error) {
@@ -352,6 +524,7 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (GetUserByEm
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.PendingEmail,
+		&i.MustChangePassword,
 	)
 	return i, err
 }
@@ -396,6 +569,44 @@ type InsertAuditEventParams struct {
 func (q *Queries) InsertAuditEvent(ctx context.Context, arg InsertAuditEventParams) error {
 	_, err := q.db.Exec(ctx, insertAuditEvent, arg.ActorUserID, arg.Operation)
 	return err
+}
+
+const insertAuditEventAnonymous = `-- name: InsertAuditEventAnonymous :exec
+INSERT INTO audit_log (operation)
+VALUES ($1)
+`
+
+// Append an audit row WITHOUT an actor (actor_user_id stays NULL). Used for
+// anti-enumeration paths that have no authenticated user, e.g. a forgot-password
+// request for an unknown email (review findings 1.8-3 / 1.8-10): enumeration
+// attempts leave a trail (NFR-O1) and the path performs comparable-cost work.
+func (q *Queries) InsertAuditEventAnonymous(ctx context.Context, operation string) error {
+	_, err := q.db.Exec(ctx, insertAuditEventAnonymous, operation)
+	return err
+}
+
+const isUserInPermissionGroup = `-- name: IsUserInPermissionGroup :one
+SELECT EXISTS (
+    SELECT 1
+    FROM user_permission_groups upg
+    JOIN permission_groups pg ON pg.id = upg.permission_group_id
+    WHERE upg.user_id = $1 AND pg.name = $2
+)
+`
+
+type IsUserInPermissionGroupParams struct {
+	UserID pgtype.UUID `json:"user_id"`
+	Name   string      `json:"name"`
+}
+
+// Reports whether the user is a member of the named permission group (AD-12),
+// e.g. the 'admin' group. Drives server-authoritative ADMIN module visibility
+// in the SPA (Story 1.8).
+func (q *Queries) IsUserInPermissionGroup(ctx context.Context, arg IsUserInPermissionGroupParams) (bool, error) {
+	row := q.db.QueryRow(ctx, isUserInPermissionGroup, arg.UserID, arg.Name)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }
 
 const listPermissionGroupsByUser = `-- name: ListPermissionGroupsByUser :many
@@ -476,6 +687,21 @@ func (q *Queries) ListPermissionsByUser(ctx context.Context, userID pgtype.UUID)
 	return items, nil
 }
 
+const setUserMustChangePassword = `-- name: SetUserMustChangePassword :exec
+UPDATE users
+SET must_change_password = true,
+    updated_at           = now()
+WHERE id = $1
+`
+
+// Flag an active account so the next successful login forces a mandatory
+// password change (FR-26, SMTP-not-configured fallback / Epic 2 one-time
+// password).
+func (q *Queries) SetUserMustChangePassword(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, setUserMustChangePassword, id)
+	return err
+}
+
 const setUserPendingTotpSecret = `-- name: SetUserPendingTotpSecret :exec
 UPDATE users
 SET pending_totp_secret_encrypted = $2,
@@ -531,7 +757,7 @@ WHERE users.id = $1
       WHERE other.id <> $1
         AND (lower(other.email) = lower($2) OR lower(other.pending_email) = lower($2))
   )
-RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password
 `
 
 type StagePendingEmailParams struct {
@@ -555,6 +781,7 @@ type StagePendingEmailRow struct {
 	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt                  pgtype.Timestamptz `json:"updated_at"`
 	PendingEmail               pgtype.Text        `json:"pending_email"`
+	MustChangePassword         bool               `json:"must_change_password"`
 }
 
 // Persist a STAGED email change (Story 2.1): the new address is stored in
@@ -588,6 +815,7 @@ func (q *Queries) StagePendingEmail(ctx context.Context, arg StagePendingEmailPa
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.PendingEmail,
+		&i.MustChangePassword,
 	)
 	return i, err
 }
@@ -597,7 +825,7 @@ UPDATE users
 SET password_hash = $2,
     updated_at    = now()
 WHERE id = $1
-RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password
 `
 
 type UpdateUserPasswordParams struct {
@@ -621,6 +849,7 @@ type UpdateUserPasswordRow struct {
 	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt                  pgtype.Timestamptz `json:"updated_at"`
 	PendingEmail               pgtype.Text        `json:"pending_email"`
+	MustChangePassword         bool               `json:"must_change_password"`
 }
 
 // Persist a new password hash for a user (FR-25). The plaintext password is
@@ -645,6 +874,7 @@ func (q *Queries) UpdateUserPassword(ctx context.Context, arg UpdateUserPassword
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.PendingEmail,
+		&i.MustChangePassword,
 	)
 	return i, err
 }
@@ -656,7 +886,7 @@ SET first_name   = $2,
     display_name = $4,
     updated_at   = now()
 WHERE id = $1
-RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password
 `
 
 type UpdateUserProfileParams struct {
@@ -682,6 +912,7 @@ type UpdateUserProfileRow struct {
 	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt                  pgtype.Timestamptz `json:"updated_at"`
 	PendingEmail               pgtype.Text        `json:"pending_email"`
+	MustChangePassword         bool               `json:"must_change_password"`
 }
 
 // Persist the user's editable base data (first/last/display name, Story 2.1):
@@ -711,6 +942,7 @@ func (q *Queries) UpdateUserProfile(ctx context.Context, arg UpdateUserProfilePa
 		&i.CreatedAt,
 		&i.UpdatedAt,
 		&i.PendingEmail,
+		&i.MustChangePassword,
 	)
 	return i, err
 }
