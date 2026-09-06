@@ -53,3 +53,7 @@ Triage output of review loops — real, non-story-blocking findings that are not
 
 - **RESOLVED — Vite dev proxy / SPA↔API cross-origin.** The earlier deferral ("SPA cannot call the Go API in `just dev` — no Vite dev proxy") shipped in Story 1.3: `web/vite.config.ts` defines `server.proxy` for `/api` → `http://localhost:8080`. Proven live by the Epic 1 retrospective behavior check (register/login/profile/logout exercised through the proxy). The original entry above remains for provenance; this supersedes it.
 - **RESOLVED — web lint/test gate.** The earlier deferral ("`web/` has no lint/test gate — `just lint`/`just test` only cover Go") shipped in Story 1.2/1.3: `web/` gained ESLint + vitest, and the root `justfile` `test`/`lint` recipes now run `npm --prefix web run test` and `npm --prefix web run lint` alongside the Go gates. The original entry above remains for provenance; this supersedes it.
+
+## Process convention (2026-09-06)
+
+- **Avoid god classes.** Standing convention: keep files small and focused; split large handler/service/repository/test files proactively instead of growing them across stories. Motivating evidence: Epic 1 god-class finding (`handler_test.go` 2915, `repository_test.go` 1337, `service_test.go` 847, `handler.go` 892 lines). Applies to all new code from Epic 2 onward; later epic retros re-check file sizes against this.
