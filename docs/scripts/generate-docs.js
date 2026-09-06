@@ -84,8 +84,14 @@ function parseEpics() {
       const body = storyBlocks[i + 2] || '';
       const [a, b, c] = storyId.split('.');
       const key = `${a}-${b}-${slugify(storyTitle)}`;
-      // Intent = the "As a / I want / So that" lines up to the first bold heading.
-      const intent = (body.match(/As a .*?So that .*?(?=\n\*\*|\n###|\n##)/s) || [])[0]?.trim() || '';
+      // Intent = the "As … / I want … / So that …" triad at the top of the
+      // story body. Persona phrasing varies ("As a developer", "As the
+      // security system", "As a logged-out user", "As any authenticated user",
+      // …), so match generically from the "As " line through the "So that"
+      // clause, up to a blank line or the next bold/heading.
+      const intent =
+        (body.match(/^As\s+.+?So\s+that\s+.*?(?=\n\s*\n|\n\*\*|\n###|\n##)/ims) || [])[0]?.trim() ||
+        '';
       // Acceptance criteria = the **Given/When/Then/And** blocks from
       // "Acceptance Criteria:" up to the next story heading. Capture the whole
       // section (so **And** lines are not truncated), then keep only the
