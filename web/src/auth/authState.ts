@@ -90,6 +90,17 @@ export function setIsAdmin(isAdmin: boolean): void {
   }
 }
 
+// adminForbiddenHandled inspects a response from an admin-surface API call
+// (Story 2.1, review finding 2.1-6). A 403 means the caller's admin role was
+// revoked or the cached is_admin flag is stale/forged — the cached flag is
+// cleared immediately so no admin UI keeps rendering from a non-server value
+// (FR-19). It returns true so the caller can redirect to the Dashboard.
+export function adminForbiddenHandled(res: { status: number }): boolean {
+  if (res.status !== 403) return false
+  setIsAdmin(false)
+  return true
+}
+
 export function clearAuthState(): void {
   localStorage.removeItem(SESSION_TOKEN_KEY)
   localStorage.removeItem(MFA_ENABLED_KEY)

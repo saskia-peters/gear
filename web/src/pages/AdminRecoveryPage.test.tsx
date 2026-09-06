@@ -2,7 +2,7 @@
 import { render, screen, waitFor, act } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import { AdminRecoveryPage } from './AdminRecoveryPage.tsx'
 import { ThemeProvider } from '../context/ThemeContext.tsx'
 
@@ -59,7 +59,7 @@ describe('AdminRecoveryPage', () => {
     await waitFor(() => {
       expect(screen.getByText(REQUEST_CONFIRM)).toBeInTheDocument()
     })
-    expect(fetchMock).toHaveBeenCalledWith('/api/v1/auth/admin/recovery/request', {
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/admin/recovery/request', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -78,7 +78,7 @@ describe('AdminRecoveryPage', () => {
     await user.click(screen.getByRole('button', { name: 'Wiederherstellung anfordern' }))
 
     expect(screen.getByText('Bitte gib deine E-Mail-Adresse ein.')).toBeInTheDocument()
-    expect(fetchMock).not.toHaveBeenCalledWith('/api/v1/auth/admin/recovery/request', expect.anything())
+    expect(fetchMock).not.toHaveBeenCalledWith('/api/v1/admin/recovery/request', expect.anything())
   })
 
   it('APPROVE_HAPPY_PATH: approving with Begründung + confirmation posts and shows the recovery token', async () => {
@@ -108,7 +108,7 @@ describe('AdminRecoveryPage', () => {
       const href = link.getAttribute('href') || ''
       expect(href).not.toContain('raw-recovery-token')
     }
-    expect(fetchMock).toHaveBeenCalledWith('/api/v1/auth/admin/recovery/approve', {
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/admin/recovery/approve', {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',
@@ -166,7 +166,7 @@ describe('AdminRecoveryPage', () => {
     await waitFor(() => {
       expect(screen.getByText('Admin A')).toBeInTheDocument()
     })
-    expect(fetchMock).toHaveBeenCalledWith('/api/v1/auth/admin/recovery/pending', {
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/admin/recovery/pending', {
       headers: {
         'Content-Type': 'application/json',
         Authorization: 'Bearer sesstoken123',
@@ -185,7 +185,7 @@ describe('AdminRecoveryPage', () => {
     await user.click(screen.getByRole('button', { name: 'Freigeben' }))
 
     expect(screen.getByText('Bitte gib eine Begründung für die Freigabe an.')).toBeInTheDocument()
-    expect(fetchMock).not.toHaveBeenCalledWith('/api/v1/auth/admin/recovery/approve', expect.anything())
+    expect(fetchMock).not.toHaveBeenCalledWith('/api/v1/admin/recovery/approve', expect.anything())
   })
 
   it('APPROVE_NOT_CONFIRMED: an unchecked confirmation is rejected client-side', async () => {
@@ -199,7 +199,7 @@ describe('AdminRecoveryPage', () => {
     await user.click(screen.getByRole('button', { name: 'Freigeben' }))
 
     expect(screen.getByText('Bitte bestätige die Freigabe mit der Checkbox.')).toBeInTheDocument()
-    expect(fetchMock).not.toHaveBeenCalledWith('/api/v1/auth/admin/recovery/approve', expect.anything())
+    expect(fetchMock).not.toHaveBeenCalledWith('/api/v1/admin/recovery/approve', expect.anything())
   })
 
   it('NAVIGATION: a link back to the ADMIN module is present', () => {
@@ -242,7 +242,7 @@ describe('AdminRecoveryPage', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockImplementation((url: string) => {
-        if (url === '/api/v1/auth/admin/recovery/pending') {
+        if (url === '/api/v1/admin/recovery/pending') {
           return Promise.resolve({ ok: true, status: 200, json: async () => ({ requests: [] }) })
         }
         return new Promise((resolve) => { resolveFetch = resolve })
@@ -275,7 +275,7 @@ describe('AdminRecoveryPage', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockImplementation((url: string) => {
-        if (url === '/api/v1/auth/admin/recovery/pending') {
+        if (url === '/api/v1/admin/recovery/pending') {
           return Promise.resolve({ ok: true, status: 200, json: async () => ({ requests: [] }) })
         }
         return new Promise((resolve) => { resolveFetch = resolve })
@@ -305,7 +305,7 @@ describe('AdminRecoveryPage', () => {
     vi.stubGlobal(
       'fetch',
       vi.fn().mockImplementation((url: string) => {
-        if (url === '/api/v1/auth/admin/recovery/pending') {
+        if (url === '/api/v1/admin/recovery/pending') {
           return Promise.resolve({ ok: true, status: 200, json: async () => ({ requests: [] }) })
         }
         return new Promise((resolve) => { resolveFetch = resolve })
@@ -329,5 +329,42 @@ describe('AdminRecoveryPage', () => {
       resolveFetch({ ok: true, status: 200, json: async () => ({ message: 'Passwort gesetzt.' }) })
     })
     expect(screen.getByText('Passwort gesetzt.')).toBeInTheDocument()
+  })
+
+  it('REVOCATION_403: a 403 from an admin-surface call clears the cached admin flag and redirects to the Dashboard', async () => {
+    // Review finding 2.1-6: when an admin-surface API call answers 403 (the
+    // admin role was revoked or the cached flag is stale), the SPA must not
+    // keep rendering admin UI from a stale is_admin=true cache — the flag is
+    // cleared and the caller leaves the module.
+    localStorage.setItem('gear.is_admin', 'true')
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockImplementation((url: string) => {
+        if (url === '/api/v1/admin/recovery/pending') {
+          return Promise.resolve({
+            ok: false,
+            status: 403,
+            json: async () => ({ error: { code: 'forbidden', message: 'Keine Berechtigung.' } }),
+          })
+        }
+        return Promise.resolve({ ok: true, status: 200, json: async () => ({}) })
+      }),
+    )
+
+    render(
+      <ThemeProvider>
+        <MemoryRouter initialEntries={['/admin/recovery']}>
+          <Routes>
+            <Route path="/admin/recovery" element={<AdminRecoveryPage />} />
+            <Route path="/" element={<div>Dashboard</div>} />
+          </Routes>
+        </MemoryRouter>
+      </ThemeProvider>,
+    )
+
+    await waitFor(() => {
+      expect(screen.getByText('Dashboard')).toBeInTheDocument()
+    })
+    expect(localStorage.getItem('gear.is_admin')).toBeNull()
   })
 })

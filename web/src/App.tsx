@@ -16,6 +16,7 @@ import { ResetPasswordPage } from './pages/ResetPasswordPage.tsx'
 import { NotFoundPage } from './pages/NotFoundPage.tsx'
 import {
   SESSION_TOKEN_KEY,
+  authHeaders,
   clearAuthState,
   setIsAdmin,
 } from './auth/authState.ts'
@@ -113,6 +114,83 @@ function AuthenticatedPage({ children }: { children: ReactNode }) {
   )
 }
 
+// RequireAdmin guards an admin-only route (Story 2.1, review finding 2.1-2).
+// It does NOT trust the forgeable localStorage is_admin flag — it validates
+// server-side on mount (and on `pageshow` to defeat the back-forward cache) via
+// GET /api/v1/auth/profile with authHeaders(), resolving is_admin from the
+// response. While resolving, a loading state is shown so a genuine admin is
+// never wrongly denied on cold load. A non-admin is redirected to the Dashboard
+// so the admin module's existence is never hinted (FR-19/UX-DR6). The server
+// remains the authoritative gate; this is defense-in-depth for the SPA.
+function RequireAdmin({ children }: { children: ReactNode }) {
+  const [validating, setValidating] = useState(true)
+  const [isAdmin, setIsAdminState] = useState(false)
+
+  useEffect(() => {
+    let cancelled = false
+
+    const validate = async (): Promise<void> => {
+      if (!hasSessionToken()) {
+        clearAuthState()
+        if (!cancelled) {
+          setIsAdminState(false)
+          setValidating(false)
+        }
+        return
+      }
+      try {
+        const res = await fetch('/api/v1/auth/profile', { headers: authHeaders() })
+        if (cancelled) return
+        if (res.ok) {
+          const data = await res.json().catch(() => null)
+          if (data && typeof data.is_admin === 'boolean') {
+            // Keep the server-authoritative value in the cache so the sidebar
+            // stays in sync, then drive the gate from the response itself.
+            setIsAdmin(data.is_admin)
+            if (!cancelled) setIsAdminState(data.is_admin)
+          }
+          if (!cancelled) setValidating(false)
+        } else {
+          clearAuthState()
+          if (!cancelled) {
+            setIsAdminState(false)
+            setValidating(false)
+          }
+        }
+      } catch {
+        // Fail closed: without a server answer the admin gate cannot be
+        // trusted, so a network error denies the admin module (FR-19).
+        if (!cancelled) {
+          setIsAdminState(false)
+          setValidating(false)
+        }
+      }
+    }
+
+    void validate()
+
+    const onPageshow = (event: PageTransitionEvent): void => {
+      if (event.persisted) {
+        void validate()
+      }
+    }
+    window.addEventListener('pageshow', onPageshow)
+
+    return () => {
+      cancelled = true
+      window.removeEventListener('pageshow', onPageshow)
+    }
+  }, [])
+
+  if (validating) {
+    return <div>Lädt...</div>
+  }
+  if (!isAdmin) {
+    return <Navigate to="/" replace />
+  }
+  return children
+}
+
 export function AppRoutes() {
   return (
     <Routes>
@@ -152,7 +230,9 @@ export function AppRoutes() {
         path="/admin"
         element={
           <AuthenticatedPage>
-            <AdminPage />
+            <RequireAdmin>
+              <AdminPage />
+            </RequireAdmin>
           </AuthenticatedPage>
         }
       />
@@ -160,7 +240,9 @@ export function AppRoutes() {
         path="/admin/recovery"
         element={
           <AuthenticatedPage>
-            <AdminRecoveryPage />
+            <RequireAdmin>
+              <AdminRecoveryPage />
+            </RequireAdmin>
           </AuthenticatedPage>
         }
       />

@@ -7,6 +7,7 @@ package auth
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"strings"
 
@@ -45,6 +46,23 @@ func UserFrom(ctx context.Context) *core.User {
 // the given permission code. Missing/invalid/expired tokens return 401;
 // authenticated callers lacking the permission return 403.
 func RequirePermission(validator SessionValidator, resolver PermissionResolver, required string) func(http.Handler) http.Handler {
+	return requirePermission(validator, resolver, required, "permission denied", nil)
+}
+
+// RequireAdminPermission is the admin-module gateway (Story 2.1, review finding
+// 2.1-5). It behaves exactly like RequirePermission but additionally emits a
+// denial-specific structured log line (NFR-O1) whenever an authenticated caller
+// lacks the required admin permission — distinct from the router-level request
+// log. It is used to gate the isolated /api/v1/admin route group.
+func RequireAdminPermission(validator SessionValidator, resolver PermissionResolver, required string, log *slog.Logger) func(http.Handler) http.Handler {
+	return requirePermission(validator, resolver, required, "admin access denied", log)
+}
+
+// requirePermission is the shared gateway core: validate the bearer token,
+// re-resolve the caller's live permission set (AD-12) and require the given
+// permission code. On a permission denial it optionally emits a denial-specific
+// structured log line (NFR-O1) before writing the uniform 403 envelope.
+func requirePermission(validator SessionValidator, resolver PermissionResolver, required, denyMsg string, log *slog.Logger) func(http.Handler) http.Handler {
 	return func(next http.Handler) http.Handler {
 		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			user, ok := authenticate(w, r, validator)
@@ -59,6 +77,13 @@ func RequirePermission(validator SessionValidator, resolver PermissionResolver, 
 
 			if !hasPermission(perms, required) {
 				// FR-19 existence-hiding: no disclosure of what the caller lacks.
+				if log != nil {
+					log.Warn(denyMsg,
+						"email", user.Email,
+						"path", r.URL.Path,
+						"permission_required", required,
+					)
+				}
 				httpapi.WriteError(w, http.StatusForbidden, "forbidden", "Keine Berechtigung.")
 				return
 			}

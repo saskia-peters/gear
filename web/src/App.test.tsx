@@ -159,9 +159,11 @@ describe('App & Dashboard Foundation', () => {
     expect(screen.getByRole('link', { name: 'ADMIN' })).toHaveAttribute('href', '/admin')
   })
 
-  it('ADMIN_ROUTE: renders the Admin-Modul placeholder behind RequireAuth', async () => {
+  it('ADMIN_ROUTE (CLIENT_ADMIN_NAV): a genuine admin navigating to /admin sees the module, resolved server-side', async () => {
+    // The route guard resolves is_admin from GET /api/v1/auth/profile — NOT from
+    // the forgeable cached flag (review finding 2.1-2) — so no stale/forged
+    // cache is seeded here.
     stubSessionValidation(validProfile({ is_admin: true }))
-    localStorage.setItem(IS_ADMIN_KEY, 'true')
     await act(async () => {
       render(
         <ThemeProvider>
@@ -175,6 +177,52 @@ describe('App & Dashboard Foundation', () => {
     expect(
       await screen.findByRole('heading', { level: 2, name: 'Admin-Modul' }),
     ).toBeInTheDocument()
+    // The admin sees the ADMIN module navigation too (server-authoritative).
+    expect(screen.getByRole('link', { name: 'ADMIN' })).toHaveAttribute('href', '/admin')
+  })
+
+  it('ADMIN_ROUTE_NONADMIN: a non-admin force-navigating to /admin is redirected to the Dashboard with no admin UI', async () => {
+    // UX-DR6/FR-19: the route guard (not just the sidebar link) hides the admin
+    // module. A force-navigating non-admin lands on the Dashboard and never
+    // sees the admin module or its hints.
+    stubSessionValidation(validProfile({ is_admin: false }))
+    await act(async () => {
+      render(
+        <ThemeProvider>
+          <MemoryRouter initialEntries={['/admin']}>
+            <AppRoutes />
+          </MemoryRouter>
+        </ThemeProvider>,
+      )
+    })
+
+    expect(
+      await screen.findByRole('heading', { level: 2, name: 'Übersicht' }),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Admin-Modul' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: 'ADMIN' })).not.toBeInTheDocument()
+  })
+
+  it('ADMIN_RECOVERY_ROUTE_NONADMIN: a non-admin force-navigating to /admin/recovery is redirected to the Dashboard', async () => {
+    // The recovery surface is part of the isolated admin module: a non-admin
+    // never sees it (server-side RequirePermission would 403 the requests).
+    stubSessionValidation(validProfile({ is_admin: false }))
+    await act(async () => {
+      render(
+        <ThemeProvider>
+          <MemoryRouter initialEntries={['/admin/recovery']}>
+            <AppRoutes />
+          </MemoryRouter>
+        </ThemeProvider>,
+      )
+    })
+
+    expect(
+      await screen.findByRole('heading', { level: 2, name: 'Übersicht' }),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByRole('heading', { name: 'Admin-Wiederherstellung' }),
+    ).not.toBeInTheDocument()
   })
 
   it('REQUIRE_AUTH_VALID: a stored token validated server-side grants access to the dashboard', async () => {

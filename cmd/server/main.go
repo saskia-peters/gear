@@ -93,20 +93,25 @@ func main() {
 	// The auth gateway resolves sessions and the live permission set (AD-6).
 	const protectedPermission = "admin.recovery.approve"
 	protectedRoute := auth.Route(sessionManager, userRepo, protectedPermission)
-	// Deny + approve + pending-list recovery surface (FR-27, review finding
-	// 1.10): gated by the `admin.recovery.approve` permission so only an
-	// authorized admin (B) can approve/deny a recovery request and obtain the
-	// single-use token. Mounted at /api/v1/auth/admin/recovery so the
-	// management endpoints live under one permission-gated sub-router.
-	adminRecoverySurface := auth.RouteAdminRecovery(sessionManager, userRepo, protectedPermission,
-		userHandler.AdminRecoveryApprove, userHandler.AdminRecoveryDeny, userHandler.AdminRecoveryPending)
+	// Admin-module route group (Story 2.1, review finding 2.1-1): the admin
+	// module lives in ONE gated URL space (/api/v1/admin). The admin-recovery
+	// surface (FR-27) is a member of this group — request/approve/deny/pending
+	// are served at /api/v1/admin/recovery/... alongside the admin-status root.
+	// The whole group is gated by RequireAdminPermission on an ADMIN-ONLY
+	// permission code: `admin.recovery.approve` (the admin role resolves it,
+	// AD-12, and no non-admin group grants it). The gateway re-resolves the
+	// caller's live permission set per request, so revoking the admin role
+	// denies immediately (AD-2); the 403 is the uniform envelope with no
+	// admin-existence hint (FR-19) and is emitted to the denial-specific
+	// structured log (NFR-O1, review finding 2.1-5).
+	adminSurface := auth.RequireAdminPermission(sessionManager, userRepo, protectedPermission, log)(userHandler.AdminRoutes())
 
 	log.Info("wired user repository, sessions and registration/auth service", "store", fmt.Sprintf("%T", userStore))
 
 	r := router.New(pool, log,
 		router.WithAuth(userHandler.Routes()),
 		router.WithProtected(protectedRoute),
-		router.WithMount("/api/v1/auth/admin/recovery", adminRecoverySurface),
+		router.WithMount("/api/v1/admin", adminSurface),
 	)
 
 	srv := &http.Server{

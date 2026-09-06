@@ -51,8 +51,8 @@ development_status:
   1-11-auth-ux-foundation: done
   epic-1-retrospective: done
 
-  epic-2: backlog
-  2-1-admin-module-access-isolation: backlog
+  epic-2: in-progress
+  2-1-admin-module-access-isolation: review
   2-2-resolution-of-active-permission-set: backlog
   2-3-admin-ux-foundation: backlog
   2-4-user-approval-workflow: backlog

@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
-import { Link } from 'react-router-dom'
+import { Link, useNavigate } from 'react-router-dom'
 import { Header } from '../components/Header.tsx'
-import { authHeaders } from '../auth/authState.ts'
+import { adminForbiddenHandled, authHeaders } from '../auth/authState.ts'
 import styles from './AdminRecoveryPage.module.css'
 
 interface RequestErrors {
@@ -50,6 +50,7 @@ interface PendingRequest {
 // Pending requests are also listed for the approving admin via the
 // permission-gated GET /admin/recovery/pending endpoint (review finding 1.10).
 export function AdminRecoveryPage() {
+  const navigate = useNavigate()
   const [reqEmail, setReqEmail] = useState('')
   const [reqErrors, setReqErrors] = useState<RequestErrors>({})
   const [reqSubmitting, setReqSubmitting] = useState(false)
@@ -87,10 +88,16 @@ export function AdminRecoveryPage() {
     let cancelled = false
     async function loadPending() {
       try {
-        const res = await fetch('/api/v1/auth/admin/recovery/pending', {
+        const res = await fetch('/api/v1/admin/recovery/pending', {
           headers: authHeaders(),
         })
         if (cancelled) return
+        // Revocation downgrade (review finding 2.1-6): a 403 means the admin
+        // role is gone — drop the cached admin flag and leave the admin module.
+        if (adminForbiddenHandled(res)) {
+          navigate('/')
+          return
+        }
         if (res.ok) {
           const data = await res.json().catch(() => null)
           setPending(data?.requests ?? [])
@@ -106,7 +113,7 @@ export function AdminRecoveryPage() {
     return () => {
       cancelled = true
     }
-  }, [])
+  }, [navigate])
 
   const handleRequest = async (e: FormEvent) => {
     e.preventDefault()
@@ -124,12 +131,16 @@ export function AdminRecoveryPage() {
     setReqSubmitting(true)
     setReqErrors({})
     try {
-      const res = await fetch('/api/v1/auth/admin/recovery/request', {
+      const res = await fetch('/api/v1/admin/recovery/request', {
         method: 'POST',
         headers: authHeaders(),
         body: JSON.stringify({ email: trimmed }),
       })
       const data = await res.json().catch(() => null)
+      if (adminForbiddenHandled(res)) {
+        navigate('/')
+        return
+      }
       if (res.ok) {
         setRequested(true)
       } else if (res.status === 401) {
@@ -168,12 +179,16 @@ export function AdminRecoveryPage() {
     setApprSubmitting(true)
     setApprErrors({})
     try {
-      const res = await fetch('/api/v1/auth/admin/recovery/approve', {
+      const res = await fetch('/api/v1/admin/recovery/approve', {
         method: 'POST',
         headers: authHeaders(),
         body: JSON.stringify({ email: trimmed, reason: reason.trim(), confirmed }),
       })
       const data = await res.json().catch(() => null)
+      if (adminForbiddenHandled(res)) {
+        navigate('/')
+        return
+      }
       if (res.ok) {
         setRecoveryToken(data?.recovery_token || '')
       } else if (res.status === 401) {

@@ -52,15 +52,10 @@ func (h *Handler) Routes() http.Handler {
 		r.Get("/profile", h.GetProfile)
 		r.Post("/profile", h.UpdateProfile)
 		r.Post("/profile/email", h.StageEmailChange)
-		// Dual-admin credential recovery request (FR-27): auth-gated; the
-		// approve route is mounted separately behind
-		// RequirePermission("admin.recovery.approve") in the composition root.
-		r.Post("/admin/recovery/request", h.AdminRecoveryRequest)
-		// The deny and pending-list recovery routes are gated by
-		// RequirePermission("admin.recovery.approve") at the mount level in the
-		// composition root; here they are auth-gated only.
-		r.Post("/admin/recovery/deny", h.AdminRecoveryDeny)
-		r.Get("/admin/recovery/pending", h.AdminRecoveryPending)
+		// The admin-recovery surface (request/approve/deny/pending, FR-27) is a
+		// member of the isolated admin module group: it is mounted via
+		// AdminRoutes at /api/v1/admin/recovery in the composition root, behind
+		// RequireAdminPermission (review finding 2.1-1).
 	})
 	return r
 }
@@ -329,18 +324,19 @@ func (h *Handler) mapPasswordPolicyError(w http.ResponseWriter, err error) {
 }
 
 // adminRecoveryRequestRequest is the body of POST
-// /api/v1/auth/admin/recovery/request (FR-27): the target admin's email.
+// /api/v1/admin/recovery/request (FR-27): the target admin's email.
 type adminRecoveryRequestRequest struct {
 	Email string `json:"email"`
 }
 
-// AdminRecoveryRequest handles POST /api/v1/auth/admin/recovery/request
-// (FR-27). It is auth-gated (RequireAuth): the caller must be an authenticated
-// admin-group member (the requesting admin A, or any authenticated admin
-// requesting on another admin's behalf). It creates a recovery-marked
-// single-use hashed 30-min token for the target admin and returns a
-// confirmation — the raw token is never returned to the requester; only the
-// OTHER admin (B) can approve the request and obtain the deliverable token.
+// AdminRecoveryRequest handles POST /api/v1/admin/recovery/request
+// (FR-27). It is admin-gated via the isolated admin module group
+// (RequireAdminPermission): the caller must be an authenticated admin-group
+// member (the requesting admin A, or any authenticated admin requesting on
+// another admin's behalf). It creates a recovery-marked single-use hashed
+// 30-min token for the target admin and returns a confirmation — the raw token
+// is never returned to the requester; only the OTHER admin (B) can approve the
+// request and obtain the deliverable token.
 //
 // Error mapping (uniform envelope):
 //   - 401 unauthorized when the caller is not authenticated (middleware)
@@ -385,7 +381,7 @@ func (h *Handler) AdminRecoveryRequest(w http.ResponseWriter, r *http.Request) {
 }
 
 // adminRecoveryApproveRequest is the body of POST
-// /api/v1/auth/admin/recovery/approve (FR-27): the target admin's email, the
+// /api/v1/admin/recovery/approve (FR-27): the target admin's email, the
 // mandatory Begründung (reason), the confirmation checkbox and — when the
 // approving admin has MFA enabled — a current TOTP code (MFA step-up, review
 // finding 1.10).
@@ -396,7 +392,7 @@ type adminRecoveryApproveRequest struct {
 	TotpCode  string `json:"totp_code"`
 }
 
-// AdminRecoveryApprove handles POST /api/v1/auth/admin/recovery/approve
+// AdminRecoveryApprove handles POST /api/v1/admin/recovery/approve
 // (FR-27). It is gated by RequirePermission("admin.recovery.approve") so the
 // caller must be an authenticated admin with the recovery-approve permission
 // (the seeded admin group carries it). The approving admin (B) must be a
@@ -460,14 +456,14 @@ func (h *Handler) AdminRecoveryApprove(w http.ResponseWriter, r *http.Request) {
 }
 
 // adminRecoveryDenyRequest is the body of POST
-// /api/v1/auth/admin/recovery/deny (FR-27, review finding 1.10): the target
+// /api/v1/admin/recovery/deny (FR-27, review finding 1.10): the target
 // admin's email and the mandatory Begründung.
 type adminRecoveryDenyRequest struct {
 	Email  string `json:"email"`
 	Reason string `json:"reason"`
 }
 
-// AdminRecoveryDeny handles POST /api/v1/auth/admin/recovery/deny (FR-27,
+// AdminRecoveryDeny handles POST /api/v1/admin/recovery/deny (FR-27,
 // review finding 1.10). It is gated by RequirePermission("admin.recovery.approve")
 // so the caller must be an authenticated admin with the recovery-approve
 // permission. Denying invalidates the target's pending request and audits the
@@ -515,7 +511,7 @@ func (h *Handler) AdminRecoveryDeny(w http.ResponseWriter, r *http.Request) {
 	httpapi.WriteJSON(w, http.StatusOK, res)
 }
 
-// AdminRecoveryPending handles GET /api/v1/auth/admin/recovery/pending (FR-27,
+// AdminRecoveryPending handles GET /api/v1/admin/recovery/pending (FR-27,
 // review finding 1.10): it lists the pending (not-yet-approved) recovery
 // requests for the admin-B review surface. It is gated by
 // RequirePermission("admin.recovery.approve").
