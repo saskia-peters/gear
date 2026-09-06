@@ -191,6 +191,42 @@ html[data-theme='dark'] .table-of-contents__link:hover {
 .story-status-review { background: #9a6bff; }
 .story-status-done { background: #2e9e4f; }
 
+/* Acceptance criteria inside story cards: each Given starts a mini-block,
+   When/Then/And render as a clean labelled list. */
+.story-card details {
+  margin-top: 0.5rem;
+}
+
+.story-card details > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--gear-blue);
+}
+
+.story-card details > p:first-of-type {
+  margin-top: 0.6rem;
+}
+
+.story-card details p strong {
+  color: var(--gear-blue);
+}
+
+.story-card details ul {
+  margin-top: 0.25rem;
+  margin-bottom: 0.75rem;
+  padding-left: 1.25rem;
+}
+
+.story-card details li {
+  margin: 0.2rem 0;
+  line-height: 1.5;
+}
+
+.story-card details li strong {
+  color: var(--gear-blue);
+  margin-right: 0.25rem;
+}
+
 /* ---------------------------------------------------------------------------
    Screenshot frames (desktop / mobile) and placeholders.
 --------------------------------------------------------------------------- */

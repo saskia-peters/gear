@@ -89,16 +89,30 @@ function parseEpics() {
       // Acceptance criteria = the **Given/When/Then/And** blocks from
       // "Acceptance Criteria:" up to the next story heading. Capture the whole
       // section (so **And** lines are not truncated), then keep only the
-      // Given/When/Then/And lines.
+      // Given/When/Then/And lines and format them into grouped blocks:
+      //   **Given** <cond>
+      //   - **When** <action>
+      //   - **Then** <result>
+      //   - **And** <extra>
       const acceptSection =
         (body.match(/\*\*Acceptance Criteria:\*\*\n([\s\S]*?)(?=\n### |\n## |\n---)/) || [])[1] ||
         (body.match(/\*\*Acceptance Criteria:\*\*\n([\s\S]*)$/) || [])[1] ||
         '';
-      const accept = acceptSection
+      const acceptLines = acceptSection
         .split('\n')
         .map((l) => l.trim())
-        .filter((l) => /^\*\*(Given|When|Then|And)\*\*/.test(l))
-        .map((l) => l.replace(/^\*\*(Given|When|Then|And)\*\*/, '$1'))
+        .filter((l) => /^\*\*(Given|When|Then|And)\*\*/.test(l));
+      const accept = acceptLines
+        .map((l, i) => {
+          const m = l.match(/^\*\*(Given|When|Then|And)\*\*\s*(.*)$/);
+          const kind = m[1];
+          const rest = m[2] || '';
+          if (kind === 'Given') {
+            // A blank line separates Given-blocks (when not the first).
+            return (i === 0 ? '' : '\n') + `**Given** ${rest}`;
+          }
+          return `- **${kind}** ${rest}`;
+        })
         .join('\n');
       stories.push({
         num: `${storyId}`,
