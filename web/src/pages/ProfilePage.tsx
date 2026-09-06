@@ -76,6 +76,7 @@ export function ProfilePage() {
   // /login; on any other failure an error state is shown. An abort timeout
   // prevents a hung loading state.
   useEffect(() => {
+    let cancelled = false
     const controller = new AbortController()
     const timeoutId = setTimeout(() => controller.abort(), 10_000)
 
@@ -84,16 +85,19 @@ export function ProfilePage() {
       signal: controller.signal,
     })
       .then(async (res) => {
+        if (cancelled) return null
         if (handleAuthResponse(res.status, navigate)) {
           return null
         }
         if (!res.ok) {
+          setLoadError(true)
           return null
         }
         return res.json()
       })
       .then((data: Profile | null) => {
-        if (data && typeof data.email === 'string') {
+        if (cancelled || data === null) return
+        if (typeof data.email === 'string') {
           setFirstName(data.first_name || '')
           setLastName(data.last_name || '')
           setDisplayNameState(data.display_name || '')
@@ -105,12 +109,16 @@ export function ProfilePage() {
           if (typeof data.is_admin === 'boolean') {
             setIsAdmin(data.is_admin)
           }
+          setLoadError(false)
           setLoaded(true)
         } else {
           setLoadError(true)
         }
       })
-      .catch(() => {
+      .catch((err: unknown) => {
+        if (cancelled || (err instanceof Error && err.name === 'AbortError')) {
+          return
+        }
         setLoadError(true)
       })
       .finally(() => {
@@ -118,6 +126,7 @@ export function ProfilePage() {
       })
 
     return () => {
+      cancelled = true
       clearTimeout(timeoutId)
       controller.abort()
     }

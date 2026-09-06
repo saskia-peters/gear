@@ -44,6 +44,7 @@ export function MfaPage() {
   // 1.6-5): on 401 the caller is redirected to /login; on any other failure an
   // error state is shown. An abort timeout prevents a hung loading state.
   useEffect(() => {
+    let cancelled = false
     const controller = new AbortController()
     const timeoutId = setTimeout(() => controller.abort(), 10_000)
 
@@ -52,31 +53,41 @@ export function MfaPage() {
       signal: controller.signal,
     })
       .then((res) => {
+        if (cancelled) return null
         if (res.status === 401) {
           navigate('/login', { replace: true })
-          return
+          return null
+        }
+        if (!res.ok) {
+          setPhase('error')
+          return null
         }
         return res.json()
       })
       .then((data) => {
-        if (data && typeof data.enabled === 'boolean') {
+        if (cancelled || data === null) return
+        if (typeof data.enabled === 'boolean') {
           setEnabled(data.enabled)
           setPhase(data.enabled ? 'enabled' : 'idle')
         } else {
           setPhase('error')
         }
       })
-      .catch(() => {
-        // Abort (timeout), network failure, or non-JSON body: show an error
-        // state rather than incorrectly assuming MFA is disabled.
+      .catch((err: unknown) => {
+        if (cancelled || (err instanceof Error && err.name === 'AbortError')) {
+          return
+        }
         setPhase('error')
       })
       .finally(() => {
         clearTimeout(timeoutId)
-        setStatusLoading(false)
+        if (!cancelled) {
+          setStatusLoading(false)
+        }
       })
 
     return () => {
+      cancelled = true
       clearTimeout(timeoutId)
       controller.abort()
     }
