@@ -126,10 +126,13 @@ sqlc-generate:
     go run github.com/sqlc-dev/sqlc/cmd/sqlc@{{SQLC_VERSION}} generate
 
 # Local-dev only: set/reset a user's password hash (e.g. unlock a seeded admin).
-# Prompts for email + password. NOT for production — real admin credentials are
-# provisioned out-of-band (AD-13 / FR-27). Never run against production data.
-set-admin-password: db-up
-    go run -tags dev ./cmd/devadmin
+# Pass optional EMAIL and PASSWD to run non-interactively:
+#   just set-admin-password admin.1@gear.local 'NewPassw0rd!'
+# Without them, prompts for email + password. NOT for production — real admin
+# credentials are provisioned out-of-band (AD-13 / FR-27). Never run against
+# production data.
+set-admin-password EMAIL='' PASSWD='': db-up
+    go run -tags dev ./cmd/devadmin {{EMAIL}} {{PASSWD}}
 
 # WSL2 (Option A): print the current WSL IP and the admin-PowerShell commands to
 # expose `just dev` to devices on the same LAN via a Windows port proxy. The WSL

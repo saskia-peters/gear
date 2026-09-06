@@ -32,14 +32,30 @@ func main() {
 func run() error {
 	cfg := config.Load(os.Getenv)
 
-	email := strings.TrimSpace(prompt("E-Mail des Kontos", ""))
+	// Optional CLI args: `devadmin <email> <password>` sets the password
+	// non-interactively (one-line command); without them, prompt for both.
+	email := ""
+	password := ""
+	if len(os.Args) > 1 {
+		email = strings.TrimSpace(os.Args[1])
+	}
+	if len(os.Args) > 2 {
+		password = os.Args[2]
+	}
+
+	if email == "" {
+		email = strings.TrimSpace(prompt("E-Mail des Kontos", ""))
+	}
 	if email == "" {
 		return fmt.Errorf("email is required")
 	}
 
-	password, err := readPassword("Neues Passwort (mindestens 10 Zeichen)")
-	if err != nil {
-		return err
+	if password == "" {
+		var err error
+		password, err = readPassword("Neues Passwort (mindestens 10 Zeichen)")
+		if err != nil {
+			return err
+		}
 	}
 	if len([]rune(password)) < 10 {
 		return fmt.Errorf("password must be at least 10 characters")
