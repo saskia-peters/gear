@@ -4,6 +4,9 @@
   "private": true,
   "scripts": {
     "docusaurus": "docusaurus",
+    "generate": "node scripts/generate-docs.js",
+    "prestart": "node scripts/generate-docs.js",
+    "prebuild": "node scripts/generate-docs.js",
     "start": "docusaurus start",
     "build": "docusaurus build",
     "swizzle": "docusaurus swizzle",

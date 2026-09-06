@@ -1,0 +1,44 @@
+# G.E.A.R. screenshot manifest (docs build-time tracker)
+#
+# Each entry is one expected screenshot of the running application.
+# Convention: screenshot-{epic}-{surface}-{desktop|mobile}.png
+# A screenshot is "present" when the file exists at docs/static/screenshots/.
+# Add planned screenshots here so they appear on the tracker page.
+
+# Epic 1 — Account & Authentication
+- screenshot-1-login-desktop.png: Login (Desktop)
+  device: desktop
+- screenshot-1-login-mobile.png: Login (Mobil)
+  device: mobile
+- screenshot-1-register-desktop.png: Registrierung (Desktop)
+  device: desktop
+- screenshot-1-register-mobile.png: Registrierung (Mobil)
+  device: mobile
+- screenshot-1-dashboard-desktop.png: Dashboard / Übersicht (Desktop)
+  device: desktop
+- screenshot-1-dashboard-mobile.png: Dashboard / Übersicht (Mobil)
+  device: mobile
+- screenshot-1-profile-desktop.png: Profil (Desktop)
+  device: desktop
+- screenshot-1-profile-mobile.png: Profil (Mobil)
+  device: mobile
+- screenshot-1-mfa-desktop.png: Zwei-Faktor-Authentifizierung (Desktop)
+  device: desktop
+- screenshot-1-mfa-mobile.png: Zwei-Faktor-Authentifizierung (Mobil)
+  device: mobile
+- screenshot-1-password-desktop.png: Passwort ändern (Desktop)
+  device: desktop
+- screenshot-1-forgot-desktop.png: Passwort vergessen (Desktop)
+  device: desktop
+- screenshot-1-lockout-desktop.png: Sperre / Lockout (Desktop)
+  device: desktop
+
+# Epic 2 — Permissions, Roles & Administration
+- screenshot-2-admin-desktop.png: Admin-Modul (Desktop)
+  device: desktop
+- screenshot-2-admin-mobile.png: Admin-Modul (Mobil)
+  device: mobile
+- screenshot-2-recovery-desktop.png: Dual-Admin-Wiederherstellung (Desktop)
+  device: desktop
+- screenshot-2-recovery-mobile.png: Dual-Admin-Wiederherstellung (Mobil)
+  device: mobile
