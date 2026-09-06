@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { Header } from '../components/Header.tsx'
 import {
-  SESSION_TOKEN_KEY,
+  authHeaders,
   clearAuthState,
   setDisplayName,
   setIsAdmin,
@@ -26,14 +26,6 @@ interface FieldErrors {
   displayName?: string
   email?: string
   general?: string
-}
-
-function authHeaders(): HeadersInit {
-  const token = localStorage.getItem(SESSION_TOKEN_KEY)
-  return {
-    'Content-Type': 'application/json',
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-  }
 }
 
 // handleAuthResponse is the shared 401 path (Story 2.1, mirroring the

@@ -48,3 +48,8 @@ Triage output of review loops — real, non-story-blocking findings that are not
 ## Deferred from: user decision (2026-09-05)
 
 - Human verification (CAPTCHA) on register + login — **future enhancement (V2+).** The register and login flows should add a "confirm I am a human" check (e.g. Cloudflare Turnstile, Google reCAPTCHA, or hCaptcha) to slow automated abuse. Recorded in the PRD §6.2 as out of scope for V1. Provider and server-side secret-key handling to be decided when it is scheduled; it was explicitly deferred rather than implemented in Story 1.5 (progressive login lockout).
+
+## Resolved during Epic 1 (Epic 1 retrospective, 2026-09-06)
+
+- **RESOLVED — Vite dev proxy / SPA↔API cross-origin.** The earlier deferral ("SPA cannot call the Go API in `just dev` — no Vite dev proxy") shipped in Story 1.3: `web/vite.config.ts` defines `server.proxy` for `/api` → `http://localhost:8080`. Proven live by the Epic 1 retrospective behavior check (register/login/profile/logout exercised through the proxy). The original entry above remains for provenance; this supersedes it.
+- **RESOLVED — web lint/test gate.** The earlier deferral ("`web/` has no lint/test gate — `just lint`/`just test` only cover Go") shipped in Story 1.2/1.3: `web/` gained ESLint + vitest, and the root `justfile` `test`/`lint` recipes now run `npm --prefix web run test` and `npm --prefix web run lint` alongside the Go gates. The original entry above remains for provenance; this supersedes it.

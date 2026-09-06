@@ -10,6 +10,18 @@
 // 'gear.session_token' literal so the key cannot drift.
 export const SESSION_TOKEN_KEY = 'gear.session_token'
 
+// authHeaders returns the JSON headers for an authenticated API call, adding the
+// bearer token when one is present (Epic 1 retro finding 1). Every auth page
+// imports this instead of re-deriving its own copy, so the header shape cannot
+// drift across surfaces.
+export function authHeaders(): HeadersInit {
+  const token = localStorage.getItem(SESSION_TOKEN_KEY)
+  return {
+    'Content-Type': 'application/json',
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  }
+}
+
 const MFA_ENABLED_KEY = 'gear.is_mfa_enabled'
 const DISPLAY_NAME_KEY = 'gear.display_name'
 const IS_ADMIN_KEY = 'gear.is_admin'

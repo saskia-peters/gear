@@ -1,7 +1,7 @@
 import { useEffect, useState, type FormEvent } from 'react'
 import { Link } from 'react-router-dom'
 import { Header } from '../components/Header.tsx'
-import { SESSION_TOKEN_KEY } from '../auth/authState.ts'
+import { authHeaders } from '../auth/authState.ts'
 import styles from './AdminRecoveryPage.module.css'
 
 interface RequestErrors {
@@ -28,14 +28,6 @@ interface PendingRequest {
   user_id: string
   user?: { id: string; email: string; display_name?: string } | null
   created_at?: string
-}
-
-function authHeaders(): HeadersInit {
-  const token = localStorage.getItem(SESSION_TOKEN_KEY)
-  return {
-    'Content-Type': 'application/json',
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-  }
 }
 
 // AdminRecoveryPage is the dual-admin credential-recovery surface (FR-27). It

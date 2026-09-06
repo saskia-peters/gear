@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-04-2026 19:40
-last_updated: 09-06-2026 12:00
+last_updated: 09-06-2026 22:53
 project: gear
 project_key: NOKEY
 tracking_system: file-system
@@ -97,14 +97,14 @@ action_items:
     action: "Extract a shared authHeaders helper into web/src/auth and import it across
       the auth pages instead of each page defining its own."
     owner: "dev loop"
-    status: open
+    status: done
     ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-1-retro-2026-09-06.md"
   - id: "epic-1-retro-item-2-append-resolution-notes-to-deferred-work"
     epic: 1
     action: "Append resolution notes to deferred-work.md for the Vite /api dev proxy
       (Story 1.3) and the web lint/test gate in just test/just lint (Story 1.2/1.3)."
     owner: "human"
-    status: open
+    status: done
     ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-1-retro-2026-09-06.md"
   - id: "epic-1-retro-item-3-re-route-the-deferred-work-items-redirec"
     epic: 1

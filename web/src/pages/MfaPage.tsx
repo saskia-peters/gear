@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
 import { useNavigate } from 'react-router-dom'
 import { Header } from '../components/Header.tsx'
-import { SESSION_TOKEN_KEY, clearAuthState } from '../auth/authState.ts'
+import { authHeaders, clearAuthState } from '../auth/authState.ts'
 import styles from './MfaPage.module.css'
 
 interface MfaErrors {
@@ -11,14 +11,6 @@ interface MfaErrors {
 }
 
 type EnrollPhase = 'idle' | 'requested' | 'confirming' | 'enabled' | 'error'
-
-function authHeaders(): HeadersInit {
-  const token = localStorage.getItem(SESSION_TOKEN_KEY)
-  return {
-    'Content-Type': 'application/json',
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-  }
-}
 
 export function MfaPage() {
   const [enabled, setEnabled] = useState(false)

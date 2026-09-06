@@ -1,7 +1,7 @@
 import { useEffect, useState, useRef, type FormEvent } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Header } from '../components/Header.tsx'
-import { SESSION_TOKEN_KEY, clearAuthState } from '../auth/authState.ts'
+import { authHeaders, clearAuthState } from '../auth/authState.ts'
 import { focusFirstInvalid } from '../auth/focus.ts'
 import styles from './ChangePasswordPage.module.css'
 
@@ -10,14 +10,6 @@ interface FieldErrors {
   newPassword?: string
   newPasswordConfirm?: string
   general?: string
-}
-
-function authHeaders(): HeadersInit {
-  const token = localStorage.getItem(SESSION_TOKEN_KEY)
-  return {
-    'Content-Type': 'application/json',
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-  }
 }
 
 export function ChangePasswordPage() {
