@@ -146,3 +146,27 @@ func Route(validator SessionValidator, resolver PermissionResolver, required str
 	})
 	return r
 }
+
+// RouteApproval returns a chi router gated by RequirePermission that POSTs the
+// given handler at its root. It is mounted by the composition root at the
+// admin-recovery approve endpoint (FR-27), so only a caller with the
+// `admin.recovery.approve` permission can approve a recovery request.
+func RouteApproval(validator SessionValidator, resolver PermissionResolver, required string, h http.HandlerFunc) http.Handler {
+	r := chi.NewRouter()
+	r.Use(RequirePermission(validator, resolver, required))
+	r.Post("/", h)
+	return r
+}
+
+// RouteAdminRecovery returns a chi router gated by RequirePermission that
+// mounts the admin-recovery management surface (FR-27, review finding 1.10):
+// POST /approve, POST /deny and GET /pending, each behind the
+// `admin.recovery.approve` permission. It is mounted by the composition root.
+func RouteAdminRecovery(validator SessionValidator, resolver PermissionResolver, required string, approve, deny http.HandlerFunc, pending http.HandlerFunc) http.Handler {
+	r := chi.NewRouter()
+	r.Use(RequirePermission(validator, resolver, required))
+	r.Post("/approve", approve)
+	r.Post("/deny", deny)
+	r.Get("/pending", pending)
+	return r
+}

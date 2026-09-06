@@ -93,12 +93,20 @@ func main() {
 	// The auth gateway resolves sessions and the live permission set (AD-6).
 	const protectedPermission = "admin.recovery.approve"
 	protectedRoute := auth.Route(sessionManager, userRepo, protectedPermission)
+	// Deny + approve + pending-list recovery surface (FR-27, review finding
+	// 1.10): gated by the `admin.recovery.approve` permission so only an
+	// authorized admin (B) can approve/deny a recovery request and obtain the
+	// single-use token. Mounted at /api/v1/auth/admin/recovery so the
+	// management endpoints live under one permission-gated sub-router.
+	adminRecoverySurface := auth.RouteAdminRecovery(sessionManager, userRepo, protectedPermission,
+		userHandler.AdminRecoveryApprove, userHandler.AdminRecoveryDeny, userHandler.AdminRecoveryPending)
 
 	log.Info("wired user repository, sessions and registration/auth service", "store", fmt.Sprintf("%T", userStore))
 
 	r := router.New(pool, log,
 		router.WithAuth(userHandler.Routes()),
 		router.WithProtected(protectedRoute),
+		router.WithMount("/api/v1/auth/admin/recovery", adminRecoverySurface),
 	)
 
 	srv := &http.Server{

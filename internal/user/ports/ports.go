@@ -52,6 +52,20 @@ type Service interface {
 	// via a valid single-use token.
 	RequestPasswordReset(ctx context.Context, email string) (*core.ResetRequestResult, error)
 	CompletePasswordReset(ctx context.Context, rawToken, newPassword, confirm string) (*core.ResetCompleteResult, error)
+	// Dual-admin credential recovery (FR-27): RequestAdminRecovery creates a
+	// recovery request for a target admin (actor = caller);
+	// ApproveAdminRecovery approves it with a mandatory Begründung + confirmation
+	// and returns the single-use token to the approving admin (B), requiring a
+	// TOTP code when B has MFA enabled (step-up);
+	// DenyAdminRecovery denies a pending request with a Begründung;
+	// ListAdminRecoveryRequest returns the pending requests for the admin-B
+	// review surface; CompleteAdminRecovery consumes an approved token to set a
+	// new password.
+	RequestAdminRecovery(ctx context.Context, caller *core.User, targetEmail string) (*core.AdminRecoveryResult, error)
+	ApproveAdminRecovery(ctx context.Context, approver *core.User, targetEmail, reason string, confirmed bool, totpCode string) (*core.AdminRecoveryApproveResult, error)
+	DenyAdminRecovery(ctx context.Context, approver *core.User, targetEmail, reason string) (*core.AdminRecoveryDenyResult, error)
+	ListAdminRecoveryRequest(ctx context.Context, caller *core.User) ([]*core.AdminRecoveryRequest, error)
+	CompleteAdminRecovery(ctx context.Context, rawToken, newPassword, confirm string) (*core.AdminRecoveryCompleteResult, error)
 }
 
 // Repository is the outbound persistence port for User data.
@@ -67,7 +81,7 @@ type Repository interface {
 	SetUserPendingTotpSecret(ctx context.Context, userID, encryptedSecret string, expiresAt time.Time) error
 	ClearUserPendingTotpSecret(ctx context.Context, userID string) error
 	UpdateUserPassword(ctx context.Context, userID, passwordHash string) (*core.User, error)
-	InsertAuditEvent(ctx context.Context, userID, operation string) error
+	InsertAuditEvent(ctx context.Context, userID, operation, detail, severity string) error
 	UpdateUserProfile(ctx context.Context, userID, firstName, lastName, displayName string, attributes map[string]any) (*core.User, error)
 	StagePendingEmail(ctx context.Context, userID, pendingEmail string) (*core.User, error)
 	ClearPendingEmail(ctx context.Context, userID string) error
@@ -78,6 +92,13 @@ type Repository interface {
 	ClearUserMustChangePassword(ctx context.Context, userID string) error
 	InsertAuditEventAnonymous(ctx context.Context, operation string) error
 	IsUserInPermissionGroup(ctx context.Context, userID, groupName string) (bool, error)
+	// Dual-admin recovery persistence (FR-27).
+	CountActiveAdmins(ctx context.Context) (int, error)
+	CreateAdminRecoveryRequest(ctx context.Context, userID, requestedByUserID, tokenHash string, expiresAt time.Time) error
+	ApproveAdminRecovery(ctx context.Context, userID, approvedByUserID, tokenHash string) (string, error)
+	ConsumeAdminRecoveryToken(ctx context.Context, tokenHash string) (*core.AdminRecoveryToken, error)
+	ListAdminRecoveryRequest(ctx context.Context) ([]*core.AdminRecoveryRequest, error)
+	DenyAdminRecovery(ctx context.Context, userID string) error
 }
 
 // PasswordHasher is the outbound password hashing port (AD-13).

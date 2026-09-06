@@ -4,6 +4,8 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
+	"log/slog"
 	"os"
 	"strings"
 	"testing"
@@ -11,8 +13,13 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/saskia-peters/gear/internal/platform/crypto"
 	"github.com/saskia-peters/gear/internal/user/core"
 )
+
+func discardLogger() *slog.Logger {
+	return slog.New(slog.NewTextHandler(io.Discard, nil))
+}
 
 func TestPostgresLoginAttemptsRepository(t *testing.T) {
 	dbURL := os.Getenv("DATABASE_URL")
@@ -551,7 +558,7 @@ func TestPostgresChangePasswordRepository(t *testing.T) {
 	// 2. InsertAuditEvent appends an immutable audit row (actor, operation,
 	// created_at) for the user (NFR-O1/NFR-O2, spine table 11).
 	op := core.AuditOperationPasswordChange
-	if err := repo.InsertAuditEvent(ctx, created.ID, op); err != nil {
+	if err := repo.InsertAuditEvent(ctx, created.ID, op, "", ""); err != nil {
 		t.Fatalf("InsertAuditEvent failed: %v", err)
 	}
 
@@ -1199,5 +1206,132 @@ func TestPostgresExpiredTokenPurgeAndAnonymousAudit(t *testing.T) {
 	}
 	if !actorIsNull {
 		t.Error("anonymous audit row must have a NULL actor")
+	}
+}
+
+func TestPostgresAdminRecoveryRepository(t *testing.T) {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Skipf("skipping db integration test: %v", err)
+	}
+	defer pool.Close()
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping db integration test (db ping failed): %v", err)
+	}
+
+	queries := New(pool)
+	repo := NewRepository(queries)
+
+	// Use the two seeded admins (FR-27/AD-13): admin.1 is the recovery target
+	// (A), admin.2 the approving admin (B).
+	adminA, err := repo.GetUserByEmail(ctx, "admin.1@gear.local")
+	if err != nil || adminA == nil {
+		t.Skip("seeded admin.1 not present — skipping admin recovery assertion")
+	}
+	adminB, err := repo.GetUserByEmail(ctx, "admin.2@gear.local")
+	if err != nil || adminB == nil {
+		t.Skip("seeded admin.2 not present — skipping admin recovery assertion")
+	}
+
+	// 1. CountActiveAdmins: with both seeded admins active, at least 2.
+	n, err := repo.CountActiveAdmins(ctx)
+	if err != nil {
+		t.Fatalf("CountActiveAdmins failed: %v", err)
+	}
+	if n < 2 {
+		t.Errorf("CountActiveAdmins = %d, want >= 2", n)
+	}
+
+	// Drive the REAL core service end-to-end (create request → approve →
+	// complete) so the immutable audit rows (NFR-O2) are written by the core.
+	hasher := crypto.NewHasher()
+	sm := core.NewSessionManager(repo, time.Hour)
+	svc := core.NewService(repo, hasher, sm, nil, discardLogger())
+
+	// 2. RequestAdminRecovery creates a recovery request for admin A.
+	if _, err := svc.RequestAdminRecovery(ctx, adminA, adminA.Email); err != nil {
+		t.Fatalf("RequestAdminRecovery failed: %v", err)
+	}
+
+	// 3. ApproveAdminRecovery (admin B, with Begründung + confirmation) returns
+	// the single-use raw token.
+	approved, err := svc.ApproveAdminRecovery(ctx, adminB, adminA.Email, "Admin A ist ausgesperrt", true, "")
+	if err != nil {
+		t.Fatalf("ApproveAdminRecovery failed: %v", err)
+	}
+	if approved.RecoveryToken == "" {
+		t.Fatal("approve must return a raw recovery token")
+	}
+
+	// 3b. The approve audit row must carry the Begründung in operation_detail and
+	// severity='high' (review finding 1.10) — persisted, not just logged.
+	var approveDetail string
+	var approveSeverity string
+	if err := pool.QueryRow(ctx,
+		`SELECT COALESCE(operation_detail,''), severity FROM audit_log WHERE actor_user_id = $1 AND operation = $2 ORDER BY created_at DESC LIMIT 1`,
+		adminB.ID, core.AuditOperationAdminRecoveryApprove).Scan(&approveDetail, &approveSeverity); err != nil {
+		t.Fatalf("reading approve audit detail failed: %v", err)
+	}
+	if !strings.Contains(approveDetail, "Admin A ist ausgesperrt") || !strings.Contains(approveDetail, "target="+adminA.Email) {
+		t.Errorf("approve audit detail = %q, want reason+target persisted", approveDetail)
+	}
+	if approveSeverity != core.AuditSeverityHigh {
+		t.Errorf("approve audit severity = %q, want %q", approveSeverity, core.AuditSeverityHigh)
+	}
+
+	// 4. CompleteAdminRecovery consumes the approved token, setting a new
+	// Argon2id password hash for admin A.
+	if _, err := svc.CompleteAdminRecovery(ctx, approved.RecoveryToken, "neuesadminpass123", "neuesadminpass123"); err != nil {
+		t.Fatalf("CompleteAdminRecovery failed: %v", err)
+	}
+	// The token is single-use: a second completion is rejected.
+	if _, err := svc.CompleteAdminRecovery(ctx, approved.RecoveryToken, "anderespass456", "anderespass456"); !errors.Is(err, core.ErrAdminRecoveryInvalid) {
+		t.Fatalf("second completion error = %v, want ErrAdminRecoveryInvalid (single-use)", err)
+	}
+
+	// 5. Audit rows (NFR-O2): request (actor A), approve (actor B), complete
+	// (actor A) are all present.
+	var requestRows, approveRows, completeRows int
+	if err := pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM audit_log WHERE actor_user_id = $1 AND operation = $2`,
+		adminA.ID, core.AuditOperationAdminRecoveryRequest).Scan(&requestRows); err != nil {
+		t.Fatalf("counting request audit rows failed: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM audit_log WHERE actor_user_id = $1 AND operation = $2`,
+		adminB.ID, core.AuditOperationAdminRecoveryApprove).Scan(&approveRows); err != nil {
+		t.Fatalf("counting approve audit rows failed: %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM audit_log WHERE actor_user_id = $1 AND operation = $2`,
+		adminA.ID, core.AuditOperationAdminRecoveryComplete).Scan(&completeRows); err != nil {
+		t.Fatalf("counting complete audit rows failed: %v", err)
+	}
+	if requestRows < 1 || approveRows < 1 || completeRows < 1 {
+		t.Errorf("audit rows: request=%d (want>=1), approve=%d (want>=1), complete=%d (want>=1)",
+			requestRows, approveRows, completeRows)
+	}
+
+	// 6. A pending (not-yet-approved) token created via the repository is NOT
+	// consumable through the repository's atomic consume.
+	suffix := time.Now().Format("20060102150405.000000")
+	if err := repo.CreateAdminRecoveryRequest(ctx, adminA.ID, adminB.ID, "pending-"+suffix, time.Now().UTC().Add(30*time.Minute)); err != nil {
+		t.Fatalf("CreateAdminRecoveryRequest(pending) failed: %v", err)
+	}
+	if _, err := repo.ConsumeAdminRecoveryToken(ctx, "pending-"+suffix); !errors.Is(err, core.ErrAdminRecoveryInvalid) {
+		t.Fatalf("consuming a pending token error = %v, want ErrAdminRecoveryInvalid", err)
+	}
+
+	// 7. Restore the seeded admin.1 password hash (identity-only seed; the flow
+	// above set a test hash) so later tests are not affected.
+	if _, err := repo.UpdateUserPassword(ctx, adminA.ID, adminA.PasswordHash); err != nil {
+		t.Errorf("restoring admin.1 password hash failed: %v", err)
 	}
 }

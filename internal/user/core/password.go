@@ -126,7 +126,7 @@ func (s *Service) ChangePassword(ctx context.Context, user *User, input ChangePa
 
 	// Audit event (NFR-O1/NFR-O2): best-effort — a failed audit write must not
 	// roll back the password change (availability); the failure is logged.
-	if err := s.repo.InsertAuditEvent(ctx, user.ID, AuditOperationPasswordChange); err != nil {
+	if err := s.repo.InsertAuditEvent(ctx, user.ID, AuditOperationPasswordChange, "", AuditSeverityNormal); err != nil {
 		s.log().Warn("password change audit write failed", "error", err)
 	}
 

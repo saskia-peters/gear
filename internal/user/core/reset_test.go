@@ -64,7 +64,21 @@ func resetRepo() *mockRepo {
 		PasswordHash: "hashed:geheim123456",
 		State:        StateActive,
 	}
-	repo.adminGroup["u-active"] = true
+	// admin@example.com is a DISTINCT active admin (FR-27/Story 1.8): it is
+	// used by the IsAdmin-resolution tests. It is deliberately NOT the same as
+	// active@example.com (u-active), which the FR-26 reset/must-change tests
+	// treat as a regular active user — an admin must never self-reset via the
+	// forgot flow.
+	repo.users["admin@example.com"] = &User{
+		ID:           "u-admin",
+		Email:        "admin@example.com",
+		DisplayName:  "Admin Person",
+		FirstName:    "Admin",
+		LastName:     "Person",
+		PasswordHash: "hashed:geheim123456",
+		State:        StateActive,
+	}
+	repo.adminGroup["u-admin"] = true
 	return repo
 }
 
@@ -446,7 +460,7 @@ func TestLoginIsAdminResolution(t *testing.T) {
 	repo := resetRepo()
 	svc, _ := resetService(t, repo, nil)
 
-	adminRes, err := svc.Login(context.Background(), LoginInput{Email: "active@example.com", Password: "geheim123456"})
+	adminRes, err := svc.Login(context.Background(), LoginInput{Email: "admin@example.com", Password: "geheim123456"})
 	if err != nil {
 		t.Fatalf("admin Login failed: %v", err)
 	}
@@ -468,7 +482,7 @@ func TestGetProfileIsAdmin(t *testing.T) {
 	repo := resetRepo()
 	svc, _ := resetService(t, repo, nil)
 
-	user := repo.users["active@example.com"]
+	user := repo.users["admin@example.com"]
 	profile, err := svc.GetProfile(context.Background(), user)
 	if err != nil {
 		t.Fatalf("GetProfile failed: %v", err)

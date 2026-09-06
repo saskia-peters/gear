@@ -35,6 +35,11 @@ type mockService struct {
 	stageEmailFunc       func(ctx context.Context, user *core.User, newEmail string) (*core.StageEmailResult, error)
 	requestResetFunc     func(ctx context.Context, email string) (*core.ResetRequestResult, error)
 	completeResetFunc    func(ctx context.Context, rawToken, newPassword, confirm string) (*core.ResetCompleteResult, error)
+	requestAdminRecoveryFunc func(ctx context.Context, caller *core.User, targetEmail string) (*core.AdminRecoveryResult, error)
+	approveAdminRecoveryFunc func(ctx context.Context, approver *core.User, targetEmail, reason string, confirmed bool, totpCode string) (*core.AdminRecoveryApproveResult, error)
+	denyAdminRecoveryFunc    func(ctx context.Context, approver *core.User, targetEmail, reason string) (*core.AdminRecoveryDenyResult, error)
+	listAdminRecoveryFunc    func(ctx context.Context, caller *core.User) ([]*core.AdminRecoveryRequest, error)
+	completeAdminRecoveryFunc func(ctx context.Context, rawToken, newPassword, confirm string) (*core.AdminRecoveryCompleteResult, error)
 	revokeOtherCalls     *int
 	revokeAllCalls       *int
 }
@@ -154,6 +159,42 @@ func (m *mockService) CompletePasswordReset(ctx context.Context, rawToken, newPa
 		return m.completeResetFunc(ctx, rawToken, newPassword, confirm)
 	}
 	return &core.ResetCompleteResult{Message: core.MsgPasswordResetComplete}, nil
+}
+
+func (m *mockService) RequestAdminRecovery(ctx context.Context, caller *core.User, targetEmail string) (*core.AdminRecoveryResult, error) {
+	if m.requestAdminRecoveryFunc != nil {
+		return m.requestAdminRecoveryFunc(ctx, caller, targetEmail)
+	}
+	return &core.AdminRecoveryResult{Message: core.MsgAdminRecoveryRequested, TargetEmail: targetEmail}, nil
+}
+
+func (m *mockService) ApproveAdminRecovery(ctx context.Context, approver *core.User, targetEmail, reason string, confirmed bool, totpCode string) (*core.AdminRecoveryApproveResult, error) {
+	if m.approveAdminRecoveryFunc != nil {
+		return m.approveAdminRecoveryFunc(ctx, approver, targetEmail, reason, confirmed, totpCode)
+	}
+	return &core.AdminRecoveryApproveResult{Message: core.MsgAdminRecoveryApproved, RecoveryToken: "raw-recovery-token"}, nil
+}
+
+func (m *mockService) DenyAdminRecovery(ctx context.Context, approver *core.User, targetEmail, reason string) (*core.AdminRecoveryDenyResult, error) {
+	if m.denyAdminRecoveryFunc != nil {
+		return m.denyAdminRecoveryFunc(ctx, approver, targetEmail, reason)
+	}
+	return &core.AdminRecoveryDenyResult{Message: core.MsgAdminRecoveryDenied}, nil
+}
+
+func (m *mockService) ListAdminRecoveryRequest(ctx context.Context, caller *core.User) ([]*core.AdminRecoveryRequest, error) {
+	if m.listAdminRecoveryFunc != nil {
+		return m.listAdminRecoveryFunc(ctx, caller)
+	}
+	return []*core.AdminRecoveryRequest{}, nil
+}
+
+func (m *mockService) CompleteAdminRecovery(ctx context.Context, rawToken, newPassword, confirm string) (*core.AdminRecoveryCompleteResult, error) {
+	if m.completeAdminRecoveryFunc != nil {
+		return m.completeAdminRecoveryFunc(ctx, rawToken, newPassword, confirm)
+	}
+	// Default: no valid token, so the reset-endpoint fallback must fail.
+	return nil, core.ErrAdminRecoveryInvalid
 }
 
 // stubValidator always authenticates the caller as an active user. Used to
@@ -1563,7 +1604,29 @@ func (r *changePasswordRepo) IsUserInPermissionGroup(_ context.Context, _, _ str
 	return false, nil
 }
 
-func (r *changePasswordRepo) InsertAuditEvent(_ context.Context, _ string, operation string) error {
+func (r *changePasswordRepo) CountActiveAdmins(_ context.Context) (int, error) { return 0, nil }
+
+func (r *changePasswordRepo) CreateAdminRecoveryRequest(_ context.Context, _, _, _ string, _ time.Time) error {
+	return nil
+}
+
+func (r *changePasswordRepo) ApproveAdminRecovery(_ context.Context, _, _, _ string) (string, error) {
+	return "", core.ErrAdminRecoveryInvalid
+}
+
+func (r *changePasswordRepo) ConsumeAdminRecoveryToken(_ context.Context, _ string) (*core.AdminRecoveryToken, error) {
+	return nil, core.ErrAdminRecoveryInvalid
+}
+
+func (r *changePasswordRepo) ListAdminRecoveryRequest(_ context.Context) ([]*core.AdminRecoveryRequest, error) {
+	return nil, nil
+}
+
+func (r *changePasswordRepo) DenyAdminRecovery(_ context.Context, _ string) error {
+	return nil
+}
+
+func (r *changePasswordRepo) InsertAuditEvent(_ context.Context, _ string, operation, _, _ string) error {
 	r.audit = append(r.audit, operation)
 	return nil
 }

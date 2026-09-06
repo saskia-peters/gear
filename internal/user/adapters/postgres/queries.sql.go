@@ -11,6 +11,42 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const approveAdminRecovery = `-- name: ApproveAdminRecovery :one
+UPDATE password_reset_tokens
+SET approved_by_user_id = $2,
+    token_hash          = $3,
+    expires_at          = now() + interval '30 minutes',
+    created_at          = created_at
+WHERE user_id = $1
+  AND recovery_target_admin = true
+  AND approved_by_user_id IS NULL
+  AND expires_at > now()
+RETURNING id
+`
+
+type ApproveAdminRecoveryParams struct {
+	UserID           pgtype.UUID `json:"user_id"`
+	ApprovedByUserID pgtype.UUID `json:"approved_by_user_id"`
+	TokenHash        string      `json:"token_hash"`
+}
+
+// Approve a pending admin-recovery request (FR-27): stamp the approving admin
+// (approved_by_user_id) on the recovery-marked token row for the target user,
+// mint a FRESH single-use token hash for it — the raw token is generated at
+// approve time (never stored) and returned ONLY to the approving admin (B),
+// who hands it to the recovered admin (A) out-of-band — and reset the expiry
+// to a FRESH 30 minutes from approve time (review finding: refresh token
+// expiry on approval). Only the LATEST pending (not-yet-approved) recovery
+// token is approved, so a stale earlier request cannot be approved. A zero-row
+// update (no pending request, already approved, or expired) maps to
+// ErrAdminRecoveryInvalid. Self-approval is rejected in the core, never here.
+func (q *Queries) ApproveAdminRecovery(ctx context.Context, arg ApproveAdminRecoveryParams) (pgtype.UUID, error) {
+	row := q.db.QueryRow(ctx, approveAdminRecovery, arg.UserID, arg.ApprovedByUserID, arg.TokenHash)
+	var id pgtype.UUID
+	err := row.Scan(&id)
+	return id, err
+}
+
 const clearLoginAttempts = `-- name: ClearLoginAttempts :exec
 UPDATE login_attempts
 SET failed_count = 0, lockout_until = NULL, updated_at = now()
@@ -82,10 +118,71 @@ func (q *Queries) ClearUserTotpSecret(ctx context.Context, id pgtype.UUID) error
 	return err
 }
 
+const consumeAdminRecoveryToken = `-- name: ConsumeAdminRecoveryToken :one
+WITH consumed AS (
+    DELETE FROM password_reset_tokens
+    WHERE token_hash = $1 AND recovery_target_admin = true AND approved_by_user_id IS NOT NULL
+    RETURNING id, user_id, token_hash, expires_at, created_at, approved_by_user_id, requested_by_user_id
+)
+SELECT c.id, c.user_id, c.token_hash, c.expires_at, c.created_at, c.approved_by_user_id, c.requested_by_user_id,
+       u.email, u.display_name, u.first_name, u.last_name, u.state,
+       u.is_mfa_enabled, u.password_hash, u.must_change_password
+FROM consumed c
+JOIN users u ON u.id = c.user_id
+`
+
+type ConsumeAdminRecoveryTokenRow struct {
+	ID                 pgtype.UUID        `json:"id"`
+	UserID             pgtype.UUID        `json:"user_id"`
+	TokenHash          string             `json:"token_hash"`
+	ExpiresAt          pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt          pgtype.Timestamptz `json:"created_at"`
+	ApprovedByUserID   pgtype.UUID        `json:"approved_by_user_id"`
+	RequestedByUserID  pgtype.UUID        `json:"requested_by_user_id"`
+	Email              string             `json:"email"`
+	DisplayName        string             `json:"display_name"`
+	FirstName          string             `json:"first_name"`
+	LastName           string             `json:"last_name"`
+	State              string             `json:"state"`
+	IsMfaEnabled       bool               `json:"is_mfa_enabled"`
+	PasswordHash       string             `json:"password_hash"`
+	MustChangePassword bool               `json:"must_change_password"`
+}
+
+// Atomic single-use consumption of an APPROVED admin-recovery token (FR-27):
+// the data-modifying CTE deletes the token in the SAME statement that reads
+// it, so two concurrent completions with the same token cannot both succeed —
+// the losing statement sees no row and the caller rejects it. Only tokens that
+// are recovery-marked AND approved are consumed (a not-yet-approved or FR-26
+// token is never matched). The owning user is joined for the active-state
+// check.
+func (q *Queries) ConsumeAdminRecoveryToken(ctx context.Context, tokenHash string) (ConsumeAdminRecoveryTokenRow, error) {
+	row := q.db.QueryRow(ctx, consumeAdminRecoveryToken, tokenHash)
+	var i ConsumeAdminRecoveryTokenRow
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.TokenHash,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+		&i.ApprovedByUserID,
+		&i.RequestedByUserID,
+		&i.Email,
+		&i.DisplayName,
+		&i.FirstName,
+		&i.LastName,
+		&i.State,
+		&i.IsMfaEnabled,
+		&i.PasswordHash,
+		&i.MustChangePassword,
+	)
+	return i, err
+}
+
 const consumePasswordResetToken = `-- name: ConsumePasswordResetToken :one
 WITH consumed AS (
     DELETE FROM password_reset_tokens
-    WHERE token_hash = $1
+    WHERE token_hash = $1 AND recovery_target_admin = false
     RETURNING id, user_id, token_hash, expires_at, created_at
 )
 SELECT c.id, c.user_id, c.token_hash, c.expires_at, c.created_at,
@@ -111,12 +208,14 @@ type ConsumePasswordResetTokenRow struct {
 	MustChangePassword bool               `json:"must_change_password"`
 }
 
-// Atomic single-use consumption of a reset token (review finding 1.8-5): the
-// data-modifying CTE deletes the token in the SAME statement that reads it, so
-// two concurrent completions with the same token cannot both succeed — the
-// losing statement sees no row in the CTE and the caller maps the resulting
-// no-rows to ErrResetTokenInvalid. The owning user is joined so the completion
-// step can verify the account is still active.
+// Atomic single-use consumption of a NON-recovery reset token (review finding
+// 1.8-5): the data-modifying CTE deletes the token in the SAME statement that
+// reads it, so two concurrent completions with the same token cannot both
+// succeed — the losing statement sees no row in the CTE and the caller maps the
+// resulting no-rows to ErrResetTokenInvalid. Only FR-26 tokens
+// (recovery_target_admin=false) are consumed here; an admin-recovery token is
+// consumed exclusively via ConsumeAdminRecoveryToken (FR-27). The owning user
+// is joined so the completion step can verify the account is still active.
 func (q *Queries) ConsumePasswordResetToken(ctx context.Context, tokenHash string) (ConsumePasswordResetTokenRow, error) {
 	row := q.db.QueryRow(ctx, consumePasswordResetToken, tokenHash)
 	var i ConsumePasswordResetTokenRow
@@ -136,6 +235,58 @@ func (q *Queries) ConsumePasswordResetToken(ctx context.Context, tokenHash strin
 		&i.MustChangePassword,
 	)
 	return i, err
+}
+
+const countActiveAdmins = `-- name: CountActiveAdmins :one
+SELECT COUNT(*)::bigint
+FROM users u
+JOIN user_permission_groups upg ON upg.user_id = u.id
+JOIN permission_groups pg        ON pg.id = upg.permission_group_id
+WHERE pg.name = 'admin' AND u.state = 'active'
+`
+
+// Counts the users who are BOTH active AND members of the admin permission
+// group (FR-27 last-admin guard): recovery of the last remaining active admin
+// is deliberately disabled via self-service. Two statements are avoided; the
+// count is derived from admin-group membership joined to live state.
+func (q *Queries) CountActiveAdmins(ctx context.Context) (int64, error) {
+	row := q.db.QueryRow(ctx, countActiveAdmins)
+	var column_1 int64
+	err := row.Scan(&column_1)
+	return column_1, err
+}
+
+const createAdminRecoveryRequest = `-- name: CreateAdminRecoveryRequest :exec
+WITH invalidated AS (
+    DELETE FROM password_reset_tokens
+    WHERE user_id = $1 AND recovery_target_admin = true
+)
+INSERT INTO password_reset_tokens (user_id, token_hash, expires_at, recovery_target_admin, requested_by_user_id)
+VALUES ($1, $2, $3, true, $4)
+`
+
+type CreateAdminRecoveryRequestParams struct {
+	UserID            pgtype.UUID        `json:"user_id"`
+	TokenHash         string             `json:"token_hash"`
+	ExpiresAt         pgtype.Timestamptz `json:"expires_at"`
+	RequestedByUserID pgtype.UUID        `json:"requested_by_user_id"`
+}
+
+// Issue a fresh admin-recovery request (FR-27): a single-use, hashed, 30-min
+// token row marked recovery_target_admin=true for the target admin, stamped
+// with the requesting admin (requested_by_user_id). The data-modifying CTE
+// first invalidates EVERY earlier recovery token of the user (only the latest
+// request stays valid), then stores the new one. A recovery token is NOT
+// usable until another admin approves it (approved_by_user_id is set via
+// ApproveAdminRecovery).
+func (q *Queries) CreateAdminRecoveryRequest(ctx context.Context, arg CreateAdminRecoveryRequestParams) error {
+	_, err := q.db.Exec(ctx, createAdminRecoveryRequest,
+		arg.UserID,
+		arg.TokenHash,
+		arg.ExpiresAt,
+		arg.RequestedByUserID,
+	)
+	return err
 }
 
 const createPasswordResetToken = `-- name: CreatePasswordResetToken :exec
@@ -329,6 +480,82 @@ func (q *Queries) DeleteSessionsByUserExcept(ctx context.Context, arg DeleteSess
 	return err
 }
 
+const denyAdminRecovery = `-- name: DenyAdminRecovery :exec
+DELETE FROM password_reset_tokens
+WHERE user_id = $1
+  AND recovery_target_admin = true
+  AND approved_by_user_id IS NULL
+  AND expires_at > now()
+`
+
+// Deny a pending admin-recovery request (FR-27): invalidate the target's
+// recovery-marked, not-yet-approved token so it can no longer be approved. A
+// zero-row delete (no pending request, already approved, or expired) is a
+// no-op — the deny audit is still written by the core (NFR-O1).
+func (q *Queries) DenyAdminRecovery(ctx context.Context, userID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, denyAdminRecovery, userID)
+	return err
+}
+
+const getAdminRecoveryTokenByHash = `-- name: GetAdminRecoveryTokenByHash :one
+SELECT t.id, t.user_id, t.token_hash, t.expires_at, t.created_at,
+       t.recovery_target_admin, t.approved_by_user_id, t.requested_by_user_id,
+       u.email, u.display_name, u.first_name, u.last_name, u.state,
+       u.is_mfa_enabled, u.password_hash, u.must_change_password
+FROM password_reset_tokens t
+JOIN users u ON u.id = t.user_id
+WHERE t.token_hash = $1 AND t.recovery_target_admin = true
+`
+
+type GetAdminRecoveryTokenByHashRow struct {
+	ID                  pgtype.UUID        `json:"id"`
+	UserID              pgtype.UUID        `json:"user_id"`
+	TokenHash           string             `json:"token_hash"`
+	ExpiresAt           pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	RecoveryTargetAdmin bool               `json:"recovery_target_admin"`
+	ApprovedByUserID    pgtype.UUID        `json:"approved_by_user_id"`
+	RequestedByUserID   pgtype.UUID        `json:"requested_by_user_id"`
+	Email               string             `json:"email"`
+	DisplayName         string             `json:"display_name"`
+	FirstName           string             `json:"first_name"`
+	LastName            string             `json:"last_name"`
+	State               string             `json:"state"`
+	IsMfaEnabled        bool               `json:"is_mfa_enabled"`
+	PasswordHash        string             `json:"password_hash"`
+	MustChangePassword  bool               `json:"must_change_password"`
+}
+
+// Resolve an admin-recovery token by its stored hash, joining the owning user
+// so the completion step can verify the account is still active (FR-27). Only
+// recovery-marked tokens are matched (a FR-26 forgot token with the same hash
+// can never satisfy a recovery completion); the raw token is never stored or
+// queried. The result carries the approver and the requester so the core can
+// enforce that an approved token was actually approved by a DIFFERENT admin.
+func (q *Queries) GetAdminRecoveryTokenByHash(ctx context.Context, tokenHash string) (GetAdminRecoveryTokenByHashRow, error) {
+	row := q.db.QueryRow(ctx, getAdminRecoveryTokenByHash, tokenHash)
+	var i GetAdminRecoveryTokenByHashRow
+	err := row.Scan(
+		&i.ID,
+		&i.UserID,
+		&i.TokenHash,
+		&i.ExpiresAt,
+		&i.CreatedAt,
+		&i.RecoveryTargetAdmin,
+		&i.ApprovedByUserID,
+		&i.RequestedByUserID,
+		&i.Email,
+		&i.DisplayName,
+		&i.FirstName,
+		&i.LastName,
+		&i.State,
+		&i.IsMfaEnabled,
+		&i.PasswordHash,
+		&i.MustChangePassword,
+	)
+	return i, err
+}
+
 const getLoginAttempts = `-- name: GetLoginAttempts :one
 SELECT email, failed_count, lockout_until, updated_at
 FROM login_attempts
@@ -353,7 +580,7 @@ SELECT t.id, t.user_id, t.token_hash, t.expires_at, t.created_at,
        u.is_mfa_enabled, u.password_hash, u.must_change_password
 FROM password_reset_tokens t
 JOIN users u ON u.id = t.user_id
-WHERE t.token_hash = $1
+WHERE t.token_hash = $1 AND t.recovery_target_admin = false
 `
 
 type GetPasswordResetTokenByHashRow struct {
@@ -374,7 +601,10 @@ type GetPasswordResetTokenByHashRow struct {
 
 // Resolve a reset token by its stored hash, joining the owning user so the
 // completion step can verify the account is still active (FR-26). The token is
-// looked up ONLY by hash; the raw token is never stored or queried.
+// looked up ONLY by hash; the raw token is never stored or queried. Only
+// NON-recovery (FR-26) tokens are matched: an admin-recovery token
+// (recovery_target_admin=true) can never be resolved via the forgot-password
+// path (FR-27 overrides FR-26 for admins).
 func (q *Queries) GetPasswordResetTokenByHash(ctx context.Context, tokenHash string) (GetPasswordResetTokenByHashRow, error) {
 	row := q.db.QueryRow(ctx, getPasswordResetTokenByHash, tokenHash)
 	var i GetPasswordResetTokenByHashRow
@@ -553,21 +783,32 @@ func (q *Queries) IncrementLoginAttempts(ctx context.Context, email string) erro
 }
 
 const insertAuditEvent = `-- name: InsertAuditEvent :exec
-INSERT INTO audit_log (actor_user_id, operation)
-VALUES ($1, $2)
+INSERT INTO audit_log (actor_user_id, operation, operation_detail, severity)
+VALUES ($1, $2, $3, $4)
 `
 
 type InsertAuditEventParams struct {
-	ActorUserID pgtype.UUID `json:"actor_user_id"`
-	Operation   string      `json:"operation"`
+	ActorUserID     pgtype.UUID `json:"actor_user_id"`
+	Operation       string      `json:"operation"`
+	OperationDetail pgtype.Text `json:"operation_detail"`
+	Severity        string      `json:"severity"`
 }
 
 // Append a row to the User-owned audit trail (NFR-O1/NFR-O2, spine table 11):
-// actor_user_id + operation + created_at. Never records password values or
-// other sensitive payloads. Written best-effort: a failure is logged, not
-// rolled back into the triggering operation (availability).
+// actor_user_id + operation + created_at, plus an optional operation_detail
+// (e.g. the admin-recovery Begründung and target email) and a severity
+// ('normal' by default, 'high' for recovery events). The repository passes a
+// concrete severity (default 'normal') so the column is never NULL. Never
+// records password values or other sensitive payloads. Written best-effort: a
+// failure is logged, not rolled back into the triggering operation
+// (availability).
 func (q *Queries) InsertAuditEvent(ctx context.Context, arg InsertAuditEventParams) error {
-	_, err := q.db.Exec(ctx, insertAuditEvent, arg.ActorUserID, arg.Operation)
+	_, err := q.db.Exec(ctx, insertAuditEvent,
+		arg.ActorUserID,
+		arg.Operation,
+		arg.OperationDetail,
+		arg.Severity,
+	)
 	return err
 }
 
@@ -607,6 +848,75 @@ func (q *Queries) IsUserInPermissionGroup(ctx context.Context, arg IsUserInPermi
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
+}
+
+const listAdminRecoveryRequest = `-- name: ListAdminRecoveryRequest :many
+SELECT t.id, t.user_id, t.token_hash, t.expires_at, t.created_at,
+       t.recovery_target_admin, t.approved_by_user_id, t.requested_by_user_id,
+       u.email, u.display_name, u.first_name, u.last_name, u.state,
+       u.is_mfa_enabled, u.must_change_password
+FROM password_reset_tokens t
+JOIN users u ON u.id = t.user_id
+WHERE t.recovery_target_admin = true AND t.approved_by_user_id IS NULL
+ORDER BY t.created_at DESC
+`
+
+type ListAdminRecoveryRequestRow struct {
+	ID                  pgtype.UUID        `json:"id"`
+	UserID              pgtype.UUID        `json:"user_id"`
+	TokenHash           string             `json:"token_hash"`
+	ExpiresAt           pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	RecoveryTargetAdmin bool               `json:"recovery_target_admin"`
+	ApprovedByUserID    pgtype.UUID        `json:"approved_by_user_id"`
+	RequestedByUserID   pgtype.UUID        `json:"requested_by_user_id"`
+	Email               string             `json:"email"`
+	DisplayName         string             `json:"display_name"`
+	FirstName           string             `json:"first_name"`
+	LastName            string             `json:"last_name"`
+	State               string             `json:"state"`
+	IsMfaEnabled        bool               `json:"is_mfa_enabled"`
+	MustChangePassword  bool               `json:"must_change_password"`
+}
+
+// List pending (not-yet-approved) admin-recovery requests (FR-27) joined to
+// their target user, newest first, for the admin-B review surface. The
+// password hash is deliberately NOT selected (review finding: never expose a
+// secret through the listing surface).
+func (q *Queries) ListAdminRecoveryRequest(ctx context.Context) ([]ListAdminRecoveryRequestRow, error) {
+	rows, err := q.db.Query(ctx, listAdminRecoveryRequest)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListAdminRecoveryRequestRow
+	for rows.Next() {
+		var i ListAdminRecoveryRequestRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.TokenHash,
+			&i.ExpiresAt,
+			&i.CreatedAt,
+			&i.RecoveryTargetAdmin,
+			&i.ApprovedByUserID,
+			&i.RequestedByUserID,
+			&i.Email,
+			&i.DisplayName,
+			&i.FirstName,
+			&i.LastName,
+			&i.State,
+			&i.IsMfaEnabled,
+			&i.MustChangePassword,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }
 
 const listPermissionGroupsByUser = `-- name: ListPermissionGroupsByUser :many

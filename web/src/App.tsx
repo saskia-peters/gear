@@ -10,6 +10,7 @@ import { RegisterPage } from './pages/RegisterPage.tsx'
 import { ChangePasswordPage } from './pages/ChangePasswordPage.tsx'
 import { ProfilePage } from './pages/ProfilePage.tsx'
 import { AdminPage } from './pages/AdminPage.tsx'
+import { AdminRecoveryPage } from './pages/AdminRecoveryPage.tsx'
 import { ForgotPasswordPage } from './pages/ForgotPasswordPage.tsx'
 import { ResetPasswordPage } from './pages/ResetPasswordPage.tsx'
 import { NotFoundPage } from './pages/NotFoundPage.tsx'
@@ -152,6 +153,14 @@ export function AppRoutes() {
         element={
           <AuthenticatedPage>
             <AdminPage />
+          </AuthenticatedPage>
+        }
+      />
+      <Route
+        path="/admin/recovery"
+        element={
+          <AuthenticatedPage>
+            <AdminRecoveryPage />
           </AuthenticatedPage>
         }
       />

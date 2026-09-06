@@ -377,16 +377,25 @@ func (r *Repository) RefreshSessionUser(_ context.Context, _ *core.User) error {
 }
 
 // InsertAuditEvent appends a row to the User-owned append-only audit trail
-// (NFR-O1/NFR-O2, spine table 11). It records only actor_user_id, operation
-// and created_at — never password values or other sensitive payloads.
-func (r *Repository) InsertAuditEvent(ctx context.Context, userID, operation string) error {
+// (NFR-O1/NFR-O2, spine table 11). It records actor_user_id, operation,
+// created_at plus an optional operation_detail (e.g. the admin-recovery
+// Begründung and target email) and a severity ('normal' by default, 'high' for
+// recovery events) — never password values or other sensitive payloads. The
+// detail and severity are optional; callers that do not care pass "".
+func (r *Repository) InsertAuditEvent(ctx context.Context, userID, operation, detail, severity string) error {
 	uid, err := uuidFromString(userID)
 	if err != nil {
 		return err
 	}
+	sev := severity
+	if sev == "" {
+		sev = "normal"
+	}
 	return r.queries.InsertAuditEvent(ctx, InsertAuditEventParams{
-		ActorUserID: uid,
-		Operation:   operation,
+		ActorUserID:     uid,
+		Operation:       operation,
+		OperationDetail: pgtype.Text{String: detail, Valid: detail != ""},
+		Severity:        sev,
 	})
 }
 
@@ -527,6 +536,163 @@ func (r *Repository) IsUserInPermissionGroup(ctx context.Context, userID, groupN
 		UserID: uid,
 		Name:   groupName,
 	})
+}
+
+// CountActiveAdmins reports how many users are BOTH active AND members of the
+// admin permission group (FR-27 last-admin guard): recovery of the last
+// remaining active admin is deliberately disabled via self-service.
+func (r *Repository) CountActiveAdmins(ctx context.Context) (int, error) {
+	n, err := r.queries.CountActiveAdmins(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return int(n), nil
+}
+
+// CreateAdminRecoveryRequest stores a recovery-marked single-use hashed 30-min
+// token for the target admin, atomically invalidating every earlier recovery
+// request of that user (only the latest stays valid, FR-27) and stamps the
+// requesting admin (requestedByUserID) so the core can enforce the
+// dual-control rule (a requester can never approve their own request). The raw
+// token is never persisted.
+func (r *Repository) CreateAdminRecoveryRequest(ctx context.Context, userID, requestedByUserID, tokenHash string, expiresAt time.Time) error {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return err
+	}
+	requester, err := uuidFromString(requestedByUserID)
+	if err != nil {
+		return err
+	}
+	return r.queries.CreateAdminRecoveryRequest(ctx, CreateAdminRecoveryRequestParams{
+		UserID:            uid,
+		RequestedByUserID: requester,
+		TokenHash:         tokenHash,
+		ExpiresAt:         pgtype.Timestamptz{Time: expiresAt, Valid: true},
+	})
+}
+
+// ApproveAdminRecovery mints a fresh token hash onto the target's latest
+// pending admin-recovery request and stamps the approving admin (B), returning
+// the request id (FR-27). A zero-row update — no pending request, already
+// approved, or expired — maps to core.ErrAdminRecoveryInvalid.
+func (r *Repository) ApproveAdminRecovery(ctx context.Context, userID, approvedByUserID, tokenHash string) (string, error) {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return "", err
+	}
+	approver, err := uuidFromString(approvedByUserID)
+	if err != nil {
+		return "", err
+	}
+	id, err := r.queries.ApproveAdminRecovery(ctx, ApproveAdminRecoveryParams{
+		UserID:           uid,
+		ApprovedByUserID: approver,
+		TokenHash:        tokenHash,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", core.ErrAdminRecoveryInvalid
+		}
+		return "", err
+	}
+	return uuidToString(id.Bytes), nil
+}
+
+// ConsumeAdminRecoveryToken atomically consumes an APPROVED admin-recovery token
+// (FR-27): the DELETE and the read happen in one statement, so two concurrent
+// completions with the same token cannot both succeed — the loser sees no row
+// and this maps to core.ErrAdminRecoveryInvalid. Only tokens that are
+// recovery-marked AND approved are consumed.
+func (r *Repository) ConsumeAdminRecoveryToken(ctx context.Context, tokenHash string) (*core.AdminRecoveryToken, error) {
+	row, err := r.queries.ConsumeAdminRecoveryToken(ctx, tokenHash)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, core.ErrAdminRecoveryInvalid
+		}
+		return nil, err
+	}
+	approvedBy := ""
+	if row.ApprovedByUserID.Valid {
+		approvedBy = uuidToString(row.ApprovedByUserID.Bytes)
+	}
+	requestedBy := ""
+	if row.RequestedByUserID.Valid {
+		requestedBy = uuidToString(row.RequestedByUserID.Bytes)
+	}
+	return &core.AdminRecoveryToken{
+		ID:                 uuidToString(row.ID.Bytes),
+		UserID:             uuidToString(row.UserID.Bytes),
+		TokenHash:          row.TokenHash,
+		ExpiresAt:          row.ExpiresAt.Time,
+		CreatedAt:          row.CreatedAt.Time,
+		ApprovedByUserID:   approvedBy,
+		RequestedByUserID:  requestedBy,
+		User: &core.User{
+			ID:                 uuidToString(row.UserID.Bytes),
+			Email:              row.Email,
+			DisplayName:        row.DisplayName,
+			FirstName:          row.FirstName,
+			LastName:           row.LastName,
+			State:              core.UserState(row.State),
+			IsMFAEnabled:       row.IsMfaEnabled,
+			MustChangePassword: row.MustChangePassword,
+			PasswordHash:       row.PasswordHash,
+		},
+	}, nil
+}
+
+// ListAdminRecoveryRequest returns the pending (not-yet-approved)
+// admin-recovery requests, newest first, joined to their target user (FR-27
+// admin-B review surface). The password hash is never selected.
+func (r *Repository) ListAdminRecoveryRequest(ctx context.Context) ([]*core.AdminRecoveryRequest, error) {
+	rows, err := r.queries.ListAdminRecoveryRequest(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*core.AdminRecoveryRequest, 0, len(rows))
+	for _, row := range rows {
+		requestedBy := ""
+		if row.RequestedByUserID.Valid {
+			requestedBy = uuidToString(row.RequestedByUserID.Bytes)
+		}
+		approvedBy := ""
+		if row.ApprovedByUserID.Valid {
+			approvedBy = uuidToString(row.ApprovedByUserID.Bytes)
+		}
+		out = append(out, &core.AdminRecoveryRequest{
+			ID:                 uuidToString(row.ID.Bytes),
+			UserID:             uuidToString(row.UserID.Bytes),
+			TokenHash:          row.TokenHash,
+			ExpiresAt:          row.ExpiresAt.Time,
+			CreatedAt:          row.CreatedAt.Time,
+			ApprovedByUserID:   approvedBy,
+			RequestedByUserID:  requestedBy,
+			User: &core.User{
+				ID:                 uuidToString(row.UserID.Bytes),
+				Email:              row.Email,
+				DisplayName:        row.DisplayName,
+				FirstName:          row.FirstName,
+				LastName:           row.LastName,
+				State:              core.UserState(row.State),
+				IsMFAEnabled:       row.IsMfaEnabled,
+				MustChangePassword: row.MustChangePassword,
+			},
+		})
+	}
+	return out, nil
+}
+
+// DenyAdminRecovery invalidates the target's pending admin-recovery request so
+// it can no longer be approved (FR-27). A zero-row delete (no pending request,
+// already approved, or expired) is a no-op; the deny audit is written by the
+// core regardless (NFR-O1).
+func (r *Repository) DenyAdminRecovery(ctx context.Context, userID string) error {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return err
+	}
+	return r.queries.DenyAdminRecovery(ctx, uid)
 }
 
 func uuidToString(b [16]byte) string {

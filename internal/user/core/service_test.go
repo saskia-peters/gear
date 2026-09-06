@@ -22,6 +22,11 @@ type mockRepo struct {
 	clearCalls  int
 	audit       map[string][]string
 	auditErr    error
+	// auditDetail and auditSeverity record the detail/severity passed to
+	// InsertAuditEvent, keyed by user ID, for tests that assert reason and
+	// severity persistence (review finding 1.10).
+	auditDetail map[string][]string
+	auditSeverity map[string][]string
 	updateCalls int
 	// resetTokens holds the minted reset tokens keyed by token_hash (FR-26).
 	resetTokens map[string]*PasswordResetToken
@@ -42,6 +47,16 @@ type mockRepo struct {
 	// mutated in-memory pointer, so tests can prove the session snapshot is
 	// refreshed (review finding: stale session snapshot).
 	newObjectOnProfile bool
+	// activeAdmins is the count returned by CountActiveAdmins (FR-27 last-admin
+	// guard); default derived from the admin group when 0 is not meaningful.
+	activeAdmins int
+	// adminRecovery holds the admin-recovery tokens keyed by token_hash (FR-27).
+	// A nil ApprovedByUserID means the request is still pending.
+	adminRecovery map[string]*AdminRecoveryToken
+	// adminRecoveryErr makes Approve/ConsumeAdminRecovery surface a genuine
+	// store error (review finding 1.10: real errors must propagate, only
+	// ErrNoRows maps to ErrAdminRecoveryInvalid).
+	adminRecoveryErr error
 }
 
 func newMockRepo() *mockRepo {
@@ -53,6 +68,7 @@ func newMockRepo() *mockRepo {
 		resetTokens: make(map[string]*PasswordResetToken),
 		mustChange:  make(map[string]bool),
 		adminGroup:  make(map[string]bool),
+		adminRecovery: make(map[string]*AdminRecoveryToken),
 	}
 }
 
@@ -216,8 +232,9 @@ func (m *mockRepo) UpdateUserPassword(_ context.Context, userID, passwordHash st
 
 // InsertAuditEvent appends an audit row (actor_user_id -> operation) to the
 // in-memory append-only trail (NFR-O1/NFR-O2). auditErr lets tests simulate an
-// audit-write failure (best-effort path).
-func (m *mockRepo) InsertAuditEvent(_ context.Context, userID, operation string) error {
+// audit-write failure (best-effort path). The detail and severity are recorded
+// for tests that assert reason/severity persistence (review finding 1.10).
+func (m *mockRepo) InsertAuditEvent(_ context.Context, userID, operation, detail, severity string) error {
 	if m.auditErr != nil {
 		return m.auditErr
 	}
@@ -225,6 +242,14 @@ func (m *mockRepo) InsertAuditEvent(_ context.Context, userID, operation string)
 		m.audit = make(map[string][]string)
 	}
 	m.audit[userID] = append(m.audit[userID], operation)
+	if m.auditDetail == nil {
+		m.auditDetail = make(map[string][]string)
+	}
+	m.auditDetail[userID] = append(m.auditDetail[userID], detail)
+	if m.auditSeverity == nil {
+		m.auditSeverity = make(map[string][]string)
+	}
+	m.auditSeverity[userID] = append(m.auditSeverity[userID], severity)
 	return nil
 }
 
@@ -401,6 +426,122 @@ func (m *mockRepo) IsUserInPermissionGroup(_ context.Context, userID, groupName 
 		return false, nil
 	}
 	return m.adminGroup[userID], nil
+}
+
+// CountActiveAdmins reports the number of active admin-group members (FR-27
+// last-admin guard). An explicit activeAdmins override wins; otherwise it counts
+// admin-group members whose account state is active.
+func (m *mockRepo) CountActiveAdmins(_ context.Context) (int, error) {
+	if m.activeAdmins > 0 {
+		return m.activeAdmins, nil
+	}
+	n := 0
+	for uid := range m.adminGroup {
+		u := m.userByID(uid)
+		if u != nil && u.State == StateActive {
+			n++
+		}
+	}
+	return n, nil
+}
+
+// CreateAdminRecoveryRequest stores a recovery-marked single-use hashed 30-min
+// token, invalidating any earlier recovery request for the user (only the
+// latest stays valid, FR-27), stamped with the requesting admin so a requester
+// can never approve their own request. The raw token is never stored.
+func (m *mockRepo) CreateAdminRecoveryRequest(_ context.Context, userID, requestedByUserID, tokenHash string, expiresAt time.Time) error {
+	for hash := range m.adminRecovery {
+		if m.adminRecovery[hash].UserID == userID {
+			delete(m.adminRecovery, hash)
+		}
+	}
+	m.adminRecovery[tokenHash] = &AdminRecoveryToken{
+		ID:                "recovery-" + tokenHash[:8],
+		UserID:            userID,
+		TokenHash:         tokenHash,
+		ExpiresAt:         expiresAt,
+		CreatedAt:         time.Now().UTC(),
+		RequestedByUserID: requestedByUserID,
+		User:              m.userByID(userID),
+	}
+	return nil
+}
+
+// ApproveAdminRecovery mints a fresh token hash onto the target's pending
+// recovery request and stamps the approving admin, resetting the expiry to a
+// FRESH 30 minutes (FR-27, review finding 1.10). A zero-row update (no pending
+// request, already approved, or expired) maps to ErrAdminRecoveryInvalid,
+// mirroring the postgres adapter.
+func (m *mockRepo) ApproveAdminRecovery(_ context.Context, userID, approvedByUserID, tokenHash string) (string, error) {
+	if m.adminRecoveryErr != nil {
+		return "", m.adminRecoveryErr
+	}
+	for hash, t := range m.adminRecovery {
+		if t.UserID == userID && t.ApprovedByUserID == "" && time.Now().UTC().Before(t.ExpiresAt) {
+			t.ApprovedByUserID = approvedByUserID
+			t.ExpiresAt = time.Now().UTC().Add(AdminRecoveryTokenTTL)
+			delete(m.adminRecovery, hash)
+			t.TokenHash = tokenHash
+			t.ID = "recovery-approved-" + tokenHash[:8]
+			m.adminRecovery[tokenHash] = t
+			return t.ID, nil
+		}
+	}
+	return "", ErrAdminRecoveryInvalid
+}
+
+// ConsumeAdminRecoveryToken atomically consumes an APPROVED admin-recovery token
+// (FR-27): a missing, not-yet-approved, expired or already-used token maps to
+// ErrAdminRecoveryInvalid.
+func (m *mockRepo) ConsumeAdminRecoveryToken(_ context.Context, tokenHash string) (*AdminRecoveryToken, error) {
+	if m.adminRecoveryErr != nil {
+		return nil, m.adminRecoveryErr
+	}
+	t, ok := m.adminRecovery[tokenHash]
+	if !ok || t.ApprovedByUserID == "" {
+		return nil, ErrAdminRecoveryInvalid
+	}
+	delete(m.adminRecovery, tokenHash)
+	t.User = m.userByID(t.UserID)
+	return t, nil
+}
+
+// ListAdminRecoveryRequest returns the pending (not-yet-approved) recovery
+// requests, newest first (FR-27). It never carries the password hash (the user
+// snapshot is CLONED so clearing the hash never mutates the live user).
+func (m *mockRepo) ListAdminRecoveryRequest(_ context.Context) ([]*AdminRecoveryRequest, error) {
+	var out []*AdminRecoveryRequest
+	for _, t := range m.adminRecovery {
+		if t.ApprovedByUserID != "" {
+			continue
+		}
+		req := &AdminRecoveryRequest{
+			ID:                t.ID,
+			UserID:            t.UserID,
+			TokenHash:         t.TokenHash,
+			ExpiresAt:         t.ExpiresAt,
+			CreatedAt:         t.CreatedAt,
+			RequestedByUserID: t.RequestedByUserID,
+		}
+		if u := m.userByID(t.UserID); u != nil {
+			clone := *u
+			clone.PasswordHash = ""
+			req.User = &clone
+		}
+		out = append(out, req)
+	}
+	return out, nil
+}
+
+// DenyAdminRecovery invalidates the target's pending recovery request (review
+// finding 1.10). A zero-row delete is a no-op.
+func (m *mockRepo) DenyAdminRecovery(_ context.Context, userID string) error {
+	for hash, t := range m.adminRecovery {
+		if t.UserID == userID && t.ApprovedByUserID == "" {
+			delete(m.adminRecovery, hash)
+		}
+	}
+	return nil
 }
 
 // userByID finds a user by ID across the email-keyed map (the mock repository

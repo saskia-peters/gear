@@ -318,7 +318,7 @@ func (s *Service) UpdateProfile(ctx context.Context, user *User, input UpdatePro
 	// Audit event (NFR-O1/NFR-O2): best-effort — a failed audit write must not
 	// roll back the successful profile update (availability); the failure is
 	// logged server-side.
-	if err := s.repo.InsertAuditEvent(ctx, user.ID, AuditOperationProfileUpdate); err != nil {
+	if err := s.repo.InsertAuditEvent(ctx, user.ID, AuditOperationProfileUpdate, "", AuditSeverityNormal); err != nil {
 		s.log().Warn("profile update audit write failed", "error", err)
 	}
 
@@ -410,7 +410,7 @@ func (s *Service) StageEmailChange(ctx context.Context, user *User, newEmail str
 
 	// Audit event (NFR-O1/NFR-O2): best-effort — a failed audit write must not
 	// roll back the staged email change (availability); the failure is logged.
-	if err := s.repo.InsertAuditEvent(ctx, user.ID, AuditOperationEmailChangeRequest); err != nil {
+	if err := s.repo.InsertAuditEvent(ctx, user.ID, AuditOperationEmailChangeRequest, "", AuditSeverityNormal); err != nil {
 		s.log().Warn("email change request audit write failed", "error", err)
 	}
 

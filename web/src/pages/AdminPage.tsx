@@ -18,6 +18,9 @@ export function AdminPage() {
             Das Admin-Modul folgt in Epic 2. Hier entstehen Verwaltung und
             Freigaben (z.&nbsp;B. Kontofreigabe, Einmal-Passwörter, Rollen).
           </p>
+          <Link to="/admin/recovery" className={styles.backLink}>
+            Dual-Admin-Wiederherstellung
+          </Link>
           <Link to="/" className={styles.backLink}>
             Zurück zur Übersicht
           </Link>

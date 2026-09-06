@@ -220,6 +220,26 @@ func (s *Service) RequestPasswordReset(ctx context.Context, email string) (*Rese
 
 		switch user.State {
 		case StateActive:
+			// Admin accounts can NOT self-reset via the FR-26 forgot flow
+			// (FR-27 overrides FR-26 for admins): an admin recovers only through
+			// the dual-admin recovery path (admin.recovery.*). We still return
+			// the uniform anti-enumeration confirmation and audit the request,
+			// but issue NO actionable reset token and (when SMTP is not
+			// configured) do NOT flag must_change_password — an admin must never
+			// be able to quietly reset their own password via the self-service
+			// flow, and a flag would not even reach the locked-out admin.
+			isAdmin, adminErr := s.resolveIsAdmin(ctx, user.ID)
+			if adminErr != nil {
+				// A membership-resolution failure must not fail the whole
+				// request (availability): log it and proceed WITHOUT issuing an
+				// actionable token (fail closed for admin self-reset).
+				s.log().Warn("admin membership resolution failed during forgot; admin self-reset blocked", "error", adminErr)
+				isAdmin = true
+			}
+			if isAdmin {
+				s.log().Info("forgot-password request for an admin; self-reset blocked (FR-27)", "email", user.Email)
+				break
+			}
 			if s.resetSender != nil && s.resetSender.Configured() {
 				raw, err := s.mintResetToken(ctx, user.ID)
 				if err != nil {
@@ -251,7 +271,7 @@ func (s *Service) RequestPasswordReset(ctx context.Context, email string) (*Rese
 
 		// Audit the request for any existing account (NFR-O1/NFR-O2). Best-effort:
 		// a failed audit write is logged, never rolled back.
-		if err := s.repo.InsertAuditEvent(ctx, user.ID, AuditOperationPasswordResetRequest); err != nil {
+		if err := s.repo.InsertAuditEvent(ctx, user.ID, AuditOperationPasswordResetRequest, "", AuditSeverityNormal); err != nil {
 			s.log().Warn("password reset request audit write failed", "error", err)
 		}
 	} else {
@@ -330,7 +350,7 @@ func (s *Service) CompletePasswordReset(ctx context.Context, rawToken, newPasswo
 	}
 
 	// Audit event (NFR-O1/NFR-O2): best-effort.
-	if err := s.repo.InsertAuditEvent(ctx, token.UserID, AuditOperationPasswordResetComplete); err != nil {
+	if err := s.repo.InsertAuditEvent(ctx, token.UserID, AuditOperationPasswordResetComplete, "", AuditSeverityNormal); err != nil {
 		s.log().Warn("password reset complete audit write failed", "error", err)
 	}
 

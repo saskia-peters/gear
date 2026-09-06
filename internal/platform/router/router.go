@@ -39,6 +39,17 @@ func WithProtected(h http.Handler) Option {
 	}
 }
 
+// WithMount mounts an arbitrary http.Handler at the given path pattern. Used by
+// the composition root for permission-gated sub-routes (e.g. the FR-27
+// admin-recovery approve endpoint mounted behind RequirePermission).
+func WithMount(pattern string, h http.Handler) Option {
+	return func(r *chi.Mux) {
+		if h != nil {
+			r.Mount(pattern, h)
+		}
+	}
+}
+
 // New returns the mounted chi router. The panic-recovery middleware and the
 // 404/405 handlers answer with the uniform JSON envelope (not plain text), and
 // /healthz is wired to the given Pinger with the structured request logger.

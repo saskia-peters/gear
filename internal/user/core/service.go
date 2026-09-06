@@ -29,7 +29,7 @@ type Repository interface {
 	// Argon2id hash; InsertAuditEvent appends to the User-owned audit trail
 	// (NFR-O1/NFR-O2, spine table 11).
 	UpdateUserPassword(ctx context.Context, userID, passwordHash string) (*User, error)
-	InsertAuditEvent(ctx context.Context, userID, operation string) error
+	InsertAuditEvent(ctx context.Context, userID, operation, detail, severity string) error
 	// Profile base-data persistence (Story 2.1): UpdateUserProfile writes the
 	// editable fields and the full custom-attribute set (Story 1.9);
 	// StagePendingEmail stores a staged email awaiting admin approval (the user
@@ -56,6 +56,23 @@ type Repository interface {
 	// permission group (AD-12); the admin-group membership drives the
 	// server-authoritative IsAdmin flag (Story 1.8).
 	IsUserInPermissionGroup(ctx context.Context, userID, groupName string) (bool, error)
+	// Dual-admin recovery persistence (FR-27/AD-13): CountActiveAdmins reports
+	// how many active admins remain (last-admin guard);
+	// CreateAdminRecoveryRequest stores a recovery-marked single-use hashed
+	// 30-min token for the target admin, stamped with the requesting admin
+	// (invalidating earlier recovery requests);
+	// ApproveAdminRecovery mints a fresh token hash onto the pending request and
+	// stamps the approving admin, returning the request id (ErrNoRows when there
+	// is no approvable pending request); ConsumeAdminRecoveryToken atomically
+	// consumes an APPROVED recovery token (single-use); ListAdminRecoveryRequest
+	// returns the pending requests for the admin-B review surface;
+	// DenyAdminRecovery invalidates a pending request.
+	CountActiveAdmins(ctx context.Context) (int, error)
+	CreateAdminRecoveryRequest(ctx context.Context, userID, requestedByUserID, tokenHash string, expiresAt time.Time) error
+	ApproveAdminRecovery(ctx context.Context, userID, approvedByUserID, tokenHash string) (string, error)
+	ConsumeAdminRecoveryToken(ctx context.Context, tokenHash string) (*AdminRecoveryToken, error)
+	ListAdminRecoveryRequest(ctx context.Context) ([]*AdminRecoveryRequest, error)
+	DenyAdminRecovery(ctx context.Context, userID string) error
 }
 
 // SecretCipher encrypts/decrypts the TOTP shared secret at rest (NFR-S4). The

@@ -223,11 +223,15 @@ WHERE id = $1;
 
 -- name: InsertAuditEvent :exec
 -- Append a row to the User-owned audit trail (NFR-O1/NFR-O2, spine table 11):
--- actor_user_id + operation + created_at. Never records password values or
--- other sensitive payloads. Written best-effort: a failure is logged, not
--- rolled back into the triggering operation (availability).
-INSERT INTO audit_log (actor_user_id, operation)
-VALUES ($1, $2);
+-- actor_user_id + operation + created_at, plus an optional operation_detail
+-- (e.g. the admin-recovery Begründung and target email) and a severity
+-- ('normal' by default, 'high' for recovery events). The repository passes a
+-- concrete severity (default 'normal') so the column is never NULL. Never
+-- records password values or other sensitive payloads. Written best-effort: a
+-- failure is logged, not rolled back into the triggering operation
+-- (availability).
+INSERT INTO audit_log (actor_user_id, operation, operation_detail, severity)
+VALUES ($1, $2, $3, $4);
 
 -- name: InsertAuditEventAnonymous :exec
 -- Append an audit row WITHOUT an actor (actor_user_id stays NULL). Used for
@@ -252,24 +256,29 @@ VALUES ($1, $2, $3);
 -- name: GetPasswordResetTokenByHash :one
 -- Resolve a reset token by its stored hash, joining the owning user so the
 -- completion step can verify the account is still active (FR-26). The token is
--- looked up ONLY by hash; the raw token is never stored or queried.
+-- looked up ONLY by hash; the raw token is never stored or queried. Only
+-- NON-recovery (FR-26) tokens are matched: an admin-recovery token
+-- (recovery_target_admin=true) can never be resolved via the forgot-password
+-- path (FR-27 overrides FR-26 for admins).
 SELECT t.id, t.user_id, t.token_hash, t.expires_at, t.created_at,
        u.email, u.display_name, u.first_name, u.last_name, u.state,
        u.is_mfa_enabled, u.password_hash, u.must_change_password
 FROM password_reset_tokens t
 JOIN users u ON u.id = t.user_id
-WHERE t.token_hash = $1;
+WHERE t.token_hash = $1 AND t.recovery_target_admin = false;
 
 -- name: ConsumePasswordResetToken :one
--- Atomic single-use consumption of a reset token (review finding 1.8-5): the
--- data-modifying CTE deletes the token in the SAME statement that reads it, so
--- two concurrent completions with the same token cannot both succeed — the
--- losing statement sees no row in the CTE and the caller maps the resulting
--- no-rows to ErrResetTokenInvalid. The owning user is joined so the completion
--- step can verify the account is still active.
+-- Atomic single-use consumption of a NON-recovery reset token (review finding
+-- 1.8-5): the data-modifying CTE deletes the token in the SAME statement that
+-- reads it, so two concurrent completions with the same token cannot both
+-- succeed — the losing statement sees no row in the CTE and the caller maps the
+-- resulting no-rows to ErrResetTokenInvalid. Only FR-26 tokens
+-- (recovery_target_admin=false) are consumed here; an admin-recovery token is
+-- consumed exclusively via ConsumeAdminRecoveryToken (FR-27). The owning user
+-- is joined so the completion step can verify the account is still active.
 WITH consumed AS (
     DELETE FROM password_reset_tokens
-    WHERE token_hash = $1
+    WHERE token_hash = $1 AND recovery_target_admin = false
     RETURNING id, user_id, token_hash, expires_at, created_at
 )
 SELECT c.id, c.user_id, c.token_hash, c.expires_at, c.created_at,
@@ -317,3 +326,110 @@ SELECT EXISTS (
     JOIN permission_groups pg ON pg.id = upg.permission_group_id
     WHERE upg.user_id = $1 AND pg.name = $2
 );
+
+-- name: CountActiveAdmins :one
+-- Counts the users who are BOTH active AND members of the admin permission
+-- group (FR-27 last-admin guard): recovery of the last remaining active admin
+-- is deliberately disabled via self-service. Two statements are avoided; the
+-- count is derived from admin-group membership joined to live state.
+SELECT COUNT(*)::bigint
+FROM users u
+JOIN user_permission_groups upg ON upg.user_id = u.id
+JOIN permission_groups pg        ON pg.id = upg.permission_group_id
+WHERE pg.name = 'admin' AND u.state = 'active';
+
+-- name: CreateAdminRecoveryRequest :exec
+-- Issue a fresh admin-recovery request (FR-27): a single-use, hashed, 30-min
+-- token row marked recovery_target_admin=true for the target admin, stamped
+-- with the requesting admin (requested_by_user_id). The data-modifying CTE
+-- first invalidates EVERY earlier recovery token of the user (only the latest
+-- request stays valid), then stores the new one. A recovery token is NOT
+-- usable until another admin approves it (approved_by_user_id is set via
+-- ApproveAdminRecovery).
+WITH invalidated AS (
+    DELETE FROM password_reset_tokens
+    WHERE user_id = $1 AND recovery_target_admin = true
+)
+INSERT INTO password_reset_tokens (user_id, token_hash, expires_at, recovery_target_admin, requested_by_user_id)
+VALUES ($1, $2, $3, true, $4);
+
+-- name: GetAdminRecoveryTokenByHash :one
+-- Resolve an admin-recovery token by its stored hash, joining the owning user
+-- so the completion step can verify the account is still active (FR-27). Only
+-- recovery-marked tokens are matched (a FR-26 forgot token with the same hash
+-- can never satisfy a recovery completion); the raw token is never stored or
+-- queried. The result carries the approver and the requester so the core can
+-- enforce that an approved token was actually approved by a DIFFERENT admin.
+SELECT t.id, t.user_id, t.token_hash, t.expires_at, t.created_at,
+       t.recovery_target_admin, t.approved_by_user_id, t.requested_by_user_id,
+       u.email, u.display_name, u.first_name, u.last_name, u.state,
+       u.is_mfa_enabled, u.password_hash, u.must_change_password
+FROM password_reset_tokens t
+JOIN users u ON u.id = t.user_id
+WHERE t.token_hash = $1 AND t.recovery_target_admin = true;
+
+-- name: ConsumeAdminRecoveryToken :one
+-- Atomic single-use consumption of an APPROVED admin-recovery token (FR-27):
+-- the data-modifying CTE deletes the token in the SAME statement that reads
+-- it, so two concurrent completions with the same token cannot both succeed —
+-- the losing statement sees no row and the caller rejects it. Only tokens that
+-- are recovery-marked AND approved are consumed (a not-yet-approved or FR-26
+-- token is never matched). The owning user is joined for the active-state
+-- check.
+WITH consumed AS (
+    DELETE FROM password_reset_tokens
+    WHERE token_hash = $1 AND recovery_target_admin = true AND approved_by_user_id IS NOT NULL
+    RETURNING id, user_id, token_hash, expires_at, created_at, approved_by_user_id, requested_by_user_id
+)
+SELECT c.id, c.user_id, c.token_hash, c.expires_at, c.created_at, c.approved_by_user_id, c.requested_by_user_id,
+       u.email, u.display_name, u.first_name, u.last_name, u.state,
+       u.is_mfa_enabled, u.password_hash, u.must_change_password
+FROM consumed c
+JOIN users u ON u.id = c.user_id;
+
+-- name: ApproveAdminRecovery :one
+-- Approve a pending admin-recovery request (FR-27): stamp the approving admin
+-- (approved_by_user_id) on the recovery-marked token row for the target user,
+-- mint a FRESH single-use token hash for it — the raw token is generated at
+-- approve time (never stored) and returned ONLY to the approving admin (B),
+-- who hands it to the recovered admin (A) out-of-band — and reset the expiry
+-- to a FRESH 30 minutes from approve time (review finding: refresh token
+-- expiry on approval). Only the LATEST pending (not-yet-approved) recovery
+-- token is approved, so a stale earlier request cannot be approved. A zero-row
+-- update (no pending request, already approved, or expired) maps to
+-- ErrAdminRecoveryInvalid. Self-approval is rejected in the core, never here.
+UPDATE password_reset_tokens
+SET approved_by_user_id = $2,
+    token_hash          = $3,
+    expires_at          = now() + interval '30 minutes',
+    created_at          = created_at
+WHERE user_id = $1
+  AND recovery_target_admin = true
+  AND approved_by_user_id IS NULL
+  AND expires_at > now()
+RETURNING id;
+
+-- name: ListAdminRecoveryRequest :many
+-- List pending (not-yet-approved) admin-recovery requests (FR-27) joined to
+-- their target user, newest first, for the admin-B review surface. The
+-- password hash is deliberately NOT selected (review finding: never expose a
+-- secret through the listing surface).
+SELECT t.id, t.user_id, t.token_hash, t.expires_at, t.created_at,
+       t.recovery_target_admin, t.approved_by_user_id, t.requested_by_user_id,
+       u.email, u.display_name, u.first_name, u.last_name, u.state,
+       u.is_mfa_enabled, u.must_change_password
+FROM password_reset_tokens t
+JOIN users u ON u.id = t.user_id
+WHERE t.recovery_target_admin = true AND t.approved_by_user_id IS NULL
+ORDER BY t.created_at DESC;
+
+-- name: DenyAdminRecovery :exec
+-- Deny a pending admin-recovery request (FR-27): invalidate the target's
+-- recovery-marked, not-yet-approved token so it can no longer be approved. A
+-- zero-row delete (no pending request, already approved, or expired) is a
+-- no-op — the deny audit is still written by the core (NFR-O1).
+DELETE FROM password_reset_tokens
+WHERE user_id = $1
+  AND recovery_target_admin = true
+  AND approved_by_user_id IS NULL
+  AND expires_at > now();

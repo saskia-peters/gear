@@ -9,10 +9,12 @@ import (
 )
 
 type AuditLog struct {
-	ID          pgtype.UUID        `json:"id"`
-	ActorUserID pgtype.UUID        `json:"actor_user_id"`
-	Operation   string             `json:"operation"`
-	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	ID              pgtype.UUID        `json:"id"`
+	ActorUserID     pgtype.UUID        `json:"actor_user_id"`
+	Operation       string             `json:"operation"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	OperationDetail pgtype.Text        `json:"operation_detail"`
+	Severity        string             `json:"severity"`
 }
 
 type LoginAttempt struct {
@@ -23,11 +25,14 @@ type LoginAttempt struct {
 }
 
 type PasswordResetToken struct {
-	ID        pgtype.UUID        `json:"id"`
-	UserID    pgtype.UUID        `json:"user_id"`
-	TokenHash string             `json:"token_hash"`
-	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	ID                  pgtype.UUID        `json:"id"`
+	UserID              pgtype.UUID        `json:"user_id"`
+	TokenHash           string             `json:"token_hash"`
+	ExpiresAt           pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt           pgtype.Timestamptz `json:"created_at"`
+	RecoveryTargetAdmin bool               `json:"recovery_target_admin"`
+	ApprovedByUserID    pgtype.UUID        `json:"approved_by_user_id"`
+	RequestedByUserID   pgtype.UUID        `json:"requested_by_user_id"`
 }
 
 type Permission struct {
