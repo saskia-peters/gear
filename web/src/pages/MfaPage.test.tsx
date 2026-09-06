@@ -91,7 +91,8 @@ describe('MfaPage', () => {
     expect(enrollCall[0]).toBe('/api/v1/auth/mfa/enroll')
   })
 
-  it('ENROLL_CONFIRM_VALID: confirming with a valid code enables MFA and shows the success notice', async () => {
+  it('ENROLL_CONFIRM_VALID: confirming with a valid code enables MFA, clears auth state and redirects to /login', async () => {
+    localStorage.setItem(TOKEN_STORAGE_KEY, 'sess123')
     stubFetchSequence([
       { ok: true, body: { enabled: false } },
       {
@@ -110,10 +111,11 @@ describe('MfaPage', () => {
     await user.type(await screen.findByLabelText('Code aus der Authenticator-App'), '123456')
     await user.click(screen.getByRole('button', { name: /Aktivierung bestätigen/i }))
 
+    // After enabling MFA all sessions (incl. this one) are revoked, so the
+    // client clears auth state and redirects to /login for a fresh TOTP login.
     await waitFor(() => {
-      expect(screen.getByText('Zwei-Faktor-Authentifizierung wurde erfolgreich aktiviert.')).toBeInTheDocument()
+      expect(localStorage.getItem(TOKEN_STORAGE_KEY)).toBeNull()
     })
-    expect(screen.getByText(/MFA aktiv/i)).toBeInTheDocument()
   })
 
   it('ENROLL_CONFIRM_INVALID: confirming with a wrong code shows a German error and MFA stays off', async () => {

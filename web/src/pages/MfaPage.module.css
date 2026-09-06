@@ -53,6 +53,18 @@
   width: 100%;
 }
 
+.confirmForm {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: var(--gear-space-4);
+  width: 100%;
+}
+
+.confirmForm .fieldGroup {
+  width: 100%;
+}
+
 .fieldGroup {
   display: flex;
   flex-direction: column;
@@ -196,6 +208,7 @@
   display: inline-flex;
   align-items: center;
   justify-content: center;
+  align-self: center;
   padding: var(--gear-space-3) var(--gear-space-6);
   background-color: transparent;
   color: var(--gear-color-brand);

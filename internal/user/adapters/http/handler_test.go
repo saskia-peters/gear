@@ -33,6 +33,8 @@ type mockService struct {
 	getProfileFunc       func(ctx context.Context, user *core.User) (*core.Profile, error)
 	updateProfileFunc    func(ctx context.Context, user *core.User, input core.UpdateProfileInput) (*core.Profile, error)
 	stageEmailFunc       func(ctx context.Context, user *core.User, newEmail string) (*core.StageEmailResult, error)
+	revokeOtherCalls     *int
+	revokeAllCalls       *int
 }
 
 func (m *mockService) Register(ctx context.Context, input core.RegisterInput) (*ports.RegisterResult, error) {
@@ -97,10 +99,16 @@ func (m *mockService) MFAStatus(ctx context.Context, user *core.User) (bool, err
 }
 
 func (m *mockService) RevokeOtherSessions(ctx context.Context, userID, rawToken string) error {
+	if m.revokeOtherCalls != nil {
+		*m.revokeOtherCalls++
+	}
 	return nil
 }
 
 func (m *mockService) RevokeAllSessions(ctx context.Context, userID string) error {
+	if m.revokeAllCalls != nil {
+		*m.revokeAllCalls++
+	}
 	return nil
 }
 
@@ -719,6 +727,7 @@ func TestHandlerMFAEnrollRequest(t *testing.T) {
 func TestHandlerMFAEnrollConfirmValid(t *testing.T) {
 	var gotUser *core.User
 	var gotSecret, gotCode string
+	var revokeOtherCalls, revokeAllCalls int
 	svc := &mockService{
 		confirmFunc: func(ctx context.Context, user *core.User, secret, code string) error {
 			gotUser = user
@@ -726,6 +735,8 @@ func TestHandlerMFAEnrollConfirmValid(t *testing.T) {
 			gotCode = code
 			return nil
 		},
+		revokeOtherCalls: &revokeOtherCalls,
+		revokeAllCalls:   &revokeAllCalls,
 	}
 	h := newTestHandler(svc, &stubValidator{})
 
@@ -751,6 +762,12 @@ func TestHandlerMFAEnrollConfirmValid(t *testing.T) {
 	}
 	if gotSecret != "SECRETBASE32" || gotCode != "123456" {
 		t.Errorf("secret/code not forwarded: %q / %q", gotSecret, gotCode)
+	}
+	// Enabling MFA revokes ALL sessions (including the current one) so the
+	// caller must re-authenticate with the new TOTP code.
+	if revokeAllCalls != 1 || revokeOtherCalls != 0 {
+		t.Errorf("session revocation on MFA enable: revokeAll=%d (want 1), revokeOther=%d (want 0)",
+			revokeAllCalls, revokeOtherCalls)
 	}
 }
 

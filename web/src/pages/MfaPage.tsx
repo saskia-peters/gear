@@ -2,7 +2,7 @@ import { useEffect, useState, type FormEvent } from 'react'
 import { QRCodeSVG } from 'qrcode.react'
 import { useNavigate } from 'react-router-dom'
 import { Header } from '../components/Header.tsx'
-import { SESSION_TOKEN_KEY } from '../auth/authState.ts'
+import { SESSION_TOKEN_KEY, clearAuthState } from '../auth/authState.ts'
 import styles from './MfaPage.module.css'
 
 interface MfaErrors {
@@ -122,11 +122,12 @@ export function MfaPage() {
         body: JSON.stringify({ secret: enroll?.secret, code: code.trim() }),
       })
       if (res.ok) {
-        setEnabled(true)
-        setPhase('enabled')
-        setCode('')
-        setEnroll(null)
-        setNotice('Zwei-Faktor-Authentifizierung wurde erfolgreich aktiviert.')
+        // MFA is now active and all sessions (including this one) were revoked
+        // server-side so the caller must re-authenticate with the new TOTP code.
+        // Clear the client auth state and redirect to /login.
+        clearAuthState()
+        navigate('/login', { replace: true })
+        return
       } else {
         const data = await res.json().catch(() => null)
         setErrors({ code: data?.error?.message || 'Der Bestätigungscode ist ungültig oder abgelaufen.' })
@@ -167,13 +168,6 @@ export function MfaPage() {
     } finally {
       setIsSubmitting(false)
     }
-  }
-
-  const cancelEnroll = () => {
-    setEnroll(null)
-    setPhase('idle')
-    setCode('')
-    setErrors({})
   }
 
   const renderBody = () => {
@@ -252,7 +246,7 @@ export function MfaPage() {
           <div className={styles.secretBox} aria-label="Geheimer Schlüssel">
             {enroll.secret}
           </div>
-          <form onSubmit={confirmEnroll} noValidate>
+          <form onSubmit={confirmEnroll} noValidate className={styles.confirmForm}>
             <div className={styles.fieldGroup}>
               <label htmlFor="confirmCode" className={styles.label}>
                 Code aus der Authenticator-App
@@ -282,7 +276,7 @@ export function MfaPage() {
               {isSubmitting ? 'Wird gesendet...' : 'Aktivierung bestätigen'}
             </button>
           </form>
-          <button type="button" className={styles.backButton} onClick={cancelEnroll}>
+          <button type="button" className={styles.backButton} onClick={() => navigate('/profil')}>
             Abbrechen
           </button>
         </div>

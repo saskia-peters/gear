@@ -247,8 +247,9 @@ func (h *Handler) MFAEnroll(w http.ResponseWriter, r *http.Request) {
 		}
 		h.logger.Info("mfa enroll confirmed", "email", user.Email)
 		// Sessions issued before enrollment must not bypass the second factor
-		// (review finding 1.6-2): revoke all other sessions.
-		if err := h.service.RevokeOtherSessions(r.Context(), user.ID, auth.BearerToken(r)); err != nil {
+		// (review finding 1.6-2): the caller must re-authenticate with the new
+		// TOTP code, so ALL sessions (including the current one) are revoked.
+		if err := h.service.RevokeAllSessions(r.Context(), user.ID); err != nil {
 			h.logger.Error("mfa enroll session revocation failed", "error", err)
 		}
 		httpapi.WriteJSON(w, http.StatusOK, map[string]any{"enabled": true})
