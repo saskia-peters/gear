@@ -642,7 +642,7 @@ func TestPostgresProfileRepository(t *testing.T) {
 
 	// 1. UpdateUserProfile persists the editable base data and returns the
 	// updated user; email and state are untouched (Story 2.1).
-	updated, err := repo.UpdateUserProfile(ctx, a.ID, "Erika", "Musterfrau", "Erika")
+	updated, err := repo.UpdateUserProfile(ctx, a.ID, "Erika", "Musterfrau", "Erika", nil)
 	if err != nil {
 		t.Fatalf("UpdateUserProfile failed: %v", err)
 	}
@@ -731,13 +731,197 @@ func TestPostgresProfileRepository(t *testing.T) {
 	}
 
 	// 6. UpdateUserProfile on an unknown user maps to ErrUserNotFound.
-	if _, err := repo.UpdateUserProfile(ctx, "00000000-0000-0000-0000-000000000000", "X", "Y", "Z"); !errors.Is(err, core.ErrUserNotFound) {
+	if _, err := repo.UpdateUserProfile(ctx, "00000000-0000-0000-0000-000000000000", "X", "Y", "Z", nil); !errors.Is(err, core.ErrUserNotFound) {
 		t.Errorf("UpdateUserProfile(unknown) err = %v, want ErrUserNotFound", err)
 	}
 	// StagePendingEmail on an unknown user affects zero rows → the in-use case
 	// (review finding: "no row updated" == ErrEmailInUse).
 	if _, err := repo.StagePendingEmail(ctx, "00000000-0000-0000-0000-000000000000", "x@example.com"); !errors.Is(err, core.ErrEmailInUse) {
 		t.Errorf("StagePendingEmail(unknown) err = %v, want ErrEmailInUse", err)
+	}
+}
+
+func TestPostgresProfileAttributesRepository(t *testing.T) {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Skipf("skipping db integration test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping db integration test (db ping failed): %v", err)
+	}
+
+	queries := New(pool)
+	repo := NewRepository(queries)
+
+	suffix := time.Now().Format("20060102150405.000000")
+	email := "attr." + suffix + "@gear.local"
+
+	created, err := repo.CreateRegisteredUser(ctx, email, "Attribut Test", "Attribut", "Test", "$argon2id$v=19$dummyhash")
+	if err != nil {
+		t.Fatalf("CreateRegisteredUser failed: %v", err)
+	}
+	if len(created.Attributes) != 0 {
+		t.Fatalf("fresh user must have empty attributes, got %v", created.Attributes)
+	}
+
+	// 1. PROFILE_UPDATE_ATTRS: UpdateUserProfile persists the custom attributes
+	// to the users.attributes JSONB column (FR-7) and the RETURNING clause maps
+	// them back into the returned user.
+	attrs := map[string]any{
+		"note":          "Interne Notiz",
+		"internal_tags": []string{"beta", "2026"},
+	}
+	updated, err := repo.UpdateUserProfile(ctx, created.ID, "Erika", "Musterfrau", "Erika", attrs)
+	if err != nil {
+		t.Fatalf("UpdateUserProfile(attrs) failed: %v", err)
+	}
+	if updated.FirstName != "Erika" {
+		t.Errorf("first_name = %q, want Erika (base data still written)", updated.FirstName)
+	}
+	if got := updated.Attributes["note"]; got != "Interne Notiz" {
+		t.Errorf("attributes.note = %v, want Interne Notiz", got)
+	}
+
+	// 2. PROFILE_READ_WITH_ATTRS: a fresh read (GetUserByEmail → userFromRow)
+	// returns the stored attributes as a Go map.
+	fetched, err := repo.GetUserByEmail(ctx, email)
+	if err != nil {
+		t.Fatalf("GetUserByEmail failed: %v", err)
+	}
+	if fetched == nil || fetched.Attributes == nil || fetched.Attributes["note"] != "Interne Notiz" {
+		t.Errorf("fetched attributes = %+v, want note=Interne Notiz", fetched.Attributes)
+	}
+
+	// 2b. The session user snapshot carries attributes too (the GetSessionByTokenHash
+	// JOIN), so GetProfile serves them without a DB round-trip.
+	attrSessHash := "hash-of-attr-session." + suffix
+	if _, err := repo.CreateSession(ctx, created.ID, attrSessHash, time.Now().UTC().Add(time.Hour)); err != nil {
+		t.Fatalf("CreateSession failed: %v", err)
+	}
+	sess, err := repo.GetSessionByTokenHash(ctx, attrSessHash)
+	if err != nil {
+		t.Fatalf("GetSessionByTokenHash failed: %v", err)
+	}
+	if sess.User == nil || sess.User.Attributes == nil || sess.User.Attributes["note"] != "Interne Notiz" {
+		t.Errorf("session user attributes = %+v, want note=Interne Notiz", sess.User.Attributes)
+	}
+
+	// 3. PROFILE_UPDATE_CLEAR: an empty map REPLACES the whole JSONB map with
+	// '{}' — no orphan keys survive (additive-union-free contract).
+	cleared, err := repo.UpdateUserProfile(ctx, created.ID, "Erika", "Musterfrau", "Erika", map[string]any{})
+	if err != nil {
+		t.Fatalf("UpdateUserProfile(clear) failed: %v", err)
+	}
+	if len(cleared.Attributes) != 0 {
+		t.Errorf("attributes after clear = %v, want empty", cleared.Attributes)
+	}
+	fetched, err = repo.GetUserByEmail(ctx, email)
+	if err != nil {
+		t.Fatalf("GetUserByEmail(after clear) failed: %v", err)
+	}
+	if fetched == nil || len(fetched.Attributes) != 0 {
+		t.Errorf("stored attributes after clear = %+v, want empty map", fetched.Attributes)
+	}
+
+	// 4. A nil attributes map also clears (COALESCE($5, '{}'::jsonb)).
+	if _, err := repo.UpdateUserProfile(ctx, created.ID, "Erika", "Musterfrau", "Erika", nil); err != nil {
+		t.Fatalf("UpdateUserProfile(nil attrs) failed: %v", err)
+	}
+	fetched, err = repo.GetUserByEmail(ctx, email)
+	if err != nil {
+		t.Fatalf("GetUserByEmail(after nil clear) failed: %v", err)
+	}
+	if fetched == nil || len(fetched.Attributes) != 0 {
+		t.Errorf("stored attributes after nil clear = %+v, want empty map", fetched.Attributes)
+	}
+
+	// 5. PROMOTION PATH (AD-3/NFR-R2) — demonstrated by fixture/note, NOT a
+	// shipped migration: when a custom attribute becomes core, it is promoted to
+	// a real typed column via a golang-migrate migration + backfill, e.g.:
+	//
+	//   -- 000009_promote_favorite_color.up.sql
+	//   ALTER TABLE users ADD COLUMN favorite_color TEXT;
+	//   UPDATE users SET favorite_color = attributes->>'favorite_color'
+	//   WHERE attributes ? 'favorite_color';
+	//   ALTER TABLE users DROP COLUMN favorite_color;  -- .down.sql
+	//
+	// The JSONB column is RETAINED for continued flexibility: core reads now use
+	// the typed column, custom attributes keep flowing through `attributes`.
+	// That migration would ship in the promotion story; this story only proves
+	// the mechanism (write/read/clear) end to end above.
+}
+
+func TestPostgresMalformedStoredAttributes(t *testing.T) {
+	// MALFORMED_STORED (Story 1.9 boundary, review finding): the users.attributes
+	// jsonb column can never hold syntactically invalid JSON (Postgres validates
+	// on write), but out-of-band writes can store a valid NON-OBJECT shape such
+	// as an array or scalar. Reading such a value must surface a clear error —
+	// never a crash and never a silent data-loss read that serves `{}`.
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Skipf("skipping db integration test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping db integration test (db ping failed): %v", err)
+	}
+
+	queries := New(pool)
+	repo := NewRepository(queries)
+
+	suffix := time.Now().Format("20060102150405.000000")
+	email := "malformed." + suffix + "@gear.local"
+
+	created, err := repo.CreateRegisteredUser(ctx, email, "Malformed Test", "Malformed", "Test", "$argon2id$v=19$dummyhash")
+	if err != nil {
+		t.Fatalf("CreateRegisteredUser failed: %v", err)
+	}
+
+	// Simulate an out-of-band write that stored a non-object value in the
+	// jsonb column. An array is valid JSONB, so Postgres accepts it; only the
+	// Go-side object unmarshal rejects it.
+	if _, err := pool.Exec(ctx, `UPDATE users SET attributes = $1::jsonb WHERE id = $2`, `[1,2,3]`, created.ID); err != nil {
+		t.Fatalf("seeding malformed attributes failed: %v", err)
+	}
+
+	// 1. The repository profile read surfaces a clear error (no panic, no
+	// silent nil).
+	fetched, err := repo.GetUserByEmail(ctx, email)
+	if err == nil {
+		t.Fatalf("GetUserByEmail with a non-object attributes column must fail, got %+v", fetched)
+	}
+	if !strings.Contains(err.Error(), "invalid stored attributes jsonb") {
+		t.Errorf("error = %q, want a clear 'invalid stored attributes jsonb' cause", err)
+	}
+
+	// 2. The session-resolution read (GetSessionByTokenHash) surfaces the same
+	// clear error for the JOIN'd user — the RequireAuth gateway then answers
+	// with the uniform envelope rather than crashing.
+	sessHash := "hash-of-malformed-session." + suffix
+	if _, err := repo.CreateSession(ctx, created.ID, sessHash, time.Now().UTC().Add(time.Hour)); err != nil {
+		t.Fatalf("CreateSession failed: %v", err)
+	}
+	if _, err := repo.GetSessionByTokenHash(ctx, sessHash); err == nil {
+		t.Fatal("GetSessionByTokenHash with a non-object attributes column must fail")
 	}
 }
 

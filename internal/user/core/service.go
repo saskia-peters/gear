@@ -31,10 +31,11 @@ type Repository interface {
 	UpdateUserPassword(ctx context.Context, userID, passwordHash string) (*User, error)
 	InsertAuditEvent(ctx context.Context, userID, operation string) error
 	// Profile base-data persistence (Story 2.1): UpdateUserProfile writes the
-	// editable fields; StagePendingEmail stores a staged email awaiting admin
-	// approval (the user stays active on the current email); ClearPendingEmail
-	// clears a staged change (Epic 2 admin workflow).
-	UpdateUserProfile(ctx context.Context, userID, firstName, lastName, displayName string) (*User, error)
+	// editable fields and the full custom-attribute set (Story 1.9);
+	// StagePendingEmail stores a staged email awaiting admin approval (the user
+	// stays active on the current email); ClearPendingEmail clears a staged
+	// change (Epic 2 admin workflow).
+	UpdateUserProfile(ctx context.Context, userID, firstName, lastName, displayName string, attributes map[string]any) (*User, error)
 	StagePendingEmail(ctx context.Context, userID, pendingEmail string) (*User, error)
 	ClearPendingEmail(ctx context.Context, userID string) error
 	// Password reset persistence (FR-26/AD-13): CreatePasswordResetToken stores

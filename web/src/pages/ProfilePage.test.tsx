@@ -29,6 +29,7 @@ interface ProfileFixture {
   last_name: string
   display_name: string
   pending_email?: string
+  attributes?: Record<string, unknown>
 }
 
 const baseProfile: ProfileFixture = {
@@ -129,6 +130,60 @@ describe('ProfilePage', () => {
       },
       body: JSON.stringify({ first_name: 'Erika', last_name: 'Mustermann', display_name: 'Max Mustermann' }),
     })
+  })
+
+  it('ROUND_TRIP: editing base data preserves loaded attributes in the save payload', async () => {
+    // Story 1.9, verification gap: a profile loaded WITH attributes must
+    // round-trip them unchanged on a base-data save (never wiped).
+    const user = userEvent.setup()
+    const withAttrs: ProfileFixture = { ...baseProfile, attributes: { note: 'Interne Notiz' } }
+    const postMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ ...withAttrs, first_name: 'Erika' }),
+    })
+    vi.stubGlobal('fetch', profileFetch(withAttrs, (_url, init) => postMock(init)))
+
+    renderProfilePage()
+    await screen.findByLabelText('Vorname')
+
+    await user.clear(screen.getByLabelText('Vorname'))
+    await user.type(screen.getByLabelText('Vorname'), 'Erika')
+    await user.click(screen.getByRole('button', { name: 'Speichern' }))
+
+    await waitFor(() => {
+      expect(screen.getByText('Profil aktualisiert.')).toBeInTheDocument()
+    })
+    const init = postMock.mock.calls[0][0] as RequestInit
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>
+    expect(body.attributes).toEqual({ note: 'Interne Notiz' })
+  })
+
+  it('NEVER_WIPE: when attributes were not loaded, the save body omits the field entirely', async () => {
+    // Story 1.9, review finding: a profile without a server-reported attributes
+    // object must NOT send `attributes` on save — the field is omitted so the
+    // server's leave-unchanged semantics apply instead of wiping stored values.
+    const user = userEvent.setup()
+    const postMock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ ...baseProfile, first_name: 'Erika' }),
+    })
+    vi.stubGlobal('fetch', profileFetch(baseProfile, (_url, init) => postMock(init)))
+
+    renderProfilePage()
+    await screen.findByLabelText('Vorname')
+
+    await user.clear(screen.getByLabelText('Vorname'))
+    await user.type(screen.getByLabelText('Vorname'), 'Erika')
+    await user.click(screen.getByRole('button', { name: 'Speichern' }))
+
+    await waitFor(() => {
+      expect(screen.getByText('Profil aktualisiert.')).toBeInTheDocument()
+    })
+    const init = postMock.mock.calls[0][0] as RequestInit
+    const body = JSON.parse(String(init.body)) as Record<string, unknown>
+    expect(body).not.toHaveProperty('attributes')
   })
 
   it('EMAIL_STAGE: a changed email is staged via POST /api/v1/auth/profile/email and the German confirmation is shown', async () => {

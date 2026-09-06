@@ -45,7 +45,7 @@ func (r *Repository) CreateRegisteredUser(ctx context.Context, email, displayNam
 
 	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
 		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
-		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail), nil
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail)
 }
 
 // GetUserByEmail queries a user by their email address. If not found, returns nil, nil.
@@ -60,7 +60,7 @@ func (r *Repository) GetUserByEmail(ctx context.Context, email string) (*core.Us
 
 	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
 		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
-		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail), nil
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail)
 }
 
 // ListPermissionsByUser resolves the user's live permission set (AD-12):
@@ -110,7 +110,13 @@ func (r *Repository) GetSessionByTokenHash(ctx context.Context, tokenHash string
 
 	var attrs map[string]any
 	if len(row.Attributes) > 0 {
-		_ = json.Unmarshal(row.Attributes, &attrs)
+		if err := json.Unmarshal(row.Attributes, &attrs); err != nil {
+			// A stored attributes value that is not a JSON object (written
+			// out-of-band) must surface as a clear error, never a crash or a
+			// silent data-loss read (Story 1.9 boundary). The auth gateway maps
+			// this session-resolution failure to the uniform 401 envelope.
+			return nil, fmt.Errorf("user postgres: invalid stored attributes jsonb: %w", err)
+		}
 	}
 
 	secret := ""
@@ -280,22 +286,35 @@ func (r *Repository) UpdateUserPassword(ctx context.Context, userID, passwordHas
 	}
 	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
 		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
-		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail), nil
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail)
 }
 
 // UpdateUserProfile persists the user's editable base data (first/last/display
-// name, Story 2.1) and returns the updated user. Email and state are never
-// touched. An unknown user ID maps to core.ErrUserNotFound.
-func (r *Repository) UpdateUserProfile(ctx context.Context, userID, firstName, lastName, displayName string) (*core.User, error) {
+// name, Story 2.1) and the full custom-attribute set (Story 1.9) and returns
+// the updated user. Email and state are never touched. The attributes map is
+// marshalled to JSONB for storage (a nil map becomes `{}`). Absent-vs-clear is
+// decided by the core (review finding): the core passes the current value
+// through for "leave unchanged", so the repository always receives a concrete
+// map to write. An unknown user ID maps to core.ErrUserNotFound.
+func (r *Repository) UpdateUserProfile(ctx context.Context, userID, firstName, lastName, displayName string, attributes map[string]any) (*core.User, error) {
 	uid, err := uuidFromString(userID)
 	if err != nil {
 		return nil, err
+	}
+	attrsJSON := []byte("{}")
+	if attributes != nil {
+		raw, err := json.Marshal(attributes)
+		if err != nil {
+			return nil, fmt.Errorf("user postgres: failed to marshal attributes: %w", err)
+		}
+		attrsJSON = raw
 	}
 	row, err := r.queries.UpdateUserProfile(ctx, UpdateUserProfileParams{
 		ID:          uid,
 		FirstName:   firstName,
 		LastName:    lastName,
 		DisplayName: displayName,
+		Attributes:  attrsJSON,
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -305,7 +324,7 @@ func (r *Repository) UpdateUserProfile(ctx context.Context, userID, firstName, l
 	}
 	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
 		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
-		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail), nil
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail)
 }
 
 // StagePendingEmail stores a staged email change (Story 2.1) in a single
@@ -335,7 +354,7 @@ func (r *Repository) StagePendingEmail(ctx context.Context, userID, pendingEmail
 	}
 	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
 		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
-		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail), nil
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail)
 }
 
 // ClearPendingEmail clears a staged email change (pending_email -> NULL) for
@@ -520,11 +539,18 @@ func uuidToString(b [16]byte) string {
 	)
 }
 
-// userFromRow maps an sqlc user row to the core.User domain entity.
-func userFromRow(id pgtype.UUID, email, displayName, firstName, lastName, passwordHash, state string, isMfa, mustChange bool, totpSecret pgtype.Text, pendingSecret pgtype.Text, pendingExpiry pgtype.Timestamptz, attributes []byte, createdAt, updatedAt pgtype.Timestamptz, pendingEmail pgtype.Text) *core.User {
+// userFromRow maps an sqlc user row to the core.User domain entity. A stored
+// `attributes` value that cannot be parsed into a JSON object (e.g. an array or
+// scalar written out-of-band — the jsonb column rejects syntactically invalid
+// JSON, so a "malformed" value is a valid non-object shape) surfaces as a clear
+// error instead of silently dropping it (Story 1.9 boundary: reads never crash
+// and never silently lose data).
+func userFromRow(id pgtype.UUID, email, displayName, firstName, lastName, passwordHash, state string, isMfa, mustChange bool, totpSecret pgtype.Text, pendingSecret pgtype.Text, pendingExpiry pgtype.Timestamptz, attributes []byte, createdAt, updatedAt pgtype.Timestamptz, pendingEmail pgtype.Text) (*core.User, error) {
 	var attrs map[string]any
 	if len(attributes) > 0 {
-		_ = json.Unmarshal(attributes, &attrs)
+		if err := json.Unmarshal(attributes, &attrs); err != nil {
+			return nil, fmt.Errorf("user postgres: invalid stored attributes jsonb: %w", err)
+		}
 	}
 	secret := ""
 	if totpSecret.Valid {
@@ -559,7 +585,7 @@ func userFromRow(id pgtype.UUID, email, displayName, firstName, lastName, passwo
 		Attributes:                 attrs,
 		CreatedAt:                  createdAt.Time,
 		UpdatedAt:                  updatedAt.Time,
-	}
+	}, nil
 }
 
 // uuidFromString parses a canonical UUID string into a pgtype.UUID.

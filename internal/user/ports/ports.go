@@ -68,7 +68,7 @@ type Repository interface {
 	ClearUserPendingTotpSecret(ctx context.Context, userID string) error
 	UpdateUserPassword(ctx context.Context, userID, passwordHash string) (*core.User, error)
 	InsertAuditEvent(ctx context.Context, userID, operation string) error
-	UpdateUserProfile(ctx context.Context, userID, firstName, lastName, displayName string) (*core.User, error)
+	UpdateUserProfile(ctx context.Context, userID, firstName, lastName, displayName string, attributes map[string]any) (*core.User, error)
 	StagePendingEmail(ctx context.Context, userID, pendingEmail string) (*core.User, error)
 	ClearPendingEmail(ctx context.Context, userID string) error
 	CreatePasswordResetToken(ctx context.Context, userID, tokenHash string, expiresAt time.Time) error

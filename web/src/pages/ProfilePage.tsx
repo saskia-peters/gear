@@ -17,6 +17,7 @@ interface Profile {
   display_name: string
   pending_email?: string
   is_admin?: boolean
+  attributes?: Record<string, unknown>
 }
 
 interface FieldErrors {
@@ -58,6 +59,17 @@ export function ProfilePage() {
   const [loaded, setLoaded] = useState(false)
   const [loadError, setLoadError] = useState(false)
   const [pendingEmail, setPendingEmail] = useState<string | undefined>(undefined)
+  // attributes holds the loaded custom-attribute set (Story 1.9). It is kept as
+  // an opaque JSON value and round-tripped on save so base-data edits do not
+  // wipe server-side custom attributes (the API REPLACES the whole map). No
+  // dedicated attributes UI ships in this story — the payload is preserved.
+  // attributesKnown tracks whether the server actually reported an attributes
+  // object on load: only then is `attributes` included in the save body. If it
+  // was never loaded (e.g. an older server, or a partial response), the field
+  // is omitted entirely so the server's leave-unchanged semantics apply — a
+  // failed/partial load must never wipe stored attributes (review finding).
+  const [attributes, setAttributes] = useState<Record<string, unknown> | undefined>(undefined)
+  const [attributesKnown, setAttributesKnown] = useState(false)
   const [errors, setErrors] = useState<FieldErrors>({})
   const [isSubmitting, setIsSubmitting] = useState(false)
   const [baseSaved, setBaseSaved] = useState(false)
@@ -104,6 +116,8 @@ export function ProfilePage() {
           setEmail(data.email)
           setCurrentEmail(data.email)
           setPendingEmail(data.pending_email || undefined)
+          setAttributes(data.attributes)
+          setAttributesKnown(typeof data.attributes === 'object' && data.attributes !== null)
           // Keep the cached admin flag in sync with the server (Story 1.8);
           // the sidebar visibility follows.
           if (typeof data.is_admin === 'boolean') {
@@ -172,14 +186,22 @@ export function ProfilePage() {
     // suppressed by a stale general error (review finding).
     let baseOk = false
     try {
+      // Only include `attributes` when they were actually loaded (attributesKnown):
+      // otherwise the field is omitted so the server's leave-unchanged semantics
+      // apply — a failed/partial load must never wipe stored attributes (review
+      // finding). When known, the loaded set is round-tripped unchanged.
+      const saveBody: Record<string, unknown> = {
+        first_name: trimmedFirst,
+        last_name: trimmedLast,
+        display_name: trimmedDisplay,
+      }
+      if (attributesKnown) {
+        saveBody.attributes = attributes ?? {}
+      }
       const res = await fetch('/api/v1/auth/profile', {
         method: 'POST',
         headers: authHeaders(),
-        body: JSON.stringify({
-          first_name: trimmedFirst,
-          last_name: trimmedLast,
-          display_name: trimmedDisplay,
-        }),
+        body: JSON.stringify(saveBody),
       })
       if (handleAuthResponse(res.status, navigate)) {
         return
@@ -195,6 +217,12 @@ export function ProfilePage() {
           setLastName(data.last_name)
           setDisplayNameState(data.display_name || '')
           setDisplayName(data.display_name || trimmedDisplay)
+          // Keep the attributes state in sync with the saved (server-normalized)
+          // profile so a subsequent save round-trips the same set.
+          if (typeof data.attributes === 'object' && data.attributes !== null) {
+            setAttributes(data.attributes)
+            setAttributesKnown(true)
+          }
         } else {
           // Keep the header greeting in sync with the saved display name.
           setDisplayName(trimmedDisplay)

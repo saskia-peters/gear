@@ -2,6 +2,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -41,6 +42,23 @@ const MsgEmailInUse = "Diese E-Mail-Adresse wird bereits verwendet."
 // MsgProfileNameTooLong is the German microcopy for an over-long name field.
 const MsgProfileNameTooLong = "Der Name ist zu lang."
 
+// MsgInvalidAttributes is the German microcopy for an invalid `attributes`
+// payload (Story 1.9): a non-object shape (rejected at the HTTP decode boundary
+// for the typed field), a bad key, an unserializable value or an over-size map.
+// The handler also reports machine-readable `details` (the offending key and
+// reason) alongside this message.
+const MsgInvalidAttributes = "Die benutzerdefinierten Attribute sind ungültig."
+
+// Attribute validation caps (Story 1.9 / FR-7 / AD-3): keys are non-empty
+// strings no longer than 64 runes, and the whole attributes object must fit in
+// 16 KB once JSON-serialized (abuse guard).
+const (
+	// MaxAttributeKeyRunes caps the length of a single custom attribute key.
+	MaxAttributeKeyRunes = 64
+	// MaxAttributesSize caps the JSON-serialized size of the attributes map.
+	MaxAttributesSize = 16 * 1024
+)
+
 var (
 	// ErrEmailUnchanged is returned when the staged email equals the user's
 	// current email — a no-op rejected with 400 invalid_request.
@@ -65,7 +83,38 @@ var (
 	// RequireAuth gateway already restricts every request to the session user;
 	// this is a defense-in-depth guard. Handlers map it to 403 forbidden.
 	ErrForbidden = errors.New("forbidden: cannot act on another user's profile")
+
+	// ErrInvalidAttributes is returned when the `attributes` map fails
+	// validation (Story 1.9): an empty or over-long key, a value that cannot be
+	// JSON-serialized, or a serialized map exceeding the 16 KB cap. Handlers
+	// map it to 400 invalid_request. The concrete failure is carried by a
+	// wrapping *AttributeError (Key + Reason) so handlers can surface machine-
+	// readable details; errors.Is(err, ErrInvalidAttributes) matches both.
+	ErrInvalidAttributes = errors.New("invalid custom attributes")
 )
+
+// AttributeError is the detailed variant of ErrInvalidAttributes (Story 1.9,
+// review finding): it identifies the offending attribute key and a machine-
+// readable reason so the 400 invalid_request envelope can carry `details`
+// (e.g. {"key":"note","reason":"empty key"}). It unwraps to ErrInvalidAttributes.
+type AttributeError struct {
+	// Key is the offending attribute key (empty for whole-map failures such as
+	// an over-size attributes object).
+	Key string
+	// Reason is a stable machine-readable failure reason.
+	Reason string
+}
+
+// Error implements the error interface.
+func (e *AttributeError) Error() string {
+	if e.Key != "" {
+		return fmt.Sprintf("invalid attribute %q: %s", e.Key, e.Reason)
+	}
+	return fmt.Sprintf("invalid attributes: %s", e.Reason)
+}
+
+// Unwrap reports ErrInvalidAttributes so errors.Is matches the sentinel.
+func (e *AttributeError) Unwrap() error { return ErrInvalidAttributes }
 
 // Profile is the base-data payload of the authenticated user (Story 2.1):
 // the editable fields plus the current email and any staged email awaiting
@@ -81,18 +130,33 @@ type Profile struct {
 	DisplayName  string `json:"display_name"`
 	PendingEmail string `json:"pending_email,omitempty"`
 	IsAdmin      bool   `json:"is_admin"`
+	// Attributes carries the extensible custom-attribute surface (Story 1.9,
+	// FR-7/AD-3): free-form JSON stored in the single `users.attributes JSONB`
+	// column. Core/known fields stay typed columns; only these custom extras
+	// live here. Always a non-nil object: an empty map serializes as `{}`.
+	Attributes map[string]any `json:"attributes"`
 }
 
 // UpdateProfileInput captures the editable base-data payload (Story 2.1):
 // Vorname, Nachname and Anzeigename. Email and state are never editable here.
 type UpdateProfileInput struct {
-	FirstName   string `json:"first_name"`
-	LastName    string `json:"last_name"`
-	DisplayName string `json:"display_name"`
+	FirstName   string         `json:"first_name"`
+	LastName    string         `json:"last_name"`
+	DisplayName string         `json:"display_name"`
+	// Attributes is the full extensible attribute set (Story 1.9): it REPLACES
+	// the stored JSONB map wholesale (additive-union-free contract). Semantics
+	// (review finding): a nil (absent) field leaves the stored attributes
+	// unchanged, while an explicit empty map `{}` clears them. A non-object
+	// shape (array/scalar) cannot reach this typed field via JSON decoding — it
+	// is rejected as an invalid body at the HTTP boundary.
+	Attributes map[string]any `json:"attributes"`
 }
 
 // Validate enforces the base-data rules: every field must be non-empty after
 // trimming, and no name may exceed 100 runes (matching registration bounds).
+// The `attributes` map is validated too (object-only, key caps, JSON
+// serializability, size cap). A nil map is a no-op (leave unchanged); an
+// explicit empty map is a valid clear.
 func (in *UpdateProfileInput) Validate() error {
 	if strings.TrimSpace(in.FirstName) == "" ||
 		strings.TrimSpace(in.LastName) == "" ||
@@ -104,7 +168,49 @@ func (in *UpdateProfileInput) Validate() error {
 		utf8.RuneCountInString(strings.TrimSpace(in.DisplayName)) > 100 {
 		return ErrProfileNameTooLong
 	}
+	if _, err := validateAttributes(in.Attributes); err != nil {
+		return err
+	}
 	return nil
+}
+
+// validateAttributes validates the extensible-attribute set (Story 1.9) and
+// returns the NORMALIZED map for storage: keys are trimmed (a `" note "` key
+// becomes `"note"`), must be non-empty after trimming and ≤ 64 runes, values
+// must be JSON-serializable, and the serialized map must fit in 16 KB. A nil
+// input returns (nil, nil) — "leave unchanged". Object-ness is guaranteed by
+// the `map[string]any` type — a non-object (array/scalar) is rejected earlier
+// by the HTTP decoder. Failures carry a *AttributeError with the offending key
+// and a machine-readable reason.
+func validateAttributes(attrs map[string]any) (map[string]any, error) {
+	if attrs == nil {
+		return nil, nil
+	}
+	normalized := make(map[string]any, len(attrs))
+	for key, val := range attrs {
+		k := strings.TrimSpace(key)
+		if k == "" {
+			return nil, &AttributeError{Key: key, Reason: "empty key"}
+		}
+		if utf8.RuneCountInString(k) > MaxAttributeKeyRunes {
+			return nil, &AttributeError{Key: key, Reason: "key too long"}
+		}
+		// Reject values that cannot be JSON-serialized (e.g. a NaN float, a
+		// function, a channel): marshalling each value up front surfaces the
+		// offending key's failure deterministically.
+		if _, err := json.Marshal(val); err != nil {
+			return nil, &AttributeError{Key: key, Reason: "value not JSON-serializable"}
+		}
+		normalized[k] = val
+	}
+	data, err := json.Marshal(normalized)
+	if err != nil {
+		return nil, &AttributeError{Reason: "attributes not JSON-serializable"}
+	}
+	if len(data) > MaxAttributesSize {
+		return nil, &AttributeError{Reason: "attributes too large"}
+	}
+	return normalized, nil
 }
 
 // StageEmailInput captures the email-staging payload (Story 2.1).
@@ -154,6 +260,12 @@ func (s *Service) GetProfile(ctx context.Context, user *User) (*Profile, error) 
 // user. Only the authenticated caller's OWN profile can be updated
 // (self-ownership, AD-12). Non-active accounts are rejected with ErrForbidden
 // as defense-in-depth (the gateway already only resolves active sessions).
+//
+// Attributes semantics (review finding): an absent (nil) attributes field in
+// the input leaves the stored custom attributes UNCHANGED — the current value
+// is passed through so a name-only base-data save never wipes them. An
+// explicit empty map `{}` clears them. A present map replaces the set
+// wholesale (after key normalization, additive-union-free contract).
 func (s *Service) UpdateProfile(ctx context.Context, user *User, input UpdateProfileInput) (*Profile, error) {
 	if user == nil {
 		return nil, ErrInvalidCredentials
@@ -171,7 +283,18 @@ func (s *Service) UpdateProfile(ctx context.Context, user *User, input UpdatePro
 	lastName := strings.TrimSpace(input.LastName)
 	displayName := strings.TrimSpace(input.DisplayName)
 
-	updated, err := s.repo.UpdateUserProfile(ctx, user.ID, firstName, lastName, displayName)
+	// Normalize the attributes (key trimming was validated above); a nil
+	// (absent) field means "leave unchanged", so the current stored value is
+	// passed through to the repository.
+	attrs, err := validateAttributes(input.Attributes)
+	if err != nil {
+		return nil, err
+	}
+	if attrs == nil {
+		attrs = user.Attributes
+	}
+
+	updated, err := s.repo.UpdateUserProfile(ctx, user.ID, firstName, lastName, displayName, attrs)
 	if err != nil {
 		if errors.Is(err, ErrUserNotFound) {
 			return nil, ErrUserNotFound
@@ -306,7 +429,17 @@ func profileFromUser(u *User) *Profile {
 		LastName:     u.LastName,
 		DisplayName:  u.DisplayName,
 		PendingEmail: u.PendingEmail,
+		Attributes:   attributesOrEmpty(u.Attributes),
 	}
+}
+
+// attributesOrEmpty returns a non-nil attributes map, defaulting a nil map to
+// the empty object `{}` so reads always serialize as a JSON object.
+func attributesOrEmpty(attrs map[string]any) map[string]any {
+	if attrs == nil {
+		return map[string]any{}
+	}
+	return attrs
 }
 
 // resolveIsAdmin resolves whether the user is a member of the admin permission

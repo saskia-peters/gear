@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"log/slog"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -620,6 +621,284 @@ func TestServiceStageEmailChangeRejectsNonActiveUser(t *testing.T) {
 	}
 	if user.PendingEmail != "" {
 		t.Errorf("pending_email = %q, want unset", user.PendingEmail)
+	}
+	if len(repo.audit[user.ID]) != 0 {
+		t.Errorf("audit events = %v, want none", repo.audit[user.ID])
+	}
+}
+
+// attributesUser builds a repo with an active user carrying custom attributes.
+func attributesUser() (*mockRepo, *User) {
+	repo, user := profileUser()
+	user.Attributes = map[string]any{"note": "Interne Notiz", "internal_tags": []string{"beta"}}
+	return repo, user
+}
+
+func TestServiceGetProfileAttributesEmpty(t *testing.T) {
+	// PROFILE_READ_EMPTY (Story 1.9): a user with no attributes reads back as
+	// the empty JSON object `{}` — never a nil/missing key.
+	repo, user := profileUser()
+	user.Attributes = nil
+	svc, _ := newTestService(repo, &mockHasher{})
+
+	profile, err := svc.GetProfile(context.Background(), user)
+	if err != nil {
+		t.Fatalf("GetProfile failed: %v", err)
+	}
+	if profile.Attributes == nil {
+		t.Fatal("attributes must never be nil on read")
+	}
+	if len(profile.Attributes) != 0 {
+		t.Errorf("attributes = %v, want empty map", profile.Attributes)
+	}
+}
+
+func TestServiceGetProfileAttributesPresent(t *testing.T) {
+	// PROFILE_READ_WITH_ATTRS (Story 1.9): stored custom attributes are served
+	// through the profile read.
+	repo, user := attributesUser()
+	svc, _ := newTestService(repo, &mockHasher{})
+
+	profile, err := svc.GetProfile(context.Background(), user)
+	if err != nil {
+		t.Fatalf("GetProfile failed: %v", err)
+	}
+	if profile.Attributes == nil || profile.Attributes["note"] != "Interne Notiz" {
+		t.Errorf("attributes = %+v, want note=Interne Notiz", profile.Attributes)
+	}
+	if repo.getCalls != 0 {
+		t.Errorf("GetProfile must not hit the repository, got %d calls", repo.getCalls)
+	}
+}
+
+func TestServiceUpdateProfileSetsAttributes(t *testing.T) {
+	// PROFILE_UPDATE_ATTRS (Story 1.9): attributes in the input are persisted
+	// and returned in the updated profile; the profile.update audit still fires.
+	repo, user := attributesUser()
+	svc, _ := newTestService(repo, &mockHasher{})
+
+	profile, err := svc.UpdateProfile(context.Background(), user, UpdateProfileInput{
+		FirstName:   "Erika",
+		LastName:    "Musterfrau",
+		DisplayName: "Erika",
+		Attributes: map[string]any{
+			"note":     "Neue Notiz",
+			"favorite": "Rot",
+		},
+	})
+	if err != nil {
+		t.Fatalf("UpdateProfile failed: %v", err)
+	}
+	if profile.Attributes == nil || profile.Attributes["note"] != "Neue Notiz" || profile.Attributes["favorite"] != "Rot" {
+		t.Errorf("attributes = %+v, want {note, favorite}", profile.Attributes)
+	}
+	if user.Attributes == nil || user.Attributes["note"] != "Neue Notiz" {
+		t.Errorf("persisted attributes = %+v, want note=Neue Notiz", user.Attributes)
+	}
+	events := repo.audit[user.ID]
+	if len(events) != 1 || events[0] != AuditOperationProfileUpdate {
+		t.Errorf("audit events = %v, want [profile.update]", events)
+	}
+}
+
+func TestServiceUpdateProfileClearsAttributes(t *testing.T) {
+	// PROFILE_UPDATE_CLEAR (Story 1.9): an empty map REPLACES the stored set —
+	// no orphan keys survive (additive-union-free contract).
+	repo, user := attributesUser()
+	svc, _ := newTestService(repo, &mockHasher{})
+
+	profile, err := svc.UpdateProfile(context.Background(), user, UpdateProfileInput{
+		FirstName:   "Erika",
+		LastName:    "Musterfrau",
+		DisplayName: "Erika",
+		Attributes:  map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("UpdateProfile failed: %v", err)
+	}
+	if len(profile.Attributes) != 0 {
+		t.Errorf("attributes after clear = %v, want empty map", profile.Attributes)
+	}
+	if user.Attributes == nil || len(user.Attributes) != 0 {
+		t.Errorf("persisted attributes after clear = %+v, want empty map", user.Attributes)
+	}
+}
+
+func TestServiceUpdateProfileNilAttributesLeavesUnchanged(t *testing.T) {
+	// ATTR_ABSENT (Story 1.9, review finding): a nil (absent) attributes payload
+	// leaves the stored custom attributes UNCHANGED — a name-only base-data save
+	// must never wipe them. The current value is passed through to the store.
+	repo, user := attributesUser()
+	svc, _ := newTestService(repo, &mockHasher{})
+
+	profile, err := svc.UpdateProfile(context.Background(), user, UpdateProfileInput{
+		FirstName:   "Erika",
+		LastName:    "Musterfrau",
+		DisplayName: "Erika",
+	})
+	if err != nil {
+		t.Fatalf("UpdateProfile failed: %v", err)
+	}
+	if profile.Attributes == nil || profile.Attributes["note"] != "Interne Notiz" {
+		t.Errorf("attributes after nil save = %+v, want stored note=Interne Notiz preserved", profile.Attributes)
+	}
+	if user.Attributes == nil || user.Attributes["note"] != "Interne Notiz" {
+		t.Errorf("persisted attributes = %+v, want stored note=Interne Notiz preserved", user.Attributes)
+	}
+}
+
+func TestServiceUpdateProfilePreservesAttributesOnNameOnlySave(t *testing.T) {
+	// Round-trip preservation (Story 1.9, verification gap): a client that
+	// loads a profile WITH attributes and saves only base-data edits must keep
+	// the attributes — the service must not clear them. This is the core-level
+	// counterpart of the frontend round-trip test.
+	repo, user := attributesUser()
+	svc, _ := newTestService(repo, &mockHasher{})
+
+	profile, err := svc.UpdateProfile(context.Background(), user, UpdateProfileInput{
+		FirstName:   "Erika",
+		LastName:    "Musterfrau",
+		DisplayName: "Erika",
+	})
+	if err != nil {
+		t.Fatalf("UpdateProfile failed: %v", err)
+	}
+	if profile.Attributes == nil || profile.Attributes["note"] != "Interne Notiz" {
+		t.Errorf("attributes after name-only save = %+v, want preserved", profile.Attributes)
+	}
+	if profile.Attributes == nil || len(profile.Attributes["internal_tags"].([]string)) != 1 {
+		t.Errorf("internal_tags after name-only save = %+v, want preserved", profile.Attributes["internal_tags"])
+	}
+}
+
+func TestServiceUpdateProfileNormalizesAndTrimsKeys(t *testing.T) {
+	// ATTR_KEY_NORMALIZATION (Story 1.9, review finding): keys are trimmed
+	// before storage — a `" note "` key becomes `"note"`.
+	repo, user := attributesUser()
+	svc, _ := newTestService(repo, &mockHasher{})
+
+	profile, err := svc.UpdateProfile(context.Background(), user, UpdateProfileInput{
+		FirstName:   "Erika",
+		LastName:    "Musterfrau",
+		DisplayName: "Erika",
+		Attributes:  map[string]any{" note ": "Neue Notiz"},
+	})
+	if err != nil {
+		t.Fatalf("UpdateProfile failed: %v", err)
+	}
+	if profile.Attributes == nil || profile.Attributes["note"] != "Neue Notiz" {
+		t.Errorf("attributes = %+v, want trimmed key note=Neue Notiz", profile.Attributes)
+	}
+	if _, padded := profile.Attributes[" note "]; padded {
+		t.Errorf("attributes must not keep the padded key, got %+v", profile.Attributes)
+	}
+	if user.Attributes == nil || user.Attributes["note"] != "Neue Notiz" {
+		t.Errorf("persisted attributes = %+v, want trimmed key note=Neue Notiz", user.Attributes)
+	}
+}
+
+func TestServiceUpdateProfileRejectsBadAttributeKeys(t *testing.T) {
+	// ATTR_BAD_KEY (Story 1.9): an empty, whitespace-only or over-long key is
+	// rejected with a *AttributeError (unwrapping ErrInvalidAttributes) before
+	// any write; no audit row is written. The details identify the offending
+	// key and a machine-readable reason (review finding).
+	tests := []struct {
+		name       string
+		attributes map[string]any
+		wantReason string
+	}{
+		{name: "empty key", attributes: map[string]any{"": "wert"}, wantReason: "empty key"},
+		{name: "whitespace-only key", attributes: map[string]any{"   ": "wert"}, wantReason: "empty key"},
+		{name: "over-long key", attributes: map[string]any{strings.Repeat("k", MaxAttributeKeyRunes+1): "wert"}, wantReason: "key too long"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			repo, user := attributesUser()
+			svc, _ := newTestService(repo, &mockHasher{})
+
+			_, err := svc.UpdateProfile(context.Background(), user, UpdateProfileInput{
+				FirstName:   "Erika",
+				LastName:    "Musterfrau",
+				DisplayName: "Erika",
+				Attributes:  tt.attributes,
+			})
+			if !errors.Is(err, ErrInvalidAttributes) {
+				t.Fatalf("err = %v, want ErrInvalidAttributes", err)
+			}
+			var attrErr *AttributeError
+			if !errors.As(err, &attrErr) {
+				t.Fatalf("err = %v, want a *AttributeError with details", err)
+			}
+			if attrErr.Reason != tt.wantReason {
+				t.Errorf("reason = %q, want %q", attrErr.Reason, tt.wantReason)
+			}
+			if user.Attributes["note"] != "Interne Notiz" {
+				t.Errorf("attributes must be unchanged, got %+v", user.Attributes)
+			}
+			if len(repo.audit[user.ID]) != 0 {
+				t.Errorf("audit events = %v, want none", repo.audit[user.ID])
+			}
+		})
+	}
+}
+
+func TestServiceUpdateProfileRejectsUnserializableValue(t *testing.T) {
+	// ATTR_INVALID_JSON (Story 1.9): a value that cannot be JSON-serialized is
+	// rejected (e.g. a NaN float) — no write, no audit. The *AttributeError
+	// details identify the key and reason.
+	repo, user := attributesUser()
+	svc, _ := newTestService(repo, &mockHasher{})
+
+	_, err := svc.UpdateProfile(context.Background(), user, UpdateProfileInput{
+		FirstName:   "Erika",
+		LastName:    "Musterfrau",
+		DisplayName: "Erika",
+		Attributes:  map[string]any{"wert": math.NaN()},
+	})
+	if !errors.Is(err, ErrInvalidAttributes) {
+		t.Fatalf("err = %v, want ErrInvalidAttributes", err)
+	}
+	var attrErr *AttributeError
+	if !errors.As(err, &attrErr) {
+		t.Fatalf("err = %v, want a *AttributeError with details", err)
+	}
+	if attrErr.Key != "wert" || attrErr.Reason != "value not JSON-serializable" {
+		t.Errorf("details = (%q, %q), want (wert, value not JSON-serializable)", attrErr.Key, attrErr.Reason)
+	}
+	if user.Attributes["note"] != "Interne Notiz" {
+		t.Errorf("attributes must be unchanged, got %+v", user.Attributes)
+	}
+	if len(repo.audit[user.ID]) != 0 {
+		t.Errorf("audit events = %v, want none", repo.audit[user.ID])
+	}
+}
+
+func TestServiceUpdateProfileRejectsTooLargeAttributes(t *testing.T) {
+	// ATTR_TOO_LARGE (Story 1.9): a serialized map exceeding the 16 KB cap is
+	// rejected — no write, no audit. The *AttributeError carries a whole-map
+	// reason (no key).
+	repo, user := attributesUser()
+	svc, _ := newTestService(repo, &mockHasher{})
+
+	big := strings.Repeat("x", MaxAttributesSize)
+	_, err := svc.UpdateProfile(context.Background(), user, UpdateProfileInput{
+		FirstName:   "Erika",
+		LastName:    "Musterfrau",
+		DisplayName: "Erika",
+		Attributes:  map[string]any{"note": big},
+	})
+	if !errors.Is(err, ErrInvalidAttributes) {
+		t.Fatalf("err = %v, want ErrInvalidAttributes", err)
+	}
+	var attrErr *AttributeError
+	if !errors.As(err, &attrErr) {
+		t.Fatalf("err = %v, want a *AttributeError with details", err)
+	}
+	if attrErr.Key != "" || attrErr.Reason != "attributes too large" {
+		t.Errorf("details = (%q, %q), want (, attributes too large)", attrErr.Key, attrErr.Reason)
+	}
+	if user.Attributes["note"] != "Interne Notiz" {
+		t.Errorf("attributes must be unchanged, got %+v", user.Attributes)
 	}
 	if len(repo.audit[user.ID]) != 0 {
 		t.Errorf("audit events = %v, want none", repo.audit[user.ID])

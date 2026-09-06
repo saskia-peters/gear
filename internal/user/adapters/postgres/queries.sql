@@ -170,13 +170,20 @@ WHERE id = $1
 RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password;
 
 -- name: UpdateUserProfile :one
--- Persist the user's editable base data (first/last/display name, Story 2.1):
--- changes take effect immediately for the authenticated user. Only the caller-
--- supplied values are written; email and state are never touched here.
+-- Persist the user's editable base data (first/last/display name, Story 2.1) and
+-- the full custom-attribute set (Story 1.9): the supplied attributes REPLACE the
+-- stored JSONB map wholesale (additive-union-free contract). The repository
+-- always sends a concrete value (marshalled map or '{}'); the COALESCE($5,
+-- '{}'::jsonb) fallback is a defensive safety net guaranteeing the column can
+-- never be set to NULL, even if a future caller passes a nil param. Absent-vs-
+-- clear semantics live in the core (nil = leave unchanged, '{}' = clear), not
+-- here. Changes take effect immediately for the authenticated user. Only the
+-- caller-supplied values are written; email and state are never touched here.
 UPDATE users
 SET first_name   = $2,
     last_name    = $3,
     display_name = $4,
+    attributes   = COALESCE($5, '{}'::jsonb),
     updated_at   = now()
 WHERE id = $1
 RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password;

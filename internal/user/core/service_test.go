@@ -243,15 +243,16 @@ func (m *mockRepo) InsertAuditEventAnonymous(_ context.Context, operation string
 }
 
 // UpdateUserProfile persists the user's editable base data (first/last/display
-// name, Story 2.1) and returns the updated user. An unknown user ID maps to
-// ErrUserNotFound.
-func (m *mockRepo) UpdateUserProfile(_ context.Context, userID, firstName, lastName, displayName string) (*User, error) {
+// name, Story 2.1) and the custom-attribute set (Story 1.9) and returns the
+// updated user. An unknown user ID maps to ErrUserNotFound.
+func (m *mockRepo) UpdateUserProfile(_ context.Context, userID, firstName, lastName, displayName string, attributes map[string]any) (*User, error) {
 	m.updateCalls++
 	for _, u := range m.users {
 		if u.ID == userID {
 			u.FirstName = firstName
 			u.LastName = lastName
 			u.DisplayName = displayName
+			u.Attributes = attributes
 			if m.mismatchProfileUser {
 				return &User{ID: "other-user", Email: "other@example.com"}, nil
 			}

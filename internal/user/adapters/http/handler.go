@@ -547,6 +547,21 @@ func (h *Handler) UpdateProfile(w http.ResponseWriter, r *http.Request) {
 			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", core.MsgMissingFields)
 		case errors.Is(err, core.ErrProfileNameTooLong):
 			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", core.MsgProfileNameTooLong)
+		case errors.Is(err, core.ErrInvalidAttributes):
+			// ATTR_NOT_OBJECT / ATTR_BAD_KEY / ATTR_TOO_LARGE /
+			// ATTR_INVALID_JSON (Story 1.9): invalid custom attributes map to a
+			// uniform 400 invalid_request. The envelope carries machine-readable
+			// `details` (the offending key + reason) so the client can act on
+			// the specific failure.
+			details := map[string]any{"reason": "invalid attributes"}
+			var attrErr *core.AttributeError
+			if errors.As(err, &attrErr) {
+				details = map[string]any{"reason": attrErr.Reason}
+				if attrErr.Key != "" {
+					details["key"] = attrErr.Key
+				}
+			}
+			httpapi.WriteErrorDetail(w, http.StatusBadRequest, "invalid_request", core.MsgInvalidAttributes, details)
 		case errors.Is(err, core.ErrUserNotFound):
 			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", "Das Konto wurde nicht gefunden.")
 		case errors.Is(err, core.ErrForbidden):

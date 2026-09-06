@@ -18,7 +18,11 @@ function renderMfaPage() {
   )
 }
 
-// stubFetchSequence returns a fetch mock that answers calls in order.
+// stubFetchSequence returns a fetch mock that answers calls in order. Under
+// React StrictMode a mount triggers the fetch effect twice (mount → abort →
+// remount), so the mock also carries a safe default resolved response for any
+// call beyond the queued ones — otherwise an exhausted mockResolvedValueOnce
+// queue returns `undefined`, and MfaPage's `fetch(...).then(...)` throws.
 function stubFetchSequence(responses: Array<{ ok: boolean; status?: number; body: unknown }>) {
   const mock = vi.fn()
   responses.forEach((r) =>
@@ -28,6 +32,7 @@ function stubFetchSequence(responses: Array<{ ok: boolean; status?: number; body
       json: async () => r.body,
     }),
   )
+  mock.mockResolvedValue({ ok: true, status: 200, json: async () => ({}) })
   vi.stubGlobal('fetch', mock)
   return mock
 }

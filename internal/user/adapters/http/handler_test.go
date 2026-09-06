@@ -125,14 +125,14 @@ func (m *mockService) GetProfile(ctx context.Context, user *core.User) (*core.Pr
 	if m.getProfileFunc != nil {
 		return m.getProfileFunc(ctx, user)
 	}
-	return &core.Profile{ID: "u-1", Email: "max@example.com", FirstName: "Max", LastName: "Mustermann", DisplayName: "Max Mustermann"}, nil
+	return &core.Profile{ID: "u-1", Email: "max@example.com", FirstName: "Max", LastName: "Mustermann", DisplayName: "Max Mustermann", Attributes: map[string]any{}}, nil
 }
 
 func (m *mockService) UpdateProfile(ctx context.Context, user *core.User, input core.UpdateProfileInput) (*core.Profile, error) {
 	if m.updateProfileFunc != nil {
 		return m.updateProfileFunc(ctx, user, input)
 	}
-	return &core.Profile{ID: "u-1", Email: "max@example.com", FirstName: input.FirstName, LastName: input.LastName, DisplayName: input.DisplayName}, nil
+	return &core.Profile{ID: "u-1", Email: "max@example.com", FirstName: input.FirstName, LastName: input.LastName, DisplayName: input.DisplayName, Attributes: input.Attributes}, nil
 }
 
 func (m *mockService) StageEmailChange(ctx context.Context, user *core.User, newEmail string) (*core.StageEmailResult, error) {
@@ -1516,10 +1516,11 @@ func (r *changePasswordRepo) UpdateUserPassword(_ context.Context, _ string, pas
 	return r.user, nil
 }
 
-func (r *changePasswordRepo) UpdateUserProfile(_ context.Context, userID, firstName, lastName, displayName string) (*core.User, error) {
+func (r *changePasswordRepo) UpdateUserProfile(_ context.Context, userID, firstName, lastName, displayName string, attributes map[string]any) (*core.User, error) {
 	r.user.FirstName = firstName
 	r.user.LastName = lastName
 	r.user.DisplayName = displayName
+	r.user.Attributes = attributes
 	if r.freshUserOnProfile {
 		clone := *r.user
 		return &clone, nil
@@ -2185,6 +2186,32 @@ func TestHandlerProfileRealSessionManagerChain(t *testing.T) {
 		t.Errorf("GET /profile after update = %+v, want refreshed names", profile)
 	}
 
+	// ATTRS via the real chain (Story 1.9): POST attributes, then the SAME
+	// token resolves them on GET /profile (session snapshot refreshed with the
+	// fresh attributes map).
+	rec = do(http.MethodPost, "/profile", map[string]any{
+		"first_name":   "Erika",
+		"last_name":    "Musterfrau",
+		"display_name": "Erika",
+		"attributes":   map[string]any{"note": "Interne Notiz"},
+	})
+	if rec.Code != http.StatusOK {
+		t.Fatalf("POST /profile (attrs): status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if user.Attributes == nil || user.Attributes["note"] != "Interne Notiz" {
+		t.Errorf("persisted attributes = %+v, want note=Interne Notiz", user.Attributes)
+	}
+	rec = do(http.MethodGet, "/profile", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET /profile after attrs: status = %d, want 200", rec.Code)
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &profile); err != nil {
+		t.Fatal(err)
+	}
+	if profile.Attributes == nil || profile.Attributes["note"] != "Interne Notiz" {
+		t.Errorf("GET /profile after attrs = %+v, want note=Interne Notiz", profile.Attributes)
+	}
+
 	// EMAIL_STAGE via the real chain: 200 + staged pending_email, current email
 	// untouched.
 	rec = do(http.MethodPost, "/profile/email", map[string]string{"email": "neu@example.com"})
@@ -2236,15 +2263,17 @@ func TestHandlerProfileRealSessionManagerChain(t *testing.T) {
 		t.Errorf("already-pending error = %+v, want invalid_request %q", env.Error, core.MsgEmailAlreadyPending)
 	}
 
-	// Audit rows written end to end (NFR-O1/NFR-O2): profile.update + exactly
-	// ONE email.change.request (the re-stage no-op wrote none).
-	want := []string{core.AuditOperationProfileUpdate, core.AuditOperationEmailChangeRequest}
-	if len(repo.audit) != len(want) {
-		t.Fatalf("audit = %v, want %v", repo.audit, want)
+	// Audit rows written end to end (NFR-O1/NFR-O2): profile.update +
+	// email.change.request must BOTH be present, in any order and any count
+	// (set-based assertion, review finding: future audit writes must not break
+	// this test). The re-stage no-op writes NO additional email.change.request.
+	present := map[string]bool{}
+	for _, op := range repo.audit {
+		present[op] = true
 	}
-	for i, op := range want {
-		if repo.audit[i] != op {
-			t.Errorf("audit[%d] = %q, want %q", i, repo.audit[i], op)
+	for _, op := range []string{core.AuditOperationProfileUpdate, core.AuditOperationEmailChangeRequest} {
+		if !present[op] {
+			t.Errorf("audit missing %q, got %v", op, repo.audit)
 		}
 	}
 }
@@ -2590,5 +2619,234 @@ func TestHandlerGetProfileIncludesIsAdmin(t *testing.T) {
 	}
 	if wire["is_admin"] != true {
 		t.Errorf("is_admin = %v, want true", wire["is_admin"])
+	}
+}
+
+func TestHandlerGetProfileReturnsAttributes(t *testing.T) {
+	// Story 1.9: GET /profile serves the custom attributes as valid JSON.
+	svc := &mockService{
+		getProfileFunc: func(ctx context.Context, user *core.User) (*core.Profile, error) {
+			return &core.Profile{
+				ID: "u-1", Email: "max@example.com", FirstName: "Max", LastName: "Mustermann",
+				DisplayName: "Max Mustermann",
+				Attributes:  map[string]any{"note": "Interne Notiz", "internal_tags": []string{"beta"}},
+			}, nil
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	req := authedProfileRequest(http.MethodGet, "/profile", nil)
+	rec := httptest.NewRecorder()
+	h.GetProfile(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200", rec.Code)
+	}
+	var wire map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &wire); err != nil {
+		t.Fatal(err)
+	}
+	attrs, ok := wire["attributes"].(map[string]any)
+	if !ok {
+		t.Fatalf("attributes = %T, want an object", wire["attributes"])
+	}
+	if attrs["note"] != "Interne Notiz" {
+		t.Errorf("attributes.note = %v, want Interne Notiz", attrs["note"])
+	}
+}
+
+func TestHandlerUpdateProfileWithAttributes(t *testing.T) {
+	// Story 1.9: POST /profile forwards the attributes payload and returns the
+	// updated profile including them.
+	var gotInput core.UpdateProfileInput
+	svc := &mockService{
+		updateProfileFunc: func(ctx context.Context, user *core.User, input core.UpdateProfileInput) (*core.Profile, error) {
+			gotInput = input
+			return &core.Profile{ID: "u-1", Email: "max@example.com", FirstName: input.FirstName, LastName: input.LastName, DisplayName: input.DisplayName, Attributes: input.Attributes}, nil
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	body, _ := json.Marshal(map[string]any{
+		"first_name":   "Erika",
+		"last_name":    "Musterfrau",
+		"display_name": "Erika",
+		"attributes":   map[string]any{"note": "Interne Notiz"},
+	})
+	req := authedProfileRequest(http.MethodPost, "/profile", body)
+	rec := httptest.NewRecorder()
+	h.UpdateProfile(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if gotInput.Attributes == nil || gotInput.Attributes["note"] != "Interne Notiz" {
+		t.Errorf("input attributes = %+v, want note=Interne Notiz", gotInput.Attributes)
+	}
+	var res core.Profile
+	if err := json.Unmarshal(rec.Body.Bytes(), &res); err != nil {
+		t.Fatal(err)
+	}
+	if res.Attributes == nil || res.Attributes["note"] != "Interne Notiz" {
+		t.Errorf("response attributes = %+v, want note=Interne Notiz", res.Attributes)
+	}
+}
+
+func TestHandlerUpdateProfileClearsAttributes(t *testing.T) {
+	// Story 1.9: an explicit empty object clears the stored attributes.
+	var gotInput core.UpdateProfileInput
+	svc := &mockService{
+		updateProfileFunc: func(ctx context.Context, user *core.User, input core.UpdateProfileInput) (*core.Profile, error) {
+			gotInput = input
+			return &core.Profile{ID: "u-1", Email: "max@example.com", FirstName: input.FirstName, LastName: input.LastName, DisplayName: input.DisplayName, Attributes: input.Attributes}, nil
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	body, _ := json.Marshal(map[string]any{
+		"first_name":   "Erika",
+		"last_name":    "Musterfrau",
+		"display_name": "Erika",
+		"attributes":   map[string]any{},
+	})
+	req := authedProfileRequest(http.MethodPost, "/profile", body)
+	rec := httptest.NewRecorder()
+	h.UpdateProfile(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if gotInput.Attributes == nil || len(gotInput.Attributes) != 0 {
+		t.Errorf("input attributes = %+v, want empty map", gotInput.Attributes)
+	}
+}
+
+func TestHandlerUpdateProfileInvalidAttributesReturns400(t *testing.T) {
+	// ATTR_BAD_KEY / ATTR_TOO_LARGE / ATTR_INVALID_JSON (Story 1.9): the core
+	// rejects the payload with a *AttributeError (unwrapping ErrInvalidAttributes);
+	// the handler maps it to a uniform 400 invalid_request and carries the
+	// machine-readable `details` (key + reason) in the envelope (review finding).
+	tests := []struct {
+		name         string
+		serviceErr   error
+		wantDetails  map[string]any
+	}{
+		{
+			name:       "bad key details",
+			serviceErr: &core.AttributeError{Key: "   ", Reason: "empty key"},
+			wantDetails: map[string]any{"key": "   ", "reason": "empty key"},
+		},
+		{
+			name:       "empty key omitted",
+			serviceErr: &core.AttributeError{Key: "", Reason: "empty key"},
+			wantDetails: map[string]any{"reason": "empty key"},
+		},
+		{
+			name:       "oversized details",
+			serviceErr: &core.AttributeError{Reason: "attributes too large"},
+			wantDetails: map[string]any{"reason": "attributes too large"},
+		},
+		{
+			name:       "bare sentinel fallback",
+			serviceErr: core.ErrInvalidAttributes,
+			wantDetails: map[string]any{"reason": "invalid attributes"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := &mockService{
+				updateProfileFunc: func(ctx context.Context, user *core.User, input core.UpdateProfileInput) (*core.Profile, error) {
+					return nil, tt.serviceErr
+				},
+			}
+			h := newTestHandler(svc, &stubValidator{})
+
+			body, _ := json.Marshal(map[string]any{
+				"first_name":   "Erika",
+				"last_name":    "Musterfrau",
+				"display_name": "Erika",
+				"attributes":   map[string]any{"": "wert"},
+			})
+			req := authedProfileRequest(http.MethodPost, "/profile", body)
+			rec := httptest.NewRecorder()
+			h.UpdateProfile(rec, req)
+
+			if rec.Code != http.StatusBadRequest {
+				t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+			}
+			var env httpapi.ErrorEnvelope
+			if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+				t.Fatal(err)
+			}
+			if env.Error.Code != "invalid_request" {
+				t.Errorf("code = %q, want invalid_request", env.Error.Code)
+			}
+			if env.Error.Message != core.MsgInvalidAttributes {
+				t.Errorf("message = %q, want %q", env.Error.Message, core.MsgInvalidAttributes)
+			}
+			details, ok := env.Error.Details.(map[string]any)
+			if !ok {
+				t.Fatalf("details = %T, want a details object", env.Error.Details)
+			}
+			for k, wantV := range tt.wantDetails {
+				if gotV, ok := details[k]; !ok || gotV != wantV {
+					t.Errorf("details[%q] = %v, want %v (details=%v)", k, gotV, wantV, details)
+				}
+			}
+		})
+	}
+}
+
+func TestHandlerUpdateProfileNameOnlySendsNilAttributes(t *testing.T) {
+	// ATTR_ABSENT (Story 1.9, review finding): a name-only save (no attributes
+	// field) must reach the service with a nil Attributes, so the core applies
+	// "leave unchanged" instead of clearing stored custom attributes.
+	var gotInput core.UpdateProfileInput
+	svc := &mockService{
+		updateProfileFunc: func(ctx context.Context, user *core.User, input core.UpdateProfileInput) (*core.Profile, error) {
+			gotInput = input
+			return &core.Profile{ID: "u-1", Email: "max@example.com", FirstName: input.FirstName, LastName: input.LastName, DisplayName: input.DisplayName}, nil
+		},
+	}
+	h := newTestHandler(svc, &stubValidator{})
+
+	body, _ := json.Marshal(map[string]string{
+		"first_name":   "Erika",
+		"last_name":    "Musterfrau",
+		"display_name": "Erika",
+	})
+	req := authedProfileRequest(http.MethodPost, "/profile", body)
+	rec := httptest.NewRecorder()
+	h.UpdateProfile(rec, req)
+
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if gotInput.Attributes != nil {
+		t.Errorf("input attributes = %+v, want nil (leave-unchanged semantics)", gotInput.Attributes)
+	}
+}
+
+func TestHandlerUpdateProfileNonObjectAttributesReturns400(t *testing.T) {
+	// ATTR_NOT_OBJECT (Story 1.9): an array/scalar attributes payload cannot
+	// decode into the typed map field, so the HTTP boundary rejects the body
+	// with a uniform 400 invalid_request — no change is made.
+	svc := &mockService{}
+	h := newTestHandler(svc, &stubValidator{})
+
+	body := []byte(`{"first_name":"Erika","last_name":"Musterfrau","display_name":"Erika","attributes":[1,2]}`)
+	req := authedProfileRequest(http.MethodPost, "/profile", body)
+	rec := httptest.NewRecorder()
+	h.UpdateProfile(rec, req)
+
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatal(err)
+	}
+	if env.Error.Code != "invalid_request" {
+		t.Errorf("code = %q, want invalid_request", env.Error.Code)
 	}
 }
