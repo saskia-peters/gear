@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-04-2026 19:40
-last_updated: 09-05-2026
+last_updated: 09-06-2026 12:00
 project: gear
 project_key: NOKEY
 tracking_system: file-system
@@ -42,14 +42,14 @@ development_status:
   1-3-self-registration-with-admin-pending-approval: done
   1-4-email-password-authentication: done
   1-5-progressive-login-lockout: done
-  1-6-optional-totp-multi-factor-authentication: review
+  1-6-optional-totp-multi-factor-authentication: done
   1-7-change-own-password: done
   profile-page-edit-base-data: done
   1-8-self-service-password-reset-forgot-password: done
   1-9-flexible-user-attributes: done
   1-10-dual-admin-credential-recovery: done
-  1-11-auth-ux-foundation: review
-  epic-1-retrospective: optional
+  1-11-auth-ux-foundation: done
+  epic-1-retrospective: done
 
   epic-2: backlog
   2-1-admin-module-access-isolation: backlog
@@ -91,3 +91,25 @@ development_status:
   6-2-status-report-export-pdf: backlog
   6-3-inspection-history-per-tool: backlog
   epic-6-retrospective: optional
+action_items:
+  - id: "epic-1-retro-item-1-extract-a-shared-authheaders-helper-into"
+    epic: 1
+    action: "Extract a shared authHeaders helper into web/src/auth and import it across
+      the auth pages instead of each page defining its own."
+    owner: "dev loop"
+    status: open
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-1-retro-2026-09-06.md"
+  - id: "epic-1-retro-item-2-append-resolution-notes-to-deferred-work"
+    epic: 1
+    action: "Append resolution notes to deferred-work.md for the Vite /api dev proxy
+      (Story 1.3) and the web lint/test gate in just test/just lint (Story 1.2/1.3)."
+    owner: "human"
+    status: open
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-1-retro-2026-09-06.md"
+  - id: "epic-1-retro-item-3-re-route-the-deferred-work-items-redirec"
+    epic: 1
+    action: "Re-route the deferred-work items redirect-away-from-login and set_updated_at
+      trigger to a future auth story and decide whether to implement them."
+    owner: "human"
+    status: open
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-1-retro-2026-09-06.md"
