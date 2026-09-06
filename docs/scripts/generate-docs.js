@@ -86,13 +86,20 @@ function parseEpics() {
       const key = `${a}-${b}-${slugify(storyTitle)}`;
       // Intent = the "As a / I want / So that" lines up to the first bold heading.
       const intent = (body.match(/As a .*?So that .*?(?=\n\*\*|\n###|\n##)/s) || [])[0]?.trim() || '';
-      // Acceptance criteria bullets.
-      const accept = (body.match(/\*\*Acceptance Criteria:\*\*\n([\s\S]*?)(?=\n\*\*|\n###|\n##)/) || [])[1]
-        ?.split('\n')
+      // Acceptance criteria = the **Given/When/Then/And** blocks from
+      // "Acceptance Criteria:" up to the next story heading. Capture the whole
+      // section (so **And** lines are not truncated), then keep only the
+      // Given/When/Then/And lines.
+      const acceptSection =
+        (body.match(/\*\*Acceptance Criteria:\*\*\n([\s\S]*?)(?=\n### |\n## |\n---)/) || [])[1] ||
+        (body.match(/\*\*Acceptance Criteria:\*\*\n([\s\S]*)$/) || [])[1] ||
+        '';
+      const accept = acceptSection
+        .split('\n')
         .map((l) => l.trim())
-        .filter(Boolean)
-        .map((l) => l.replace(/^\*\*?/, '- ').replace(/^\*\*/, '- '))
-        .join('\n') || '';
+        .filter((l) => /^\*\*(Given|When|Then|And)\*\*/.test(l))
+        .map((l) => l.replace(/^\*\*(Given|When|Then|And)\*\*/, '$1'))
+        .join('\n');
       stories.push({
         num: `${storyId}`,
         key,
@@ -222,6 +229,10 @@ function writeCategory() {
   );
 }
 
+function progressBar(pct) {
+  return `<progress className="gear-progress" value="${pct}" max="100">${pct}%</progress> <span className="gear-progress-label">${pct}%</span>`;
+}
+
 function writeStatusPage(epics, status) {
   const total = epics.reduce((n, e) => n + e.stories.length, 0);
   const done = epics.reduce(
@@ -233,7 +244,7 @@ function writeStatusPage(epics, status) {
     .map((e) => {
       const d = e.stories.filter((s) => status[s.key] === 'done').length;
       const epct = e.stories.length ? Math.round((d / e.stories.length) * 100) : 0;
-      return `| [Epic ${e.num}](/docs/epics/epic-${e.num}) | ${e.title} | ${d}/${e.stories.length} | ${epct}% |`;
+      return `| [Epic ${e.num}](/docs/epics/epic-${e.num}) | ${e.title} | ${d}/${e.stories.length} | ${progressBar(epct)} |`;
     })
     .join('\n');
   const md = `---
@@ -244,7 +255,13 @@ sidebar_position: 1
 
 > Automatisch aus \`sprint-status.yaml\` beim nächsten Build berechnet.
 
-**Gesamtfortschritt:** ${done}/${total} Geschichten erledigt — **${pct}%**
+## Gesamtfortschritt
+
+${done}/${total} Geschichten erledigt
+
+${progressBar(pct)}
+
+## Nach Epic
 
 | Epic | Titel | Erledigt | Fortschritt |
 | --- | --- | --- | --- |

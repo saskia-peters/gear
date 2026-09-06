@@ -250,3 +250,38 @@ html[data-theme='dark'] .table-of-contents__link:hover {
   color: var(--ifm-color-emphasis-700);
   text-align: center;
 }
+
+/* ---------------------------------------------------------------------------
+   Implementation status — progress bars.
+--------------------------------------------------------------------------- */
+.gear-progress {
+  display: inline-block;
+  vertical-align: middle;
+  width: min(100%, 320px);
+  height: 12px;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.gear-progress::-webkit-progress-bar {
+  background: var(--ifm-color-emphasis-200);
+  border-radius: 6px;
+}
+
+.gear-progress::-webkit-progress-value {
+  background: linear-gradient(90deg, var(--gear-blue), #2e9e4f);
+  border-radius: 6px;
+}
+
+.gear-progress::-moz-progress-bar {
+  background: linear-gradient(90deg, var(--gear-blue), #2e9e4f);
+  border-radius: 6px;
+}
+
+.gear-progress-label {
+  display: inline-block;
+  vertical-align: middle;
+  margin-left: 0.6rem;
+  font-weight: 600;
+  min-width: 2.6rem;
+}
