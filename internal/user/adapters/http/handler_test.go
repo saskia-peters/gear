@@ -57,6 +57,11 @@ type mockService struct {
 	assignUserGroupFunc      func(ctx context.Context, actor *core.User, groupID string, userIDs []string) (*core.UserGroup, error)
 	listUserGroupMembersFunc func(ctx context.Context, actor *core.User, groupID string) ([]string, error)
 	deleteUserGroupFunc      func(ctx context.Context, actor *core.User, groupID string) error
+	listQualificationsFunc   func(ctx context.Context, actor *core.User) (*core.QualificationListResult, error)
+	createQualificationFunc  func(ctx context.Context, actor *core.User, input core.CreateQualificationInput) (*core.QualificationWriteResult, error)
+	updateQualificationFunc  func(ctx context.Context, actor *core.User, id string, input core.UpdateQualificationInput) (*core.QualificationWriteResult, error)
+	listQualificationAssigneesFunc func(ctx context.Context, actor *core.User, id string) ([]*core.QualificationAssignee, error)
+	assignQualificationUsersFunc   func(ctx context.Context, actor *core.User, id string, userIDs []string) (*core.QualificationAssignResult, error)
 	revokeOtherCalls     *int
 	revokeAllCalls       *int
 }
@@ -331,6 +336,41 @@ func (m *mockService) DeleteUserGroup(ctx context.Context, actor *core.User, gro
 		return m.deleteUserGroupFunc(ctx, actor, groupID)
 	}
 	return nil
+}
+
+func (m *mockService) ListQualifications(ctx context.Context, actor *core.User) (*core.QualificationListResult, error) {
+	if m.listQualificationsFunc != nil {
+		return m.listQualificationsFunc(ctx, actor)
+	}
+	return &core.QualificationListResult{Qualifications: []*core.QualificationWithStatus{}, Users: []*core.QualificationRosterUser{}}, nil
+}
+
+func (m *mockService) CreateQualification(ctx context.Context, actor *core.User, input core.CreateQualificationInput) (*core.QualificationWriteResult, error) {
+	if m.createQualificationFunc != nil {
+		return m.createQualificationFunc(ctx, actor, input)
+	}
+	return &core.QualificationWriteResult{Message: core.MsgQualificationCreated, Qualification: &core.QualificationWithStatus{ID: "q-1", Name: input.Name, Description: input.Description, ExpiryKind: input.ExpiryKind, ExpiresAt: input.ExpiresAt}}, nil
+}
+
+func (m *mockService) UpdateQualification(ctx context.Context, actor *core.User, id string, input core.UpdateQualificationInput) (*core.QualificationWriteResult, error) {
+	if m.updateQualificationFunc != nil {
+		return m.updateQualificationFunc(ctx, actor, id, input)
+	}
+	return &core.QualificationWriteResult{Message: core.MsgQualificationUpdated, Qualification: &core.QualificationWithStatus{ID: id, Name: input.Name, Description: input.Description, ExpiryKind: input.ExpiryKind, ExpiresAt: input.ExpiresAt}}, nil
+}
+
+func (m *mockService) ListQualificationAssignees(ctx context.Context, actor *core.User, id string) ([]*core.QualificationAssignee, error) {
+	if m.listQualificationAssigneesFunc != nil {
+		return m.listQualificationAssigneesFunc(ctx, actor, id)
+	}
+	return []*core.QualificationAssignee{}, nil
+}
+
+func (m *mockService) AssignQualificationUsers(ctx context.Context, actor *core.User, id string, userIDs []string) (*core.QualificationAssignResult, error) {
+	if m.assignQualificationUsersFunc != nil {
+		return m.assignQualificationUsersFunc(ctx, actor, id, userIDs)
+	}
+	return &core.QualificationAssignResult{Message: core.MsgQualificationAssigneesUpdated, Assignees: []*core.QualificationAssignee{}}, nil
 }
 
 // stubValidator always authenticates the caller as an active user. Used to
@@ -1808,6 +1848,21 @@ func (r *changePasswordRepo) AssignUserGroupMembers(_ context.Context, _ string,
 }
 func (r *changePasswordRepo) ListUserGroupMembers(_ context.Context, _ string) ([]string, error) { return nil, nil }
 func (r *changePasswordRepo) DeleteUserGroup(_ context.Context, _ string) error                { return nil }
+func (r *changePasswordRepo) ListQualificationVocabulary(_ context.Context) ([]*core.Qualification, error) {
+	return nil, nil
+}
+func (r *changePasswordRepo) CreateQualification(_ context.Context, _, _, _ string, _ *time.Time) (*core.Qualification, error) {
+	return nil, nil
+}
+func (r *changePasswordRepo) UpdateQualification(_ context.Context, _, _, _, _ string, _ *time.Time) (*core.Qualification, error) {
+	return nil, nil
+}
+func (r *changePasswordRepo) ListQualificationAssignees(_ context.Context, _ string) ([]*core.QualificationAssignee, error) {
+	return nil, nil
+}
+func (r *changePasswordRepo) ReplaceQualificationAssignees(_ context.Context, _ string, _ []string) ([]*core.QualificationAssignee, error) {
+	return nil, nil
+}
 
 func (r *changePasswordRepo) InsertAuditEvent(_ context.Context, _ string, operation, _, _ string) error {
 	r.audit = append(r.audit, operation)

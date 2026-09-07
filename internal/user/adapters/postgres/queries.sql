@@ -876,3 +876,83 @@ ON CONFLICT DO NOTHING;
 -- (FR-22/AD-2) because qualification resolution is live per request.
 DELETE FROM user_qualifications
 WHERE user_id = $1 AND qualification_id = $2;
+
+-- ============================================================================
+-- Qualification Management (Story 2.7, AD-6/FR-19/FR-22/AD-7)
+-- ============================================================================
+
+-- name: CreateQualification :one
+-- Create a qualification vocabulary row (Story 2.7, AD-7/FR-22). The name is
+-- unique case-insensitively (the repository pre-checks QualificationNameExists
+-- and the schema UNIQUE constraint is the belt-and-suspenders backstop).
+-- `unlimited` qualifications store a NULL expires_at; `fixed` carry one.
+INSERT INTO qualifications (name, description, expiry_kind, expires_at)
+VALUES ($1, $2, $3, $4)
+RETURNING id, name, description, expiry_kind, expires_at;
+
+-- name: UpdateQualification :one
+-- Replace a qualification's name/description/expiry model atomically (Story
+-- 2.7). Editing the expiry model never rewrites existing assignments — each
+-- assignment inherits the qualification's current expiry model on read (status
+-- derives from expires_at, not a per-assignment copy). A zero-row update
+-- (unknown id) maps to the uniform not-found in the repository.
+UPDATE qualifications
+SET name = $2, description = $3, expiry_kind = $4, expires_at = $5, updated_at = now()
+WHERE id = $1
+RETURNING id, name, description, expiry_kind, expires_at;
+
+-- name: QualificationNameExists :one
+-- Case-insensitive duplicate-name guard for a qualification (Story 2.7): the
+-- schema's UNIQUE constraint is exact-match only, so this closes the
+-- "erste hilfe" vs "Erste Hilfe" duplicate window inside the create path.
+SELECT EXISTS (
+    SELECT 1 FROM qualifications
+    WHERE lower(name) = lower($1)
+);
+
+-- name: QualificationNameExistsExcept :one
+-- Case-insensitive duplicate-name guard for UPDATE (Story 2.7): like
+-- QualificationNameExists but EXCLUDING the target qualification itself, so
+-- renaming a qualification to its OWN name (or a case variant) stays legal
+-- while any other holder of the name maps to the uniform 409 conflict.
+SELECT EXISTS (
+    SELECT 1 FROM qualifications
+    WHERE lower(name) = lower($1) AND id <> $2
+);
+
+-- name: QualificationExists :one
+-- Existence check for a qualification by id (Story 2.7). Run FIRST inside
+-- update/assign so an unknown id maps to the uniform 404 before the
+-- duplicate-name / assignee work — an update of a nonexistent qualification
+-- must never answer 409 "name taken".
+SELECT EXISTS (
+    SELECT 1 FROM qualifications
+    WHERE id = $1
+);
+
+-- name: ListQualificationAssignees :many
+-- The users currently assigned a qualification (Story 2.7, AD-7/FR-22): the
+-- assignee id plus the display name for the assignment editor's checkbox
+-- list, ordered by name. No secret material is selected.
+SELECT u.id, u.display_name
+FROM user_qualifications uq
+JOIN users u ON u.id = uq.user_id
+WHERE uq.qualification_id = $1
+ORDER BY u.last_name, u.first_name, u.display_name;
+
+-- name: DeleteQualificationAssignees :exec
+-- Remove EVERY assignment row of a qualification (Story 2.7). Used by the
+-- assignee replacement BEFORE InsertQualificationAssignees, both in ONE
+-- transaction (delete-then-insert, separate statements — Story 2.5 lesson).
+DELETE FROM user_qualifications
+WHERE qualification_id = $1;
+
+-- name: InsertQualificationAssignees :exec
+-- Bulk insert the assignment rows of a qualification (Story 2.7). The input is
+-- resolved user ids (already validated to exist). An empty set removes every
+-- assignee (revoking eligibility immediately, AD-7/FR-22).
+INSERT INTO user_qualifications (qualification_id, user_id)
+SELECT $1, u.id
+FROM users u
+WHERE u.id = ANY($2::uuid[])
+ON CONFLICT DO NOTHING;

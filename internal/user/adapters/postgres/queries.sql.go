@@ -455,6 +455,53 @@ func (q *Queries) CreatePermissionGroup(ctx context.Context, arg CreatePermissio
 	return i, err
 }
 
+const createQualification = `-- name: CreateQualification :one
+
+INSERT INTO qualifications (name, description, expiry_kind, expires_at)
+VALUES ($1, $2, $3, $4)
+RETURNING id, name, description, expiry_kind, expires_at
+`
+
+type CreateQualificationParams struct {
+	Name        string             `json:"name"`
+	Description string             `json:"description"`
+	ExpiryKind  string             `json:"expiry_kind"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+}
+
+type CreateQualificationRow struct {
+	ID          pgtype.UUID        `json:"id"`
+	Name        string             `json:"name"`
+	Description string             `json:"description"`
+	ExpiryKind  string             `json:"expiry_kind"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+}
+
+// ============================================================================
+// Qualification Management (Story 2.7, AD-6/FR-19/FR-22/AD-7)
+// ============================================================================
+// Create a qualification vocabulary row (Story 2.7, AD-7/FR-22). The name is
+// unique case-insensitively (the repository pre-checks QualificationNameExists
+// and the schema UNIQUE constraint is the belt-and-suspenders backstop).
+// `unlimited` qualifications store a NULL expires_at; `fixed` carry one.
+func (q *Queries) CreateQualification(ctx context.Context, arg CreateQualificationParams) (CreateQualificationRow, error) {
+	row := q.db.QueryRow(ctx, createQualification,
+		arg.Name,
+		arg.Description,
+		arg.ExpiryKind,
+		arg.ExpiresAt,
+	)
+	var i CreateQualificationRow
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Description,
+		&i.ExpiryKind,
+		&i.ExpiresAt,
+	)
+	return i, err
+}
+
 const createRegisteredUser = `-- name: CreateRegisteredUser :one
 INSERT INTO users (
     email,
@@ -638,6 +685,19 @@ WHERE token_hash = $1
 // Invalidate a single reset token after use (single-use, FR-26).
 func (q *Queries) DeletePasswordResetToken(ctx context.Context, tokenHash string) error {
 	_, err := q.db.Exec(ctx, deletePasswordResetToken, tokenHash)
+	return err
+}
+
+const deleteQualificationAssignees = `-- name: DeleteQualificationAssignees :exec
+DELETE FROM user_qualifications
+WHERE qualification_id = $1
+`
+
+// Remove EVERY assignment row of a qualification (Story 2.7). Used by the
+// assignee replacement BEFORE InsertQualificationAssignees, both in ONE
+// transaction (delete-then-insert, separate statements — Story 2.5 lesson).
+func (q *Queries) DeleteQualificationAssignees(ctx context.Context, qualificationID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteQualificationAssignees, qualificationID)
 	return err
 }
 
@@ -1159,6 +1219,27 @@ func (q *Queries) InsertGroupPermissions(ctx context.Context, arg InsertGroupPer
 	return err
 }
 
+const insertQualificationAssignees = `-- name: InsertQualificationAssignees :exec
+INSERT INTO user_qualifications (qualification_id, user_id)
+SELECT $1, u.id
+FROM users u
+WHERE u.id = ANY($2::uuid[])
+ON CONFLICT DO NOTHING
+`
+
+type InsertQualificationAssigneesParams struct {
+	QualificationID pgtype.UUID   `json:"qualification_id"`
+	Column2         []pgtype.UUID `json:"column_2"`
+}
+
+// Bulk insert the assignment rows of a qualification (Story 2.7). The input is
+// resolved user ids (already validated to exist). An empty set removes every
+// assignee (revoking eligibility immediately, AD-7/FR-22).
+func (q *Queries) InsertQualificationAssignees(ctx context.Context, arg InsertQualificationAssigneesParams) error {
+	_, err := q.db.Exec(ctx, insertQualificationAssignees, arg.QualificationID, arg.Column2)
+	return err
+}
+
 const insertUserDirectGrants = `-- name: InsertUserDirectGrants :exec
 INSERT INTO user_permissions (user_id, permission_id)
 SELECT $1, p.id
@@ -1620,6 +1701,42 @@ func (q *Queries) ListPermissionsByUser(ctx context.Context, userID pgtype.UUID)
 	return items, nil
 }
 
+const listQualificationAssignees = `-- name: ListQualificationAssignees :many
+SELECT u.id, u.display_name
+FROM user_qualifications uq
+JOIN users u ON u.id = uq.user_id
+WHERE uq.qualification_id = $1
+ORDER BY u.last_name, u.first_name, u.display_name
+`
+
+type ListQualificationAssigneesRow struct {
+	ID          pgtype.UUID `json:"id"`
+	DisplayName string      `json:"display_name"`
+}
+
+// The users currently assigned a qualification (Story 2.7, AD-7/FR-22): the
+// assignee id plus the display name for the assignment editor's checkbox
+// list, ordered by name. No secret material is selected.
+func (q *Queries) ListQualificationAssignees(ctx context.Context, qualificationID pgtype.UUID) ([]ListQualificationAssigneesRow, error) {
+	rows, err := q.db.Query(ctx, listQualificationAssignees, qualificationID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListQualificationAssigneesRow
+	for rows.Next() {
+		var i ListQualificationAssigneesRow
+		if err := rows.Scan(&i.ID, &i.DisplayName); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listQualifications = `-- name: ListQualifications :many
 SELECT id, name, description, expiry_kind, expires_at
 FROM qualifications
@@ -2030,6 +2147,64 @@ func (q *Queries) PermissionGroupsExistByIDs(ctx context.Context, dollar_1 []pgt
 	return items, nil
 }
 
+const qualificationExists = `-- name: QualificationExists :one
+SELECT EXISTS (
+    SELECT 1 FROM qualifications
+    WHERE id = $1
+)
+`
+
+// Existence check for a qualification by id (Story 2.7). Run FIRST inside
+// update/assign so an unknown id maps to the uniform 404 before the
+// duplicate-name / assignee work — an update of a nonexistent qualification
+// must never answer 409 "name taken".
+func (q *Queries) QualificationExists(ctx context.Context, id pgtype.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, qualificationExists, id)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const qualificationNameExists = `-- name: QualificationNameExists :one
+SELECT EXISTS (
+    SELECT 1 FROM qualifications
+    WHERE lower(name) = lower($1)
+)
+`
+
+// Case-insensitive duplicate-name guard for a qualification (Story 2.7): the
+// schema's UNIQUE constraint is exact-match only, so this closes the
+// "erste hilfe" vs "Erste Hilfe" duplicate window inside the create path.
+func (q *Queries) QualificationNameExists(ctx context.Context, lower string) (bool, error) {
+	row := q.db.QueryRow(ctx, qualificationNameExists, lower)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const qualificationNameExistsExcept = `-- name: QualificationNameExistsExcept :one
+SELECT EXISTS (
+    SELECT 1 FROM qualifications
+    WHERE lower(name) = lower($1) AND id <> $2
+)
+`
+
+type QualificationNameExistsExceptParams struct {
+	Lower string      `json:"lower"`
+	ID    pgtype.UUID `json:"id"`
+}
+
+// Case-insensitive duplicate-name guard for UPDATE (Story 2.7): like
+// QualificationNameExists but EXCLUDING the target qualification itself, so
+// renaming a qualification to its OWN name (or a case variant) stays legal
+// while any other holder of the name maps to the uniform 409 conflict.
+func (q *Queries) QualificationNameExistsExcept(ctx context.Context, arg QualificationNameExistsExceptParams) (bool, error) {
+	row := q.db.QueryRow(ctx, qualificationNameExistsExcept, arg.Lower, arg.ID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const removeQualificationFromUser = `-- name: RemoveQualificationFromUser :exec
 DELETE FROM user_qualifications
 WHERE user_id = $1 AND qualification_id = $2
@@ -2276,6 +2451,53 @@ func (q *Queries) UpdatePermissionGroup(ctx context.Context, arg UpdatePermissio
 		&i.Name,
 		&i.Description,
 		&i.IsBaseRole,
+	)
+	return i, err
+}
+
+const updateQualification = `-- name: UpdateQualification :one
+UPDATE qualifications
+SET name = $2, description = $3, expiry_kind = $4, expires_at = $5, updated_at = now()
+WHERE id = $1
+RETURNING id, name, description, expiry_kind, expires_at
+`
+
+type UpdateQualificationParams struct {
+	ID          pgtype.UUID        `json:"id"`
+	Name        string             `json:"name"`
+	Description string             `json:"description"`
+	ExpiryKind  string             `json:"expiry_kind"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+}
+
+type UpdateQualificationRow struct {
+	ID          pgtype.UUID        `json:"id"`
+	Name        string             `json:"name"`
+	Description string             `json:"description"`
+	ExpiryKind  string             `json:"expiry_kind"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+}
+
+// Replace a qualification's name/description/expiry model atomically (Story
+// 2.7). Editing the expiry model never rewrites existing assignments — each
+// assignment inherits the qualification's current expiry model on read (status
+// derives from expires_at, not a per-assignment copy). A zero-row update
+// (unknown id) maps to the uniform not-found in the repository.
+func (q *Queries) UpdateQualification(ctx context.Context, arg UpdateQualificationParams) (UpdateQualificationRow, error) {
+	row := q.db.QueryRow(ctx, updateQualification,
+		arg.ID,
+		arg.Name,
+		arg.Description,
+		arg.ExpiryKind,
+		arg.ExpiresAt,
+	)
+	var i UpdateQualificationRow
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Description,
+		&i.ExpiryKind,
+		&i.ExpiresAt,
 	)
 	return i, err
 }

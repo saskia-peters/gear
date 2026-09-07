@@ -58,7 +58,7 @@ development_status:
   2-4-user-approval-workflow: review
   2-5-role-permission-group-management: review
   2-6-user-group-administration: review
-  2-7-qualification-management: backlog
+  2-7-qualification-management: review
   2-8-admin-one-time-password-otp-issuance: backlog
   epic-2-retrospective: optional
 

@@ -78,6 +78,23 @@ func (h *Handler) AdminRoutes() http.Handler {
 	userGroups.Delete("/{groupID}", h.DeleteAdminUserGroup)
 	r.Mount("/user-groups", userGroups)
 
+	// Qualification Management surface (Story 2.7, AD-7/FR-22): a dedicated
+	// qualifications sub-mount gated by `qualifications.manage` (the same code
+	// the SPA nav uses for the Qualifikationen entry, Story 2.3), so a caller
+	// without it gets the uniform 403 with no admin hint (FR-19). Assigning/
+	// removing takes effect immediately on the next qualification check because
+	// resolution is live per request (AD-7/FR-22) — nothing here caches.
+	qualifications := chi.NewRouter()
+	qualifications.NotFound(httpapi.NotFoundHandler())
+	qualifications.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
+	qualifications.Use(auth.RequireAdminPermission(h.validator, userApprovalResolver{h.service}, core.QualificationsManagePermission, h.logger))
+	qualifications.Get("/", h.ListAdminQualifications)
+	qualifications.Post("/", h.CreateAdminQualification)
+	qualifications.Put("/{id}", h.UpdateAdminQualification)
+	qualifications.Get("/{id}/assignees", h.ListAdminQualificationAssignees)
+	qualifications.Post("/{id}/assignees", h.AssignAdminQualificationUsers)
+	r.Mount("/qualifications", qualifications)
+
 	// Role & Permission-Group surface (Story 2.5): a dedicated groups sub-mount
 	// gated by ANY of the three `roles.*` codes (roles.create/roles.edit/
 	// roles.assign — the same codes the SPA nav uses for the Rollen entry), so

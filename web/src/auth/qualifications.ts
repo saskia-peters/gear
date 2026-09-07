@@ -1,0 +1,161 @@
+// Qualification Management data module (Story 2.7). It holds the API types and
+// calls for the "Qualifikationen" surface: vocabulary list / create / update,
+// plus the per-qualification assignee list / replacement. The server is the
+// source of truth for the status indicator (Unbegrenzt / Gültig / Bald
+// ablaufend / Abgelaufen, FR-22/AD-7) and the user roster — the SPA only maps
+// the status codes to German badges.
+
+import { authHeaders } from './authState.ts'
+import { ApiError } from './roles.ts'
+import type { PermissionCatalogEntry } from './roles.ts'
+
+export type QualificationExpiryKind = 'unlimited' | 'fixed'
+export type QualificationStatus = 'unlimited' | 'valid' | 'expiring_soon' | 'expired'
+
+// Qualification is one vocabulary entry with its server-derived status
+// indicator (Story 2.7).
+export interface Qualification {
+  id: string
+  name: string
+  description: string
+  expiry_kind: QualificationExpiryKind
+  expires_at: string | null
+  status: QualificationStatus
+}
+
+// QualificationRosterUser is one entry of the user roster returned alongside
+// the qualification list, so the assignee editor can pick volunteers in one
+// round-trip.
+export interface QualificationRosterUser {
+  id: string
+  name: string
+}
+
+// QualificationList is the GET /qualifications payload.
+export interface QualificationList {
+  qualifications: Qualification[]
+  users: QualificationRosterUser[]
+}
+
+// QualificationInput is the create/edit body (name, description, expiry model).
+export interface QualificationInput {
+  name: string
+  description: string
+  expiry_kind: QualificationExpiryKind
+  expires_at: string | null
+}
+
+// QualificationWriteResult is the create/update response (finding: the
+// server-authoritative German confirmation plus the resulting qualification —
+// the SPA must not hardcode its own success text).
+export interface QualificationWriteResult {
+  message: string
+  qualification: Qualification
+}
+
+// QualificationAssignee is one user currently assigned a qualification.
+export interface QualificationAssignee {
+  id: string
+  name: string
+}
+
+// QualificationAssignResult is the assignee-replacement response: the
+// server-authoritative German confirmation plus the resulting set.
+export interface QualificationAssignResult {
+  message: string
+  assignees: QualificationAssignee[]
+}
+
+// German display labels for the qualification statuses (FR-22/UX-DR8). The
+// server sends the raw status code; the client renders the badge.
+export const QUALIFICATION_STATUS_LABELS: Record<QualificationStatus, string> = {
+  unlimited: 'Unbegrenzt',
+  valid: 'Gültig',
+  expiring_soon: 'Bald ablaufend',
+  expired: 'Abgelaufen',
+}
+
+// qualificationStatusLabel returns the German badge for a status code, falling
+// back to the raw value so an unrecognized status never renders "undefined".
+export function qualificationStatusLabel(status: string): string {
+  return QUALIFICATION_STATUS_LABELS[status as QualificationStatus] ?? status
+}
+
+const QUALIFICATIONS_URL = '/api/v1/admin/qualifications'
+
+// extractMessage reads the server's German message from the uniform envelope,
+// falling back to a generic German string.
+function extractMessage(status: number, body: unknown): string {
+  const msg = (body as { error?: { message?: unknown } } | null)?.error?.message
+  if (typeof msg === 'string' && msg !== '') return msg
+  if (status >= 500) return 'Der Server ist gerade nicht erreichbar. Bitte versuche es später erneut.'
+  return 'Die Aktion ist fehlgeschlagen. Bitte versuche es erneut.'
+}
+
+async function request(path: string, init: RequestInit): Promise<unknown> {
+  let res: Response
+  try {
+    res = await fetch(path, init)
+  } catch {
+    throw new ApiError(0, 'Verbindung zum Server fehlgeschlagen. Bitte prüfe deine Internetverbindung.')
+  }
+  const body = await res.json().catch(() => null)
+  if (!res.ok) {
+    throw new ApiError(res.status, extractMessage(res.status, body))
+  }
+  return body
+}
+
+// listQualifications fetches the full qualification vocabulary (with status
+// indicators) plus the user roster for the assignment editor.
+export async function listQualifications(): Promise<QualificationList> {
+  const data = (await request(QUALIFICATIONS_URL, { headers: authHeaders() })) as QualificationList
+  return {
+    qualifications: Array.isArray(data.qualifications) ? data.qualifications : [],
+    users: Array.isArray(data.users) ? data.users : [],
+  }
+}
+
+// createQualification creates a qualification with the given name and expiry
+// model. The response carries the server message plus the created entry with
+// its derived status.
+export async function createQualification(input: QualificationInput): Promise<QualificationWriteResult> {
+  return (await request(QUALIFICATIONS_URL, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify(input),
+  })) as QualificationWriteResult
+}
+
+// updateQualification replaces a qualification's name/description/expiry model.
+export async function updateQualification(id: string, input: QualificationInput): Promise<QualificationWriteResult> {
+  return (await request(`${QUALIFICATIONS_URL}/${id}`, {
+    method: 'PUT',
+    headers: authHeaders(),
+    body: JSON.stringify(input),
+  })) as QualificationWriteResult
+}
+
+// listQualificationAssignees fetches the current assignees (id + display name)
+// of a qualification for the editor's pre-checked set.
+export async function listQualificationAssignees(id: string): Promise<QualificationAssignee[]> {
+  const data = (await request(`${QUALIFICATIONS_URL}/${id}/assignees`, {
+    headers: authHeaders(),
+  })) as { assignees?: QualificationAssignee[] }
+  return Array.isArray(data.assignees) ? data.assignees : []
+}
+
+// assignQualificationUsers REPLACES the assignee set of a qualification. The
+// response carries the server message + the resulting set.
+export async function assignQualificationUsers(id: string, userIds: string[]): Promise<QualificationAssignResult> {
+  return (await request(`${QUALIFICATIONS_URL}/${id}/assignees`, {
+    method: 'POST',
+    headers: authHeaders(),
+    body: JSON.stringify({ user_ids: userIds }),
+  })) as QualificationAssignResult
+}
+
+// Re-export the shared uniform-envelope error and the catalog type used by the
+// qualification editor's direct-grant grid.
+export type { PermissionCatalogEntry }
+export { ApiError }

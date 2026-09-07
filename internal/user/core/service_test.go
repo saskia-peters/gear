@@ -93,6 +93,7 @@ type mockRepo struct {
 	userGroupMembers     map[string][]string
 	directGrants         map[string][]string
 	qualifications       map[string]*QualificationAssignment
+	qualificationNextID  int
 	userQualifications   map[string][]string
 	userDetailFunc       func(ctx context.Context, userID string) (*AdminUserDetail, error)
 	createAdminUserFunc  func(ctx context.Context, email, firstName, lastName, state string, roleIDs, userGroupIDs, grantCodes []string) (*User, error)
@@ -1071,6 +1072,112 @@ func (m *mockRepo) DeleteUserGroup(_ context.Context, groupID string) error {
 		}
 	}
 	return nil
+}
+
+// ListQualificationVocabulary returns every qualification, ordered by name
+// (Story 2.7). The status indicator is derived by the core.
+func (m *mockRepo) ListQualificationVocabulary(_ context.Context) ([]*Qualification, error) {
+	out := make([]*Qualification, 0, len(m.qualifications))
+	for _, q := range m.qualifications {
+		out = append(out, &Qualification{ID: q.ID, Name: q.Name, Description: q.Description, ExpiryKind: q.ExpiryKind, ExpiresAt: q.ExpiresAt})
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// CreateQualification creates a qualification vocabulary row (Story 2.7). A
+// case-insensitive duplicate name maps to ErrQualificationNameTaken.
+func (m *mockRepo) CreateQualification(_ context.Context, name, description, expiryKind string, expiresAt *time.Time) (*Qualification, error) {
+	for _, q := range m.qualifications {
+		if strings.EqualFold(q.Name, name) {
+			return nil, ErrQualificationNameTaken
+		}
+	}
+	m.qualificationNextID++
+	id := fmt.Sprintf("q-%d", m.qualificationNextID)
+	for m.qualifications[id] != nil {
+		m.qualificationNextID++
+		id = fmt.Sprintf("q-%d", m.qualificationNextID)
+	}
+	q := &QualificationAssignment{ID: id, Name: name, Description: description, ExpiryKind: expiryKind, ExpiresAt: expiresAt}
+	m.qualifications[id] = q
+	return &Qualification{ID: q.ID, Name: q.Name, Description: q.Description, ExpiryKind: q.ExpiryKind, ExpiresAt: q.ExpiresAt}, nil
+}
+
+// UpdateQualification replaces a qualification's name/description/expiry model
+// (Story 2.7). An unknown id maps to ErrQualificationNotFound; a name held by
+// ANOTHER qualification maps to ErrQualificationNameTaken.
+func (m *mockRepo) UpdateQualification(_ context.Context, id, name, description, expiryKind string, expiresAt *time.Time) (*Qualification, error) {
+	q := m.qualifications[id]
+	if q == nil {
+		return nil, ErrQualificationNotFound
+	}
+	for otherID, other := range m.qualifications {
+		if otherID != id && strings.EqualFold(other.Name, name) {
+			return nil, ErrQualificationNameTaken
+		}
+	}
+	q.Name = name
+	q.Description = description
+	q.ExpiryKind = expiryKind
+	q.ExpiresAt = expiresAt
+	return &Qualification{ID: q.ID, Name: q.Name, Description: q.Description, ExpiryKind: q.ExpiryKind, ExpiresAt: q.ExpiresAt}, nil
+}
+
+// ListQualificationAssignees returns the users currently assigned a
+// qualification (Story 2.7). An unknown qualification maps to
+// ErrQualificationNotFound.
+func (m *mockRepo) ListQualificationAssignees(_ context.Context, id string) ([]*QualificationAssignee, error) {
+	if m.qualifications[id] == nil {
+		return nil, ErrQualificationNotFound
+	}
+	var out []*QualificationAssignee
+	for uid, qids := range m.userQualifications {
+		for _, qid := range qids {
+			if qid == id {
+				if u := m.userByID(uid); u != nil {
+					out = append(out, &QualificationAssignee{ID: uid, Name: u.DisplayName})
+				}
+			}
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// ReplaceQualificationAssignees replaces a qualification's assignee set (Story
+// 2.7). An unknown qualification maps to ErrQualificationNotFound; an unknown
+// user id maps to ErrQualificationAssigneeUnknown. Eligibility follows the
+// live assignment rows, so removal is immediately visible on the next
+// GetUserDetail (AD-7/FR-22).
+func (m *mockRepo) ReplaceQualificationAssignees(_ context.Context, id string, userIDs []string) ([]*QualificationAssignee, error) {
+	if m.qualifications[id] == nil {
+		return nil, ErrQualificationNotFound
+	}
+	for _, uid := range userIDs {
+		if m.userByID(uid) == nil {
+			return nil, ErrQualificationAssigneeUnknown
+		}
+	}
+	// Rebuild the assignment map: drop the qualification from every user, then
+	// add it for each requested user.
+	for uid, qids := range m.userQualifications {
+		kept := qids[:0]
+		for _, qid := range qids {
+			if qid != id {
+				kept = append(kept, qid)
+			}
+		}
+		if len(kept) == 0 {
+			delete(m.userQualifications, uid)
+		} else {
+			m.userQualifications[uid] = kept
+		}
+	}
+	for _, uid := range userIDs {
+		m.userQualifications[uid] = append(m.userQualifications[uid], id)
+	}
+	return m.ListQualificationAssignees(context.Background(), id)
 }
 
 // userByID finds a user by ID across the email-keyed map (the mock repository

@@ -123,6 +123,20 @@ type Repository interface {
 	AssignUserGroupMembers(ctx context.Context, groupID string, userIDs []string) (*UserGroup, error)
 	ListUserGroupMembers(ctx context.Context, groupID string) ([]string, error)
 	DeleteUserGroup(ctx context.Context, groupID string) error
+	// Qualification Management persistence (Story 2.7, AD-7/FR-22):
+	// ListQualificationVocabulary returns the full qualification vocabulary
+	// (reusing the Story 2.6 ListQualifications query); CreateQualification/
+	// UpdateQualification persist the vocabulary rows (duplicate name →
+	// ErrQualificationNameTaken, unknown id → ErrQualificationNotFound);
+	// ListQualificationAssignees returns the current assignees (id + display
+	// name) of a qualification; ReplaceQualificationAssignees replaces the
+	// assignee set atomically (delete-then-insert in one transaction, Story 2.5
+	// lesson) — unknown member → ErrQualificationAssigneeUnknown.
+	ListQualificationVocabulary(ctx context.Context) ([]*Qualification, error)
+	CreateQualification(ctx context.Context, name, description, expiryKind string, expiresAt *time.Time) (*Qualification, error)
+	UpdateQualification(ctx context.Context, id, name, description, expiryKind string, expiresAt *time.Time) (*Qualification, error)
+	ListQualificationAssignees(ctx context.Context, id string) ([]*QualificationAssignee, error)
+	ReplaceQualificationAssignees(ctx context.Context, id string, userIDs []string) ([]*QualificationAssignee, error)
 }
 
 // SecretCipher encrypts/decrypts the TOTP shared secret at rest (NFR-S4). The

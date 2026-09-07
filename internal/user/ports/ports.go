@@ -116,6 +116,20 @@ type Service interface {
 	AssignUserGroupMembers(ctx context.Context, actor *core.User, groupID string, userIDs []string) (*core.UserGroup, error)
 	ListUserGroupMembers(ctx context.Context, actor *core.User, groupID string) ([]string, error)
 	DeleteUserGroup(ctx context.Context, actor *core.User, groupID string) error
+	// Qualification Management (Story 2.7, AD-7/FR-22): ListQualifications
+	// returns the full qualification vocabulary with server-derived status
+	// indicators plus the user roster for the assignment editor;
+	// CreateQualification/UpdateQualification persist the vocabulary rows
+	// (duplicate name → 409, unknown id → 404); ListQualificationAssignees
+	// returns the current assignees of a qualification;
+	// AssignQualificationUsers replaces the assignee set atomically. The whole
+	// surface is gated by `qualifications.manage` at the route mount and
+	// re-verified in the core (defense-in-depth, AD-6).
+	ListQualifications(ctx context.Context, actor *core.User) (*core.QualificationListResult, error)
+	CreateQualification(ctx context.Context, actor *core.User, input core.CreateQualificationInput) (*core.QualificationWriteResult, error)
+	UpdateQualification(ctx context.Context, actor *core.User, id string, input core.UpdateQualificationInput) (*core.QualificationWriteResult, error)
+	ListQualificationAssignees(ctx context.Context, actor *core.User, id string) ([]*core.QualificationAssignee, error)
+	AssignQualificationUsers(ctx context.Context, actor *core.User, id string, userIDs []string) (*core.QualificationAssignResult, error)
 }
 
 // Repository is the outbound persistence port for User data.
@@ -169,6 +183,12 @@ type Repository interface {
 	AssignUserGroupMembers(ctx context.Context, groupID string, userIDs []string) (*core.UserGroup, error)
 	ListUserGroupMembers(ctx context.Context, groupID string) ([]string, error)
 	DeleteUserGroup(ctx context.Context, groupID string) error
+	// Qualification Management persistence (Story 2.7, AD-7/FR-22).
+	ListQualificationVocabulary(ctx context.Context) ([]*core.Qualification, error)
+	CreateQualification(ctx context.Context, name, description, expiryKind string, expiresAt *time.Time) (*core.Qualification, error)
+	UpdateQualification(ctx context.Context, id, name, description, expiryKind string, expiresAt *time.Time) (*core.Qualification, error)
+	ListQualificationAssignees(ctx context.Context, id string) ([]*core.QualificationAssignee, error)
+	ReplaceQualificationAssignees(ctx context.Context, id string, userIDs []string) ([]*core.QualificationAssignee, error)
 }
 
 // PasswordHasher is the outbound password hashing port (AD-13).
