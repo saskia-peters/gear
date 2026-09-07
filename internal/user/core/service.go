@@ -84,6 +84,19 @@ type Repository interface {
 	ListPendingUsers(ctx context.Context) ([]*PendingUser, error)
 	ApproveUser(ctx context.Context, userID string) (*User, error)
 	RejectUser(ctx context.Context, userID string) (*User, error)
+	// Role & Permission-Group persistence (Story 2.5, AD-12): ListGroups returns
+	// every permission group (base roles first, then name) each with its granted
+	// codes; CreateGroup inserts a named group (is_base_role=false) AND its
+	// permission rows atomically; UpdateGroup replaces the group's
+	// name/description AND its permission set atomically (delete-then-insert in
+	// one transaction); ListAllPermissions returns the server-authoritative
+	// 21-code catalog with raw labels (the core derives the German labels).
+	// CreateGroup maps a case-insensitive duplicate name to ErrRoleNameTaken;
+	// UpdateGroup additionally maps an unknown id to ErrRoleNotFound.
+	ListGroups(ctx context.Context) ([]*RoleGroup, error)
+	CreateGroup(ctx context.Context, name, description string, permissionCodes []string) (*RoleGroup, error)
+	UpdateGroup(ctx context.Context, id, name, description string, permissionCodes []string) (*RoleGroup, error)
+	ListAllPermissions(ctx context.Context) ([]*PermissionCatalogEntry, error)
 }
 
 // SecretCipher encrypts/decrypts the TOTP shared secret at rest (NFR-S4). The

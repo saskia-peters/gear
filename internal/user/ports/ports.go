@@ -82,6 +82,17 @@ type Service interface {
 	ListPending(ctx context.Context, actor *core.User) ([]*core.PendingUser, error)
 	ApproveUser(ctx context.Context, actor *core.User, userID string) (*core.UserApprovalResult, error)
 	RejectUser(ctx context.Context, actor *core.User, userID string) (*core.UserApprovalResult, error)
+	// Role & Permission-Group Management (Story 2.5, AD-12/AD-6/FR-19):
+	// ListRoles returns every permission group (base roles first) plus the
+	// server-authoritative 21-code catalog with German labels; CreateRole
+	// creates a named group with its additive permission set atomically;
+	// UpdateRole replaces a group's name/description and permission set
+	// atomically (base roles editable). The whole surface is gated by any of
+	// the `roles.*` codes at the route mount; the core re-verifies the exact
+	// code (create = roles.create, edit = roles.edit) defense-in-depth.
+	ListRoles(ctx context.Context, actor *core.User) (*core.RoleListResult, error)
+	CreateRole(ctx context.Context, actor *core.User, input core.CreateRoleInput) (*core.RoleGroup, error)
+	UpdateRole(ctx context.Context, actor *core.User, id string, input core.UpdateRoleInput) (*core.RoleGroup, error)
 }
 
 // Repository is the outbound persistence port for User data.
@@ -119,6 +130,11 @@ type Repository interface {
 	ListPendingUsers(ctx context.Context) ([]*core.PendingUser, error)
 	ApproveUser(ctx context.Context, userID string) (*core.User, error)
 	RejectUser(ctx context.Context, userID string) (*core.User, error)
+	// Role & Permission-Group persistence (Story 2.5, AD-12).
+	ListGroups(ctx context.Context) ([]*core.RoleGroup, error)
+	CreateGroup(ctx context.Context, name, description string, permissionCodes []string) (*core.RoleGroup, error)
+	UpdateGroup(ctx context.Context, id, name, description string, permissionCodes []string) (*core.RoleGroup, error)
+	ListAllPermissions(ctx context.Context) ([]*core.PermissionCatalogEntry, error)
 }
 
 // PasswordHasher is the outbound password hashing port (AD-13).

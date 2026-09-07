@@ -335,6 +335,38 @@ func (q *Queries) CreatePasswordResetToken(ctx context.Context, arg CreatePasswo
 	return err
 }
 
+const createPermissionGroup = `-- name: CreatePermissionGroup :one
+INSERT INTO permission_groups (name, description, is_base_role)
+VALUES ($1, $2, false)
+RETURNING id, name, description, is_base_role
+`
+
+type CreatePermissionGroupParams struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+type CreatePermissionGroupRow struct {
+	ID          pgtype.UUID `json:"id"`
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
+	IsBaseRole  bool        `json:"is_base_role"`
+}
+
+// Create a named permission group (is_base_role=false, AD-12). Custom groups
+// are never base roles.
+func (q *Queries) CreatePermissionGroup(ctx context.Context, arg CreatePermissionGroupParams) (CreatePermissionGroupRow, error) {
+	row := q.db.QueryRow(ctx, createPermissionGroup, arg.Name, arg.Description)
+	var i CreatePermissionGroupRow
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Description,
+		&i.IsBaseRole,
+	)
+	return i, err
+}
+
 const createRegisteredUser = `-- name: CreateRegisteredUser :one
 INSERT INTO users (
     email,
@@ -446,6 +478,22 @@ WHERE user_id = $1 AND expires_at < now()
 // background sweeper is deferred.
 func (q *Queries) DeleteExpiredPasswordResetTokens(ctx context.Context, userID pgtype.UUID) error {
 	_, err := q.db.Exec(ctx, deleteExpiredPasswordResetTokens, userID)
+	return err
+}
+
+const deleteGroupPermissions = `-- name: DeleteGroupPermissions :exec
+DELETE FROM permission_group_permissions
+WHERE permission_group_id = $1
+`
+
+// Remove every permission row of a group (Story 2.5). Used by UpdateGroup
+// BEFORE InsertGroupPermissions, both in ONE transaction, so the group's set is
+// replaced atomically (delete-then-insert): a failed half-write rolls the whole
+// transaction back. NOTE: the delete and the re-insert MUST be separate
+// statements — a data-modifying CTE that deletes a row blocks a same-statement
+// re-insert of that row (PostgreSQL unique-index behaviour).
+func (q *Queries) DeleteGroupPermissions(ctx context.Context, permissionGroupID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteGroupPermissions, permissionGroupID)
 	return err
 }
 
@@ -848,6 +896,27 @@ func (q *Queries) InsertAuditEventAnonymous(ctx context.Context, operation strin
 	return err
 }
 
+const insertGroupPermissions = `-- name: InsertGroupPermissions :exec
+INSERT INTO permission_group_permissions (permission_group_id, permission_id)
+SELECT $1, p.id
+FROM permissions p
+WHERE p.id = ANY($2::uuid[])
+ON CONFLICT DO NOTHING
+`
+
+type InsertGroupPermissionsParams struct {
+	PermissionGroupID pgtype.UUID   `json:"permission_group_id"`
+	Column2           []pgtype.UUID `json:"column_2"`
+}
+
+// Bulk insert the permission rows of a fresh group (Story 2.5). Additive: it
+// never stores a deny; ON CONFLICT DO NOTHING guards a duplicate row. An empty
+// code set inserts zero rows (a group may have an empty additive set).
+func (q *Queries) InsertGroupPermissions(ctx context.Context, arg InsertGroupPermissionsParams) error {
+	_, err := q.db.Exec(ctx, insertGroupPermissions, arg.PermissionGroupID, arg.Column2)
+	return err
+}
+
 const isUserInPermissionGroup = `-- name: IsUserInPermissionGroup :one
 SELECT EXISTS (
     SELECT 1
@@ -941,6 +1010,108 @@ func (q *Queries) ListAdminRecoveryRequest(ctx context.Context) ([]ListAdminReco
 	return items, nil
 }
 
+const listAllPermissions = `-- name: ListAllPermissions :many
+SELECT code, description
+FROM permissions
+ORDER BY code
+`
+
+type ListAllPermissionsRow struct {
+	Code        string `json:"code"`
+	Description string `json:"description"`
+}
+
+// The server-authoritative permission catalog (Story 2.5): the full 21-code
+// base series with their labels, so the SPA editor's checkbox grid never drifts
+// from the seed. The German display label is derived in the core from the code;
+// the description is the raw DB label (English seed text) fallback.
+func (q *Queries) ListAllPermissions(ctx context.Context) ([]ListAllPermissionsRow, error) {
+	rows, err := q.db.Query(ctx, listAllPermissions)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListAllPermissionsRow
+	for rows.Next() {
+		var i ListAllPermissionsRow
+		if err := rows.Scan(&i.Code, &i.Description); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listGroupPermissionIdsByCodes = `-- name: ListGroupPermissionIdsByCodes :many
+SELECT id
+FROM permissions
+WHERE code = ANY($1::text[])
+ORDER BY code
+`
+
+// Resolve permission codes → row ids for the given code set. The server accepts
+// only the 21 base codes, so every resolved id exists; a code with no row is
+// never matched and the caller rejects it as unknown (additive-only, FR-6).
+func (q *Queries) ListGroupPermissionIdsByCodes(ctx context.Context, dollar_1 []string) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, listGroupPermissionIdsByCodes, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []pgtype.UUID
+	for rows.Next() {
+		var id pgtype.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listGroupPermissionsByGroupIDs = `-- name: ListGroupPermissionsByGroupIDs :many
+SELECT pgp.permission_group_id, p.code
+FROM permission_group_permissions pgp
+JOIN permissions p ON p.id = pgp.permission_id
+ORDER BY pgp.permission_group_id, p.code
+`
+
+type ListGroupPermissionsByGroupIDsRow struct {
+	PermissionGroupID pgtype.UUID `json:"permission_group_id"`
+	Code              string      `json:"code"`
+}
+
+// The permission codes of EVERY permission group in ONE query (Story 2.5): the
+// grouped counterpart of ListPermissionsByGroup that lets ListGroups assemble
+// all groups' permission sets in a single pass instead of one query per group
+// (N+1). Codes are ordered by code within each group (grouped by
+// permission_group_id in the ORDER BY, matching the per-group ordering).
+func (q *Queries) ListGroupPermissionsByGroupIDs(ctx context.Context) ([]ListGroupPermissionsByGroupIDsRow, error) {
+	rows, err := q.db.Query(ctx, listGroupPermissionsByGroupIDs)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListGroupPermissionsByGroupIDsRow
+	for rows.Next() {
+		var i ListGroupPermissionsByGroupIDsRow
+		if err := rows.Scan(&i.PermissionGroupID, &i.Code); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPendingUsers = `-- name: ListPendingUsers :many
 SELECT id, email, first_name, last_name, created_at
 FROM users
@@ -975,6 +1146,51 @@ func (q *Queries) ListPendingUsers(ctx context.Context) ([]ListPendingUsersRow, 
 			&i.FirstName,
 			&i.LastName,
 			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listPermissionGroups = `-- name: ListPermissionGroups :many
+
+SELECT id, name, description, is_base_role
+FROM permission_groups
+ORDER BY is_base_role DESC, name
+`
+
+type ListPermissionGroupsRow struct {
+	ID          pgtype.UUID `json:"id"`
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
+	IsBaseRole  bool        `json:"is_base_role"`
+}
+
+// ============================================================================
+// Role & Permission-Group Management (Story 2.5, AD-12/AD-6/FR-19)
+// ============================================================================
+// Every permission group (the four base roles + any custom named groups,
+// AD-12), base-roles-first then name, for the admin "Rollen" surface. No secret
+// material is selected.
+func (q *Queries) ListPermissionGroups(ctx context.Context) ([]ListPermissionGroupsRow, error) {
+	rows, err := q.db.Query(ctx, listPermissionGroups)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPermissionGroupsRow
+	for rows.Next() {
+		var i ListPermissionGroupsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Description,
+			&i.IsBaseRole,
 		); err != nil {
 			return nil, err
 		}
@@ -1026,6 +1242,41 @@ func (q *Queries) ListPermissionGroupsByUser(ctx context.Context, userID pgtype.
 	return items, nil
 }
 
+const listPermissionsByGroup = `-- name: ListPermissionsByGroup :many
+SELECT p.code, p.description
+FROM permissions p
+JOIN permission_group_permissions pgp ON pgp.permission_id = p.id
+WHERE pgp.permission_group_id = $1
+ORDER BY p.code
+`
+
+type ListPermissionsByGroupRow struct {
+	Code        string `json:"code"`
+	Description string `json:"description"`
+}
+
+// The permission codes (with their labels) granted to ONE permission group,
+// ordered by code. Used to build each role's checked set on the list surface.
+func (q *Queries) ListPermissionsByGroup(ctx context.Context, permissionGroupID pgtype.UUID) ([]ListPermissionsByGroupRow, error) {
+	rows, err := q.db.Query(ctx, listPermissionsByGroup, permissionGroupID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPermissionsByGroupRow
+	for rows.Next() {
+		var i ListPermissionsByGroupRow
+		if err := rows.Scan(&i.Code, &i.Description); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPermissionsByUser = `-- name: ListPermissionsByUser :many
 SELECT DISTINCT p.code
 FROM permissions p
@@ -1062,6 +1313,67 @@ func (q *Queries) ListPermissionsByUser(ctx context.Context, userID pgtype.UUID)
 		return nil, err
 	}
 	return items, nil
+}
+
+const permissionGroupExists = `-- name: PermissionGroupExists :one
+SELECT EXISTS (
+    SELECT 1 FROM permission_groups
+    WHERE id = $1
+)
+`
+
+// Existence check for a permission group by id (Story 2.5). Run FIRST inside
+// UpdateGroup so an unknown id maps to the uniform 404 NOT-FOUND BEFORE the
+// duplicate-name check — an update of a nonexistent group must never answer
+// 409 "name taken" even when the requested name is held by another group.
+func (q *Queries) PermissionGroupExists(ctx context.Context, id pgtype.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, permissionGroupExists, id)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const permissionGroupNameExists = `-- name: PermissionGroupNameExists :one
+SELECT EXISTS (
+    SELECT 1 FROM permission_groups
+    WHERE lower(name) = lower($1)
+)
+`
+
+// Case-insensitive duplicate-name guard (Story 2.5): reports whether ANY
+// permission group already holds the given name, compared case-insensitively.
+// The schema's UNIQUE constraint is exact-match only, so this closes the
+// "Gerätewart" vs "gerätewart" duplicate window inside the create/update
+// transaction. A pre-existing exact match also trips the constraint (23505) as
+// a belt-and-suspenders fallback.
+func (q *Queries) PermissionGroupNameExists(ctx context.Context, lower string) (bool, error) {
+	row := q.db.QueryRow(ctx, permissionGroupNameExists, lower)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const permissionGroupNameExistsExcept = `-- name: PermissionGroupNameExistsExcept :one
+SELECT EXISTS (
+    SELECT 1 FROM permission_groups
+    WHERE lower(name) = lower($1) AND id <> $2
+)
+`
+
+type PermissionGroupNameExistsExceptParams struct {
+	Lower string      `json:"lower"`
+	ID    pgtype.UUID `json:"id"`
+}
+
+// Case-insensitive duplicate-name guard for UPDATE (Story 2.5): like
+// PermissionGroupNameExists but EXCLUDING the target group itself, so renaming
+// a group to its OWN name (or a case variant) stays legal while any other
+// holder of the name maps to the uniform 409 conflict.
+func (q *Queries) PermissionGroupNameExistsExcept(ctx context.Context, arg PermissionGroupNameExistsExceptParams) (bool, error) {
+	row := q.db.QueryRow(ctx, permissionGroupNameExistsExcept, arg.Lower, arg.ID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
 }
 
 const setUserMustChangePassword = `-- name: SetUserMustChangePassword :exec
@@ -1256,6 +1568,42 @@ func (q *Queries) StagePendingEmail(ctx context.Context, arg StagePendingEmailPa
 		&i.UpdatedAt,
 		&i.PendingEmail,
 		&i.MustChangePassword,
+	)
+	return i, err
+}
+
+const updatePermissionGroup = `-- name: UpdatePermissionGroup :one
+UPDATE permission_groups
+SET name = $2, description = $3, updated_at = now()
+WHERE id = $1
+RETURNING id, name, description, is_base_role
+`
+
+type UpdatePermissionGroupParams struct {
+	ID          pgtype.UUID `json:"id"`
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
+}
+
+type UpdatePermissionGroupRow struct {
+	ID          pgtype.UUID `json:"id"`
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
+	IsBaseRole  bool        `json:"is_base_role"`
+}
+
+// Replace a permission group's name/description (its permission set is replaced
+// atomically via ReplaceGroupPermissions). Base roles are editable (they remain
+// the named matrix starting point, AD-12). A zero-row update (unknown id) maps
+// to the uniform not-found in the repository.
+func (q *Queries) UpdatePermissionGroup(ctx context.Context, arg UpdatePermissionGroupParams) (UpdatePermissionGroupRow, error) {
+	row := q.db.QueryRow(ctx, updatePermissionGroup, arg.ID, arg.Name, arg.Description)
+	var i UpdatePermissionGroupRow
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Description,
+		&i.IsBaseRole,
 	)
 	return i, err
 }

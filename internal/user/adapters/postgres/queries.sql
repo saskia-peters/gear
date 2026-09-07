@@ -467,3 +467,122 @@ SELECT @user_id, g.id
 FROM permission_groups g
 WHERE g.name = @group_name
 ON CONFLICT DO NOTHING;
+
+-- ============================================================================
+-- Role & Permission-Group Management (Story 2.5, AD-12/AD-6/FR-19)
+-- ============================================================================
+
+-- name: ListPermissionGroups :many
+-- Every permission group (the four base roles + any custom named groups,
+-- AD-12), base-roles-first then name, for the admin "Rollen" surface. No secret
+-- material is selected.
+SELECT id, name, description, is_base_role
+FROM permission_groups
+ORDER BY is_base_role DESC, name;
+
+-- name: ListPermissionsByGroup :many
+-- The permission codes (with their labels) granted to ONE permission group,
+-- ordered by code. Used to build each role's checked set on the list surface.
+SELECT p.code, p.description
+FROM permissions p
+JOIN permission_group_permissions pgp ON pgp.permission_id = p.id
+WHERE pgp.permission_group_id = $1
+ORDER BY p.code;
+
+-- name: ListGroupPermissionsByGroupIDs :many
+-- The permission codes of EVERY permission group in ONE query (Story 2.5): the
+-- grouped counterpart of ListPermissionsByGroup that lets ListGroups assemble
+-- all groups' permission sets in a single pass instead of one query per group
+-- (N+1). Codes are ordered by code within each group (grouped by
+-- permission_group_id in the ORDER BY, matching the per-group ordering).
+SELECT pgp.permission_group_id, p.code
+FROM permission_group_permissions pgp
+JOIN permissions p ON p.id = pgp.permission_id
+ORDER BY pgp.permission_group_id, p.code;
+
+-- name: CreatePermissionGroup :one
+-- Create a named permission group (is_base_role=false, AD-12). Custom groups
+-- are never base roles.
+INSERT INTO permission_groups (name, description, is_base_role)
+VALUES ($1, $2, false)
+RETURNING id, name, description, is_base_role;
+
+-- name: UpdatePermissionGroup :one
+-- Replace a permission group's name/description (its permission set is replaced
+-- atomically via ReplaceGroupPermissions). Base roles are editable (they remain
+-- the named matrix starting point, AD-12). A zero-row update (unknown id) maps
+-- to the uniform not-found in the repository.
+UPDATE permission_groups
+SET name = $2, description = $3, updated_at = now()
+WHERE id = $1
+RETURNING id, name, description, is_base_role;
+
+-- name: ListGroupPermissionIdsByCodes :many
+-- Resolve permission codes → row ids for the given code set. The server accepts
+-- only the 21 base codes, so every resolved id exists; a code with no row is
+-- never matched and the caller rejects it as unknown (additive-only, FR-6).
+SELECT id
+FROM permissions
+WHERE code = ANY($1::text[])
+ORDER BY code;
+
+-- name: InsertGroupPermissions :exec
+-- Bulk insert the permission rows of a fresh group (Story 2.5). Additive: it
+-- never stores a deny; ON CONFLICT DO NOTHING guards a duplicate row. An empty
+-- code set inserts zero rows (a group may have an empty additive set).
+INSERT INTO permission_group_permissions (permission_group_id, permission_id)
+SELECT $1, p.id
+FROM permissions p
+WHERE p.id = ANY($2::uuid[])
+ON CONFLICT DO NOTHING;
+
+-- name: DeleteGroupPermissions :exec
+-- Remove every permission row of a group (Story 2.5). Used by UpdateGroup
+-- BEFORE InsertGroupPermissions, both in ONE transaction, so the group's set is
+-- replaced atomically (delete-then-insert): a failed half-write rolls the whole
+-- transaction back. NOTE: the delete and the re-insert MUST be separate
+-- statements — a data-modifying CTE that deletes a row blocks a same-statement
+-- re-insert of that row (PostgreSQL unique-index behaviour).
+DELETE FROM permission_group_permissions
+WHERE permission_group_id = $1;
+
+-- name: ListAllPermissions :many
+-- The server-authoritative permission catalog (Story 2.5): the full 21-code
+-- base series with their labels, so the SPA editor's checkbox grid never drifts
+-- from the seed. The German display label is derived in the core from the code;
+-- the description is the raw DB label (English seed text) fallback.
+SELECT code, description
+FROM permissions
+ORDER BY code;
+
+-- name: PermissionGroupNameExists :one
+-- Case-insensitive duplicate-name guard (Story 2.5): reports whether ANY
+-- permission group already holds the given name, compared case-insensitively.
+-- The schema's UNIQUE constraint is exact-match only, so this closes the
+-- "Gerätewart" vs "gerätewart" duplicate window inside the create/update
+-- transaction. A pre-existing exact match also trips the constraint (23505) as
+-- a belt-and-suspenders fallback.
+SELECT EXISTS (
+    SELECT 1 FROM permission_groups
+    WHERE lower(name) = lower($1)
+);
+
+-- name: PermissionGroupExists :one
+-- Existence check for a permission group by id (Story 2.5). Run FIRST inside
+-- UpdateGroup so an unknown id maps to the uniform 404 NOT-FOUND BEFORE the
+-- duplicate-name check — an update of a nonexistent group must never answer
+-- 409 "name taken" even when the requested name is held by another group.
+SELECT EXISTS (
+    SELECT 1 FROM permission_groups
+    WHERE id = $1
+);
+
+-- name: PermissionGroupNameExistsExcept :one
+-- Case-insensitive duplicate-name guard for UPDATE (Story 2.5): like
+-- PermissionGroupNameExists but EXCLUDING the target group itself, so renaming
+-- a group to its OWN name (or a case variant) stays legal while any other
+-- holder of the name maps to the uniform 409 conflict.
+SELECT EXISTS (
+    SELECT 1 FROM permission_groups
+    WHERE lower(name) = lower($1) AND id <> $2
+);

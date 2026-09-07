@@ -51,6 +51,25 @@ func (h *Handler) AdminRoutes() http.Handler {
 	users.Post("/{userID}/reject", h.RejectUser)
 	r.Mount("/users", users)
 
+	// Role & Permission-Group surface (Story 2.5): a dedicated groups sub-mount
+	// gated by ANY of the three `roles.*` codes (roles.create/roles.edit/
+	// roles.assign — the same codes the SPA nav uses for the Rollen entry), so
+	// a caller without any of them gets the uniform 403 with no admin hint
+	// (FR-19). The list is reachable by any holder; create is additionally
+	// guarded by `roles.create` and update by `roles.edit` inside the handlers/
+	// core (defense-in-depth), so an assign-only holder can list but never
+	// create/edit (Design Notes spec 2.5).
+	groups := chi.NewRouter()
+	groups.NotFound(httpapi.NotFoundHandler())
+	groups.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
+	groups.Use(auth.RequireAnyPermission(h.validator, userApprovalResolver{h.service},
+		[]string{core.RoleCreatePermission, core.RoleEditPermission, core.RoleAssignPermission},
+		"roles access denied", h.logger))
+	groups.Get("/", h.ListRoles)
+	groups.Post("/", h.CreateRole)
+	groups.Put("/{groupID}", h.UpdateRole)
+	r.Mount("/groups", groups)
+
 	return r
 }
 

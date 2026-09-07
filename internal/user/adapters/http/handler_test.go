@@ -44,6 +44,9 @@ type mockService struct {
 	listPendingFunc          func(ctx context.Context, actor *core.User) ([]*core.PendingUser, error)
 	approveUserFunc          func(ctx context.Context, actor *core.User, userID string) (*core.UserApprovalResult, error)
 	rejectUserFunc           func(ctx context.Context, actor *core.User, userID string) (*core.UserApprovalResult, error)
+	listRolesFunc            func(ctx context.Context, actor *core.User) (*core.RoleListResult, error)
+	createRoleFunc           func(ctx context.Context, actor *core.User, input core.CreateRoleInput) (*core.RoleGroup, error)
+	updateRoleFunc           func(ctx context.Context, actor *core.User, id string, input core.UpdateRoleInput) (*core.RoleGroup, error)
 	revokeOtherCalls     *int
 	revokeAllCalls       *int
 }
@@ -227,6 +230,27 @@ func (m *mockService) RejectUser(ctx context.Context, actor *core.User, userID s
 		return m.rejectUserFunc(ctx, actor, userID)
 	}
 	return &core.UserApprovalResult{Message: core.MsgUserRejected, UserID: userID, Email: "volunteer@gear.local"}, nil
+}
+
+func (m *mockService) ListRoles(ctx context.Context, actor *core.User) (*core.RoleListResult, error) {
+	if m.listRolesFunc != nil {
+		return m.listRolesFunc(ctx, actor)
+	}
+	return &core.RoleListResult{Groups: []*core.RoleGroup{}, AvailablePermissions: []*core.PermissionCatalogEntry{}}, nil
+}
+
+func (m *mockService) CreateRole(ctx context.Context, actor *core.User, input core.CreateRoleInput) (*core.RoleGroup, error) {
+	if m.createRoleFunc != nil {
+		return m.createRoleFunc(ctx, actor, input)
+	}
+	return &core.RoleGroup{ID: "g-1", Name: input.Name, Description: input.Description, Permissions: input.Permissions}, nil
+}
+
+func (m *mockService) UpdateRole(ctx context.Context, actor *core.User, id string, input core.UpdateRoleInput) (*core.RoleGroup, error) {
+	if m.updateRoleFunc != nil {
+		return m.updateRoleFunc(ctx, actor, id, input)
+	}
+	return &core.RoleGroup{ID: id, Name: input.Name, Description: input.Description, Permissions: input.Permissions}, nil
 }
 
 // stubValidator always authenticates the caller as an active user. Used to
@@ -1668,6 +1692,20 @@ func (r *changePasswordRepo) ApproveUser(_ context.Context, _ string) (*core.Use
 
 func (r *changePasswordRepo) RejectUser(_ context.Context, _ string) (*core.User, error) {
 	return nil, core.ErrUserNotPending
+}
+
+func (r *changePasswordRepo) ListGroups(_ context.Context) ([]*core.RoleGroup, error) { return nil, nil }
+
+func (r *changePasswordRepo) CreateGroup(_ context.Context, _, _ string, _ []string) (*core.RoleGroup, error) {
+	return nil, nil
+}
+
+func (r *changePasswordRepo) UpdateGroup(_ context.Context, _, _, _ string, _ []string) (*core.RoleGroup, error) {
+	return nil, nil
+}
+
+func (r *changePasswordRepo) ListAllPermissions(_ context.Context) ([]*core.PermissionCatalogEntry, error) {
+	return nil, nil
 }
 
 func (r *changePasswordRepo) InsertAuditEvent(_ context.Context, _ string, operation, _, _ string) error {

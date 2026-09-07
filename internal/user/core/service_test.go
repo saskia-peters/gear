@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -66,6 +67,16 @@ type mockRepo struct {
 	rejectErr        error
 	approveUserFunc  func(ctx context.Context, userID string) (*User, error)
 	rejectUserFunc   func(ctx context.Context, userID string) (*User, error)
+	// Role & Permission-Group support (Story 2.5): roleGroups holds the groups
+	// keyed by ID; userRoleGroups maps a user ID to the group IDs they hold.
+	// UpdateGroup recomputes the resolved permission set (m.perms) of every
+	// member, mirroring the live per-request resolution (AD-2/FR-6). Only the
+	// groups seeded through CreateGroup/seedRoleGroup participate.
+	roleGroups       map[string]*RoleGroup
+	roleGroupNextID  int
+	userRoleGroups   map[string][]string
+	listAllPermErr   error
+	catalogLabels    map[string]string
 }
 
 func newMockRepo() *mockRepo {
@@ -593,6 +604,140 @@ func (m *mockRepo) RejectUser(ctx context.Context, userID string) (*User, error)
 	}
 	u.State = StateDeactivated
 	return u, nil
+}
+
+// seedRoleGroup registers a permission group (keyed by a synthetic id) in the
+// mock, optionally attaching it to users (Story 2.5). It is the test-side
+// counterpart of the seeded base roles.
+func (m *mockRepo) seedRoleGroup(id, name, description string, isBaseRole bool, codes []string, memberIDs ...string) *RoleGroup {
+	if m.roleGroups == nil {
+		m.roleGroups = make(map[string]*RoleGroup)
+	}
+	if m.userRoleGroups == nil {
+		m.userRoleGroups = make(map[string][]string)
+	}
+	g := &RoleGroup{ID: id, Name: name, Description: description, IsBaseRole: isBaseRole, Permissions: append([]string(nil), codes...)}
+	m.roleGroups[id] = g
+	for _, uid := range memberIDs {
+		m.userRoleGroups[uid] = append(m.userRoleGroups[uid], id)
+	}
+	m.recomputeMemberPerms()
+	return g
+}
+
+// recomputeMemberPerms re-derives the resolved permission set of every user who
+// holds at least one tracked group (Story 2.5 immediate-effect semantics): the
+// set is the sorted additive union of their groups' codes, exactly what the
+// postgres ListPermissionsByUser returns live.
+func (m *mockRepo) recomputeMemberPerms() {
+	if m.perms == nil {
+		m.perms = make(map[string][]string)
+	}
+	union := func(ids []string) []string {
+		seen := make(map[string]bool)
+		var out []string
+		for _, gid := range ids {
+			if g := m.roleGroups[gid]; g != nil {
+				for _, c := range g.Permissions {
+					if !seen[c] {
+						seen[c] = true
+						out = append(out, c)
+					}
+				}
+			}
+		}
+		sort.Strings(out)
+		return out
+	}
+	for uid, gids := range m.userRoleGroups {
+		m.perms[uid] = union(gids)
+	}
+}
+
+// ListGroups returns every registered group, base-roles-first then by name
+// (Story 2.5).
+func (m *mockRepo) ListGroups(_ context.Context) ([]*RoleGroup, error) {
+	out := make([]*RoleGroup, 0, len(m.roleGroups))
+	for _, g := range m.roleGroups {
+		copy := *g
+		copy.Permissions = append([]string(nil), g.Permissions...)
+		out = append(out, &copy)
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].IsBaseRole != out[j].IsBaseRole {
+			return out[i].IsBaseRole
+		}
+		return out[i].Name < out[j].Name
+	})
+	return out, nil
+}
+
+// CreateGroup registers a named group (is_base_role=false) with its additive
+// permission set (Story 2.5). A case-insensitive duplicate name maps to
+// ErrRoleNameTaken; an unknown code maps to ErrUnknownPermissionCode.
+func (m *mockRepo) CreateGroup(_ context.Context, name, description string, codes []string) (*RoleGroup, error) {
+	if m.roleGroups == nil {
+		m.roleGroups = make(map[string]*RoleGroup)
+	}
+	for _, g := range m.roleGroups {
+		if strings.EqualFold(g.Name, name) {
+			return nil, ErrRoleNameTaken
+		}
+	}
+	for _, c := range codes {
+		if !basePermissionSet[c] {
+			return nil, ErrUnknownPermissionCode
+		}
+	}
+	m.roleGroupNextID++
+	g := &RoleGroup{ID: fmt.Sprintf("g-%d", m.roleGroupNextID), Name: name, Description: description, IsBaseRole: false, Permissions: append([]string(nil), codes...)}
+	m.roleGroups[g.ID] = g
+	return g, nil
+}
+
+// UpdateGroup replaces a group's name/description and permission set, then
+// re-derives the resolved set of every member (Story 2.5 immediate-effect). An
+// unknown id maps to ErrRoleNotFound; a case-insensitive duplicate name held by
+// ANOTHER group maps to ErrRoleNameTaken.
+func (m *mockRepo) UpdateGroup(_ context.Context, id, name, description string, codes []string) (*RoleGroup, error) {
+	g, ok := m.roleGroups[id]
+	if !ok {
+		return nil, ErrRoleNotFound
+	}
+	for oid, other := range m.roleGroups {
+		if oid != id && strings.EqualFold(other.Name, name) {
+			return nil, ErrRoleNameTaken
+		}
+	}
+	for _, c := range codes {
+		if !basePermissionSet[c] {
+			return nil, ErrUnknownPermissionCode
+		}
+	}
+	g.Name = name
+	g.Description = description
+	g.Permissions = append([]string(nil), codes...)
+	m.recomputeMemberPerms()
+	return g, nil
+}
+
+// ListAllPermissions returns the server-authoritative catalog (Story 2.5):
+// every base code with its raw label.
+func (m *mockRepo) ListAllPermissions(_ context.Context) ([]*PermissionCatalogEntry, error) {
+	if m.listAllPermErr != nil {
+		return nil, m.listAllPermErr
+	}
+	out := make([]*PermissionCatalogEntry, 0, len(BasePermissionCodes))
+	for _, c := range BasePermissionCodes {
+		label := "raw:" + c
+		if m.catalogLabels != nil {
+			if l, ok := m.catalogLabels[c]; ok {
+				label = l
+			}
+		}
+		out = append(out, &PermissionCatalogEntry{Code: c, Label: label})
+	}
+	return out, nil
 }
 
 // userByID finds a user by ID across the email-keyed map (the mock repository

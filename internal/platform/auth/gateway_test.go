@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -480,5 +481,83 @@ func TestGatewayNilUserWithNilErrorDoesNotPanic(t *testing.T) {
 	rec := doRequest(h, "valid-token")
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401 for a session without a user", rec.Code)
+	}
+}
+
+// newAnyOfRouter mounts a handler behind RequireAnyPermission with the three
+// role-management codes (Story 2.5) — the gate used for the groups sub-mount.
+func newAnyOfRouter(v SessionValidator, r PermissionResolver) http.Handler {
+	router := chi.NewRouter()
+	router.Use(RequireAnyPermission(v, r, roleCodes(), "roles access denied", nil))
+	router.Get("/demo", func(w http.ResponseWriter, _ *http.Request) {
+		httpapi.WriteJSON(w, http.StatusOK, map[string]string{"ok": "true"})
+	})
+	return router
+}
+
+// roleCodes returns the three `roles.*` codes that gate the Rollen surface.
+func roleCodes() []string {
+	return []string{"roles.create", "roles.edit", "roles.assign"}
+}
+
+func TestRequireAnyPermissionAllowedWithAnySingleCode(t *testing.T) {
+	// ANY_OF: holding ANY ONE of the three roles.* codes passes the gate — an
+	// assign-only holder (like the SPA nav's any-of gating) reaches the surface.
+	for _, code := range roleCodes() {
+		v := &mockValidator{session: &core.Session{User: activeUser()}}
+		r := &mockResolver{perms: []string{code}}
+		rec := doRequest(newAnyOfRouter(v, r), "valid-token")
+		if rec.Code != http.StatusOK {
+			t.Errorf("code %q: status = %d, want 200", code, rec.Code)
+		}
+	}
+}
+
+func TestRequireAnyPermissionAllowedWithSiblingCode(t *testing.T) {
+	// ANY_OF: an unrelated admin code alongside one roles.* code still passes
+	// (the check is any-of, not exclusive).
+	v := &mockValidator{session: &core.Session{User: activeUser()}}
+	r := &mockResolver{perms: []string{"admin.recovery.approve", "roles.edit"}}
+	rec := doRequest(newAnyOfRouter(v, r), "valid-token")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestRequireAnyPermissionForbiddenWithNoRoleCode(t *testing.T) {
+	// ANY_OF_FORBIDDEN: a caller holding NEITHER roles.create/edit/assign is
+	// denied the uniform hidden-existence 403 (FR-19). A tools-only schirrmeister
+	// holds no roles.* code.
+	v := &mockValidator{session: &core.Session{User: activeUser()}}
+	r := &mockResolver{perms: []string{"tools.manage", "tool_types.manage"}}
+	rec := doRequest(newAnyOfRouter(v, r), "valid-token")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	_ = json.Unmarshal(rec.Body.Bytes(), &env)
+	if env.Error.Code != "forbidden" {
+		t.Errorf("code = %q, want forbidden", env.Error.Code)
+	}
+	if strings.Contains(strings.ToLower(rec.Body.String()), "role") {
+		t.Errorf("403 body hints at the missing role codes: %s", rec.Body.String())
+	}
+}
+
+func TestRequireAnyPermissionNoToken(t *testing.T) {
+	v := &mockValidator{}
+	r := &mockResolver{perms: roleCodes()}
+	rec := doRequest(newAnyOfRouter(v, r), "")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401", rec.Code)
+	}
+}
+
+func TestRequireAnyPermissionResolverError(t *testing.T) {
+	v := &mockValidator{session: &core.Session{User: activeUser()}}
+	r := &mockResolver{err: errors.New("db down")}
+	rec := doRequest(newAnyOfRouter(v, r), "valid-token")
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500", rec.Code)
 	}
 }
