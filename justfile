@@ -94,7 +94,7 @@ dev-key:
     fi
 
 # Run the full dev stack: DB + API + Vite SPA
-dev: web-deps dev-key db-up
+dev-up: web-deps dev-key db-up
     set -a; [ -f .env ] && . ./.env; set +a; \
     npm --prefix web run dev & \
     vite_pid=$!; \
@@ -102,6 +102,33 @@ dev: web-deps dev-key db-up
     kill -0 "$vite_pid" 2>/dev/null || { echo "vite failed to start (see output above)" >&2; exit 1; }; \
     trap 'kill "$vite_pid" 2>/dev/null; kill $(jobs -p) 2>/dev/null' EXIT INT TERM; \
     go run ./cmd/server
+
+# Stop the dev stack started by `just dev-up`: kill any leftover API (:8080) and
+# Vite (:5173) processes still bound after Ctrl+C. `just dev-up` cleans up its
+# own children on exit, but a crashed/interrupted run can leave the `server`
+# binary or a Vite process orphaned on a port — this recipe finds whatever is
+# listening on the two dev ports and kills it, then reports what is still bound.
+dev-down:
+    @echo "Stopping G.E.A.R. dev stack..."; \
+    for port in 8080 5173; do \
+        pids=$(ss -tlnpH "sport = :$port" 2>/dev/null | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | sort -u); \
+        if [ -n "$pids" ]; then \
+            echo "  port $port: killing pid(s) $pids"; \
+            for pid in $pids; do kill "$pid" 2>/dev/null || true; done; \
+        else \
+            echo "  port $port: free"; \
+        fi; \
+    done; \
+    sleep 1; \
+    left=$(ss -tlnH 2>/dev/null | grep -E ':(8080|5173)\b' | wc -l); \
+    if [ "$left" -eq 0 ]; then \
+        echo "  done — nothing left listening on 8080/5173."; \
+    else \
+        echo "  WARNING: something still listens on 8080/5173 — check with: ss -tlnp" >&2; \
+        exit 1; \
+    fi
+
+alias dev := dev-up
 
 # Build all Go packages
 build:

@@ -6,10 +6,10 @@ G.E.A.R. — Geräte-Einsatz-Assistenz & Readiness
 Start the full dev stack (PostgreSQL + API + SPA):
 
 ```bash
-just dev
+just dev-up
 ```
 
-`just dev` also generates a local `GEAR_ENCRYPTION_KEY` into `.env` (gitignored)
+`just dev-up` also generates a local `GEAR_ENCRYPTION_KEY` into `.env` (gitignored)
 if none exists — this is required for the MFA / TOTP features. To regenerate or
 inspect it:
 
@@ -20,9 +20,16 @@ just dev-key
 - SPA: http://localhost:5173
 - API: http://localhost:8080/healthz
 
+To stop the stack and clean up any leftover processes on the dev ports (e.g.
+after Ctrl+C on `dev-up` left the API or Vite orphaned):
+
+```bash
+just dev-down
+```
+
 ### Opening the dev SPA from a phone / other device on the LAN
 
-`just dev` binds both the API (`:8080`) and Vite (`:5173`, `--host`) to all
+`just dev-up` binds both the API (`:8080`) and Vite (`:5173`, `--host`) to all
 interfaces, so the app can be loaded from another device on the same network.
 
 **WSL2 (Option A — port proxy):** the WSL IP (e.g. `172.22.x.x`) is a NAT
