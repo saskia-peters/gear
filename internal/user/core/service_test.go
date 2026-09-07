@@ -77,6 +77,28 @@ type mockRepo struct {
 	userRoleGroups   map[string][]string
 	listAllPermErr   error
 	catalogLabels    map[string]string
+	// User & Group Administration (Story 2.6): adminUsers holds the summary
+	// rows returned by ListUsers (nil → derived live from users);
+	// userGroups holds the organisational teams keyed by ID;
+	// userGroupNextID assigns the next synthetic team ID;
+	// userGroupMembers maps a user ID to the team IDs they belong to;
+	// directGrants maps a user ID to the permission codes granted directly
+	// (additive, AD-12) — they feed the resolved set alongside roles;
+	// qualifications maps qualification IDs to their vocabulary row and
+	// userQualifications maps a user ID to the qualification IDs they hold.
+	adminUsers           []*AdminUserSummary
+	adminUsersErr        error
+	userGroups           map[string]*UserGroup
+	userGroupNextID      int
+	userGroupMembers     map[string][]string
+	directGrants         map[string][]string
+	qualifications       map[string]*QualificationAssignment
+	userQualifications   map[string][]string
+	userDetailFunc       func(ctx context.Context, userID string) (*AdminUserDetail, error)
+	createAdminUserFunc  func(ctx context.Context, email, firstName, lastName, state string, roleIDs, userGroupIDs, grantCodes []string) (*User, error)
+	updateAdminUserFunc  func(ctx context.Context, userID, email, firstName, lastName, state string, roleIDs, userGroupIDs, grantCodes []string) (*User, error)
+	deactivateUserFunc   func(ctx context.Context, userID string) (*User, error)
+	deleteUserGroupFunc  func(ctx context.Context, groupID string) error
 }
 
 func newMockRepo() *mockRepo {
@@ -89,6 +111,11 @@ func newMockRepo() *mockRepo {
 		mustChange:  make(map[string]bool),
 		adminGroup:  make(map[string]bool),
 		adminRecovery: make(map[string]*AdminRecoveryToken),
+		userGroups:     make(map[string]*UserGroup),
+		userGroupMembers: make(map[string][]string),
+		directGrants:     make(map[string][]string),
+		qualifications:   make(map[string]*QualificationAssignment),
+		userQualifications: make(map[string][]string),
 	}
 }
 
@@ -627,16 +654,17 @@ func (m *mockRepo) seedRoleGroup(id, name, description string, isBaseRole bool, 
 
 // recomputeMemberPerms re-derives the resolved permission set of every user who
 // holds at least one tracked group (Story 2.5 immediate-effect semantics): the
-// set is the sorted additive union of their groups' codes, exactly what the
-// postgres ListPermissionsByUser returns live.
+// set is the sorted additive union of their groups' codes PLUS their direct
+// grants (Story 2.6, AD-12), exactly what the postgres ListPermissionsByUser
+// returns live.
 func (m *mockRepo) recomputeMemberPerms() {
 	if m.perms == nil {
 		m.perms = make(map[string][]string)
 	}
-	union := func(ids []string) []string {
+	union := func(gids []string, direct []string) []string {
 		seen := make(map[string]bool)
 		var out []string
-		for _, gid := range ids {
+		for _, gid := range gids {
 			if g := m.roleGroups[gid]; g != nil {
 				for _, c := range g.Permissions {
 					if !seen[c] {
@@ -646,11 +674,23 @@ func (m *mockRepo) recomputeMemberPerms() {
 				}
 			}
 		}
+		for _, c := range direct {
+			if !seen[c] {
+				seen[c] = true
+				out = append(out, c)
+			}
+		}
 		sort.Strings(out)
 		return out
 	}
 	for uid, gids := range m.userRoleGroups {
-		m.perms[uid] = union(gids)
+		m.perms[uid] = union(gids, m.directGrants[uid])
+	}
+	// Users with ONLY direct grants (no role) must still resolve them.
+	for uid := range m.directGrants {
+		if _, ok := m.userRoleGroups[uid]; !ok {
+			m.perms[uid] = union(nil, m.directGrants[uid])
+		}
 	}
 }
 
@@ -738,6 +778,299 @@ func (m *mockRepo) ListAllPermissions(_ context.Context) ([]*PermissionCatalogEn
 		out = append(out, &PermissionCatalogEntry{Code: c, Label: label})
 	}
 	return out, nil
+}
+
+// seedUserGroup registers an organisational user group (Story 2.6, AD-12) in
+// the mock, optionally attaching it to users. It is the test-side counterpart
+// of the admin CreateUserGroup path.
+func (m *mockRepo) seedUserGroup(id, name, description string, memberIDs ...string) *UserGroup {
+	if m.userGroups == nil {
+		m.userGroups = make(map[string]*UserGroup)
+	}
+	g := &UserGroup{ID: id, Name: name, Description: description}
+	m.userGroups[id] = g
+	for _, uid := range memberIDs {
+		m.userGroupMembers[uid] = append(m.userGroupMembers[uid], id)
+	}
+	return g
+}
+
+// ListUsers returns every user summary, ordered by last name then first name
+// (Story 2.6).
+func (m *mockRepo) ListUsers(_ context.Context) ([]*AdminUserSummary, error) {
+	if m.adminUsersErr != nil {
+		return nil, m.adminUsersErr
+	}
+	if m.adminUsers != nil {
+		return m.adminUsers, nil
+	}
+	out := make([]*AdminUserSummary, 0, len(m.users))
+	for _, u := range m.users {
+		out = append(out, &AdminUserSummary{ID: u.ID, Vorname: u.FirstName, Nachname: u.LastName, Email: u.Email, Status: string(u.State)})
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].Nachname != out[j].Nachname {
+			return out[i].Nachname < out[j].Nachname
+		}
+		return out[i].Vorname < out[j].Vorname
+	})
+	return out, nil
+}
+
+// GetUserDetail composes a user's detail from the in-memory state (Story 2.6).
+// An unknown id maps to ErrAdminUserNotFound.
+func (m *mockRepo) GetUserDetail(_ context.Context, userID string) (*AdminUserDetail, error) {
+	if m.userDetailFunc != nil {
+		return m.userDetailFunc(context.Background(), userID)
+	}
+	u := m.userByID(userID)
+	if u == nil {
+		return nil, ErrAdminUserNotFound
+	}
+	detail := &AdminUserDetail{
+		ID:       u.ID,
+		Vorname:  u.FirstName,
+		Nachname: u.LastName,
+		Email:    u.Email,
+		Status:   string(u.State),
+		Roles:      []RoleGroupRef{},
+		UserGroups: []UserGroupRef{},
+		DirectGrants: []DirectGrantRef{},
+		Qualifications: []QualificationAssignment{},
+	}
+	for _, gid := range m.userRoleGroups[userID] {
+		if g := m.roleGroups[gid]; g != nil {
+			detail.Roles = append(detail.Roles, RoleGroupRef{ID: g.ID, Name: g.Name, IsBaseRole: g.IsBaseRole})
+		}
+	}
+	for _, gid := range m.userGroupMembers[userID] {
+		if g := m.userGroups[gid]; g != nil {
+			detail.UserGroups = append(detail.UserGroups, UserGroupRef{ID: g.ID, Name: g.Name})
+		}
+	}
+	for _, code := range m.directGrants[userID] {
+		detail.DirectGrants = append(detail.DirectGrants, DirectGrantRef{Code: code})
+	}
+	for _, qid := range m.userQualifications[userID] {
+		if q := m.qualifications[qid]; q != nil {
+			detail.Qualifications = append(detail.Qualifications, QualificationAssignment{
+				ID: q.ID, Name: q.Name, Description: q.Description, ExpiryKind: q.ExpiryKind, ExpiresAt: q.ExpiresAt,
+			})
+		}
+	}
+	sort.SliceStable(detail.Roles, func(i, j int) bool { return detail.Roles[i].Name < detail.Roles[j].Name })
+	sort.SliceStable(detail.UserGroups, func(i, j int) bool { return detail.UserGroups[i].Name < detail.UserGroups[j].Name })
+	return detail, nil
+}
+
+// CreateAdminUser creates a user (Story 2.6): a case-insensitive duplicate
+// email maps to ErrAdminUserEmailTaken; an unknown role/user-group id maps to
+// ErrAdminUserUnknownRole/ErrAdminUserUnknownUserGroup; an unknown grant code
+// maps to ErrUnknownPermissionCode. The assignments are stored and the
+// resolved permission set recomputed (immediate-effect semantics, AD-2).
+func (m *mockRepo) CreateAdminUser(_ context.Context, email, firstName, lastName, state string, roleIDs, userGroupIDs, grantCodes []string) (*User, error) {
+	if m.createAdminUserFunc != nil {
+		return m.createAdminUserFunc(context.Background(), email, firstName, lastName, state, roleIDs, userGroupIDs, grantCodes)
+	}
+	for _, u := range m.users {
+		if strings.EqualFold(u.Email, email) {
+			return nil, ErrAdminUserEmailTaken
+		}
+	}
+	for _, rid := range roleIDs {
+		if m.roleGroups[rid] == nil {
+			return nil, ErrAdminUserUnknownRole
+		}
+	}
+	for _, gid := range userGroupIDs {
+		if m.userGroups[gid] == nil {
+			return nil, ErrAdminUserUnknownUserGroup
+		}
+	}
+	for _, c := range grantCodes {
+		if !basePermissionSet[c] {
+			return nil, ErrUnknownPermissionCode
+		}
+	}
+	u := &User{
+		ID: fmt.Sprintf("u-%d", len(m.users)+1), Email: email,
+		FirstName: firstName, LastName: lastName, DisplayName: firstName + " " + lastName,
+		State: UserState(state),
+	}
+	m.users[email] = u
+	m.userRoleGroups[u.ID] = append([]string(nil), roleIDs...)
+	m.userGroupMembers[u.ID] = append([]string(nil), userGroupIDs...)
+	m.directGrants[u.ID] = append([]string(nil), grantCodes...)
+	m.recomputeMemberPerms()
+	return u, nil
+}
+
+// UpdateAdminUser replaces a user's profile + assignment sets (Story 2.6). An
+// unknown id maps to ErrAdminUserNotFound; an email held by ANOTHER account
+// maps to ErrAdminUserEmailTaken; unknown role/group ids and out-of-series
+// grant codes map to their 400 sentinels. The resolved permission set is
+// recomputed (immediate effect).
+func (m *mockRepo) UpdateAdminUser(_ context.Context, userID, email, firstName, lastName, state string, roleIDs, userGroupIDs, grantCodes []string) (*User, error) {
+	if m.updateAdminUserFunc != nil {
+		return m.updateAdminUserFunc(context.Background(), userID, email, firstName, lastName, state, roleIDs, userGroupIDs, grantCodes)
+	}
+	u := m.userByID(userID)
+	if u == nil {
+		return nil, ErrAdminUserNotFound
+	}
+	for _, other := range m.users {
+		if other.ID != userID && strings.EqualFold(other.Email, email) {
+			return nil, ErrAdminUserEmailTaken
+		}
+	}
+	for _, rid := range roleIDs {
+		if m.roleGroups[rid] == nil {
+			return nil, ErrAdminUserUnknownRole
+		}
+	}
+	for _, gid := range userGroupIDs {
+		if m.userGroups[gid] == nil {
+			return nil, ErrAdminUserUnknownUserGroup
+		}
+	}
+	for _, c := range grantCodes {
+		if !basePermissionSet[c] {
+			return nil, ErrUnknownPermissionCode
+		}
+	}
+	u.Email = email
+	u.FirstName = firstName
+	u.LastName = lastName
+	u.DisplayName = firstName + " " + lastName
+	u.State = UserState(state)
+	m.userRoleGroups[userID] = append([]string(nil), roleIDs...)
+	m.userGroupMembers[userID] = append([]string(nil), userGroupIDs...)
+	m.directGrants[userID] = append([]string(nil), grantCodes...)
+	m.recomputeMemberPerms()
+	return u, nil
+}
+
+// DeactivateUser flips an ACTIVE user to deactivated (Story 2.6, FR-21). An
+// unknown id maps to ErrAdminUserNotFound; a non-active user maps to
+// ErrUserNotActiveForDeactivate.
+func (m *mockRepo) DeactivateUser(_ context.Context, userID string) (*User, error) {
+	if m.deactivateUserFunc != nil {
+		return m.deactivateUserFunc(context.Background(), userID)
+	}
+	u := m.userByID(userID)
+	if u == nil {
+		return nil, ErrAdminUserNotFound
+	}
+	if u.State != StateActive {
+		return nil, ErrUserNotActiveForDeactivate
+	}
+	u.State = StateDeactivated
+	return u, nil
+}
+
+// ListUserGroups returns every organisational user group, ordered by name
+// (Story 2.6).
+func (m *mockRepo) ListUserGroups(_ context.Context) ([]*UserGroup, error) {
+	out := make([]*UserGroup, 0, len(m.userGroups))
+	for _, g := range m.userGroups {
+		copy := *g
+		out = append(out, &copy)
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// CreateUserGroup creates an organisational user group (Story 2.6). A
+// case-insensitive duplicate name maps to ErrUserGroupNameTaken.
+func (m *mockRepo) CreateUserGroup(_ context.Context, name, description string) (*UserGroup, error) {
+	for _, g := range m.userGroups {
+		if strings.EqualFold(g.Name, name) {
+			return nil, ErrUserGroupNameTaken
+		}
+	}
+	m.userGroupNextID++
+	g := &UserGroup{ID: fmt.Sprintf("ug-%d", m.userGroupNextID), Name: name, Description: description}
+	m.userGroups[g.ID] = g
+	return g, nil
+}
+
+// AssignUserGroupMembers replaces a group's member set (Story 2.6). An unknown
+// group maps to ErrUserGroupNotFound; an unknown member maps to
+// ErrUserGroupMemberUnknown. Membership grants no permission (AD-12) — the
+// resolved permission set is NOT touched.
+func (m *mockRepo) AssignUserGroupMembers(_ context.Context, groupID string, userIDs []string) (*UserGroup, error) {
+	g, ok := m.userGroups[groupID]
+	if !ok {
+		return nil, ErrUserGroupNotFound
+	}
+	for _, uid := range userIDs {
+		if m.userByID(uid) == nil {
+			return nil, ErrUserGroupMemberUnknown
+		}
+	}
+	// Rebuild the membership map for the group.
+	for uid := range m.userGroupMembers {
+		kept := m.userGroupMembers[uid][:0]
+		for _, gid := range m.userGroupMembers[uid] {
+			if gid != groupID {
+				kept = append(kept, gid)
+			}
+		}
+		if len(kept) == 0 {
+			delete(m.userGroupMembers, uid)
+		} else {
+			m.userGroupMembers[uid] = kept
+		}
+	}
+	for _, uid := range userIDs {
+		m.userGroupMembers[uid] = append(m.userGroupMembers[uid], groupID)
+	}
+	copy := *g
+	return &copy, nil
+}
+
+// ListUserGroupMembers returns the current member user ids of a group (Story
+// 2.6). An unknown group maps to ErrUserGroupNotFound.
+func (m *mockRepo) ListUserGroupMembers(_ context.Context, groupID string) ([]string, error) {
+	if _, ok := m.userGroups[groupID]; !ok {
+		return nil, ErrUserGroupNotFound
+	}
+	var out []string
+	for uid, gids := range m.userGroupMembers {
+		for _, gid := range gids {
+			if gid == groupID {
+				out = append(out, uid)
+			}
+		}
+	}
+	sort.Strings(out)
+	return out, nil
+}
+
+// DeleteUserGroup removes an organisational user group (Story 2.6). An unknown
+// group maps to ErrUserGroupNotFound.
+func (m *mockRepo) DeleteUserGroup(_ context.Context, groupID string) error {
+	if m.deleteUserGroupFunc != nil {
+		return m.deleteUserGroupFunc(context.Background(), groupID)
+	}
+	if _, ok := m.userGroups[groupID]; !ok {
+		return ErrUserGroupNotFound
+	}
+	delete(m.userGroups, groupID)
+	for uid, gids := range m.userGroupMembers {
+		kept := gids[:0]
+		for _, gid := range gids {
+			if gid != groupID {
+				kept = append(kept, gid)
+			}
+		}
+		if len(kept) == 0 {
+			delete(m.userGroupMembers, uid)
+		} else {
+			m.userGroupMembers[uid] = kept
+		}
+	}
+	return nil
 }
 
 // userByID finds a user by ID across the email-keyed map (the mock repository

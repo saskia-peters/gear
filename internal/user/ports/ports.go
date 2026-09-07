@@ -93,6 +93,29 @@ type Service interface {
 	ListRoles(ctx context.Context, actor *core.User) (*core.RoleListResult, error)
 	CreateRole(ctx context.Context, actor *core.User, input core.CreateRoleInput) (*core.RoleGroup, error)
 	UpdateRole(ctx context.Context, actor *core.User, id string, input core.UpdateRoleInput) (*core.RoleGroup, error)
+	// User & Group Administration (Story 2.6, AD-12/AD-6/FR-19/FR-21/FR-22):
+	// ListUsers returns every user (id, names, email, state) for the admin
+	// "Benutzer" list; GetUserDetail composes a user's profile + roles +
+	// user groups + direct grants + qualification assignments (with
+	// per-assignment status); CreateAdminUser/UpdateAdminUser persist the
+	// profile and all three assignment sets atomically; DeactivateUser flips
+	// an active user to deactivated ("→ Sofort kein Login", audited) and
+	// requires confirmation; ListUserGroups/CreateUserGroup manage the
+	// organisational teams; AssignUserGroupMembers replaces a group's member
+	// set atomically. The user surface is gated by any `users.*` code at the
+	// route mount; the core re-verifies the exact code per action
+	// (list/detail = any users.*, create/edit/deactivate = users.manage) and
+	// the user-group surface by `user_groups.manage`, defense-in-depth.
+	ListUsers(ctx context.Context, actor *core.User) ([]*core.AdminUserSummary, error)
+	GetUserDetail(ctx context.Context, actor *core.User, userID string) (*core.AdminUserDetail, error)
+	CreateAdminUser(ctx context.Context, actor *core.User, input core.CreateAdminUserInput) (*core.AdminUserWriteResult, error)
+	UpdateAdminUser(ctx context.Context, actor *core.User, userID string, input core.UpdateAdminUserInput) (*core.AdminUserWriteResult, error)
+	DeactivateUser(ctx context.Context, actor *core.User, userID string, confirmed bool) (*core.DeactivateUserResult, error)
+	ListUserGroups(ctx context.Context, actor *core.User) ([]*core.UserGroup, error)
+	CreateUserGroup(ctx context.Context, actor *core.User, input core.CreateUserGroupInput) (*core.UserGroup, error)
+	AssignUserGroupMembers(ctx context.Context, actor *core.User, groupID string, userIDs []string) (*core.UserGroup, error)
+	ListUserGroupMembers(ctx context.Context, actor *core.User, groupID string) ([]string, error)
+	DeleteUserGroup(ctx context.Context, actor *core.User, groupID string) error
 }
 
 // Repository is the outbound persistence port for User data.
@@ -135,6 +158,17 @@ type Repository interface {
 	CreateGroup(ctx context.Context, name, description string, permissionCodes []string) (*core.RoleGroup, error)
 	UpdateGroup(ctx context.Context, id, name, description string, permissionCodes []string) (*core.RoleGroup, error)
 	ListAllPermissions(ctx context.Context) ([]*core.PermissionCatalogEntry, error)
+	// User & Group Administration persistence (Story 2.6, AD-12).
+	ListUsers(ctx context.Context) ([]*core.AdminUserSummary, error)
+	GetUserDetail(ctx context.Context, userID string) (*core.AdminUserDetail, error)
+	CreateAdminUser(ctx context.Context, email, firstName, lastName, state string, roleIDs, userGroupIDs, grantCodes []string) (*core.User, error)
+	UpdateAdminUser(ctx context.Context, userID, email, firstName, lastName, state string, roleIDs, userGroupIDs, grantCodes []string) (*core.User, error)
+	DeactivateUser(ctx context.Context, userID string) (*core.User, error)
+	ListUserGroups(ctx context.Context) ([]*core.UserGroup, error)
+	CreateUserGroup(ctx context.Context, name, description string) (*core.UserGroup, error)
+	AssignUserGroupMembers(ctx context.Context, groupID string, userIDs []string) (*core.UserGroup, error)
+	ListUserGroupMembers(ctx context.Context, groupID string) ([]string, error)
+	DeleteUserGroup(ctx context.Context, groupID string) error
 }
 
 // PasswordHasher is the outbound password hashing port (AD-13).

@@ -97,6 +97,32 @@ type Repository interface {
 	CreateGroup(ctx context.Context, name, description string, permissionCodes []string) (*RoleGroup, error)
 	UpdateGroup(ctx context.Context, id, name, description string, permissionCodes []string) (*RoleGroup, error)
 	ListAllPermissions(ctx context.Context) ([]*PermissionCatalogEntry, error)
+	// User & Group Administration persistence (Story 2.6, AD-12): ListUsers
+	// returns every user (id, names, email, state) ordered by name;
+	// GetUserDetail composes a user's profile + roles (permission groups) +
+	// user groups (teams) + direct grants + qualification assignments (unknown
+	// id → ErrAdminUserNotFound); CreateAdminUser/UpdateAdminUser persist the
+	// profile AND the three assignment sets atomically (delete-then-insert in
+	// one transaction, never a data-modifying CTE — Story 2.5 lesson), mapping
+	// a case-insensitive duplicate email to ErrAdminUserEmailTaken;
+	// DeactivateUser flips an active user to deactivated (and revokes their
+	// sessions) — unknown id → ErrAdminUserNotFound, non-active →
+	// ErrUserNotActiveForDeactivate; ListUserGroups/CreateUserGroup/DeleteUserGroup
+	// manage the organisational teams (duplicate name → ErrUserGroupNameTaken,
+	// unknown group → ErrUserGroupNotFound);
+	// AssignUserGroupMembers replaces a group's member set atomically (unknown
+	// member → ErrUserGroupMemberUnknown); ListUserGroupMembers returns the
+	// current member ids of a group.
+	ListUsers(ctx context.Context) ([]*AdminUserSummary, error)
+	GetUserDetail(ctx context.Context, userID string) (*AdminUserDetail, error)
+	CreateAdminUser(ctx context.Context, email, firstName, lastName, state string, roleIDs, userGroupIDs, grantCodes []string) (*User, error)
+	UpdateAdminUser(ctx context.Context, userID, email, firstName, lastName, state string, roleIDs, userGroupIDs, grantCodes []string) (*User, error)
+	DeactivateUser(ctx context.Context, userID string) (*User, error)
+	ListUserGroups(ctx context.Context) ([]*UserGroup, error)
+	CreateUserGroup(ctx context.Context, name, description string) (*UserGroup, error)
+	AssignUserGroupMembers(ctx context.Context, groupID string, userIDs []string) (*UserGroup, error)
+	ListUserGroupMembers(ctx context.Context, groupID string) ([]string, error)
+	DeleteUserGroup(ctx context.Context, groupID string) error
 }
 
 // SecretCipher encrypts/decrypts the TOTP shared secret at rest (NFR-S4). The

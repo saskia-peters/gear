@@ -38,18 +38,45 @@ func (h *Handler) AdminRoutes() http.Handler {
 	r.Post("/recovery/deny", h.AdminRecoveryDeny)
 	r.Get("/recovery/pending", h.AdminRecoveryPending)
 
-	// User approval surface (Story 2.4): a dedicated users sub-mount gated by
-	// `users.approve` — a caller without it gets the uniform 403 with no admin
-	// hint (FR-19), and a tools-only schirrmeister who reaches the landing is
-	// denied server-side even though the widget is gated out client-side.
+	// User surface (Story 2.4 + 2.6): the /users sub-mount now gates on ANY of
+	// the three `users.*` codes (users.view/users.manage/users.approve — the
+	// same codes the SPA nav uses for the Benutzer entry), so a caller without
+	// any of them gets the uniform 403 with no admin hint (FR-19). The approval
+	// endpoints (pending/approve/reject) STILL require `users.approve`: the core
+	// re-verifies the exact code per action defense-in-depth (Design Notes spec
+	// 2.6) — a users.view-only holder can list/detail but never approve/reject,
+	// and create/edit/deactivate need `users.manage`.
 	users := chi.NewRouter()
 	users.NotFound(httpapi.NotFoundHandler())
 	users.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
-	users.Use(auth.RequireAdminPermission(h.validator, userApprovalResolver{h.service}, core.UserApprovePermission, h.logger))
+	users.Use(auth.RequireAnyPermission(h.validator, userApprovalResolver{h.service},
+		[]string{core.UserViewPermission, core.UserApprovePermission, core.UserManagePermission},
+		"users access denied", h.logger))
 	users.Get("/pending", h.ListPendingUsers)
 	users.Post("/{userID}/approve", h.ApproveUser)
 	users.Post("/{userID}/reject", h.RejectUser)
+	users.Get("/", h.ListAdminUsers)
+	users.Post("/", h.CreateAdminUser)
+	users.Get("/{userID}", h.GetAdminUserDetail)
+	users.Put("/{userID}", h.UpdateAdminUser)
+	users.Post("/{userID}/deactivate", h.DeactivateAdminUser)
 	r.Mount("/users", users)
+
+	// Organisational user-group surface (Story 2.6, AD-12): a dedicated
+	// user-groups sub-mount gated by `user_groups.manage` (the same code the
+	// base series defines), so a caller without it gets the uniform 403 with no
+	// admin hint (FR-19). User groups are ORGANISATIONAL ONLY — membership
+	// grants no permission; the resolution query never joins user_groups.
+	userGroups := chi.NewRouter()
+	userGroups.NotFound(httpapi.NotFoundHandler())
+	userGroups.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
+	userGroups.Use(auth.RequireAdminPermission(h.validator, userApprovalResolver{h.service}, core.UserGroupsManagePermission, h.logger))
+	userGroups.Get("/", h.ListAdminUserGroups)
+	userGroups.Post("/", h.CreateAdminUserGroup)
+	userGroups.Get("/{groupID}/members", h.ListAdminUserGroupMembers)
+	userGroups.Post("/{groupID}/members", h.AssignAdminUserGroupMembers)
+	userGroups.Delete("/{groupID}", h.DeleteAdminUserGroup)
+	r.Mount("/user-groups", userGroups)
 
 	// Role & Permission-Group surface (Story 2.5): a dedicated groups sub-mount
 	// gated by ANY of the three `roles.*` codes (roles.create/roles.edit/

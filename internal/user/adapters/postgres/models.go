@@ -58,6 +58,16 @@ type PermissionGroupPermission struct {
 	CreatedAt         pgtype.Timestamptz `json:"created_at"`
 }
 
+type Qualification struct {
+	ID          pgtype.UUID        `json:"id"`
+	Name        string             `json:"name"`
+	Description string             `json:"description"`
+	ExpiryKind  string             `json:"expiry_kind"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
 type Session struct {
 	ID        pgtype.UUID        `json:"id"`
 	UserID    pgtype.UUID        `json:"user_id"`
@@ -85,6 +95,20 @@ type User struct {
 	MustChangePassword         bool               `json:"must_change_password"`
 }
 
+type UserGroup struct {
+	ID          pgtype.UUID        `json:"id"`
+	Name        string             `json:"name"`
+	Description string             `json:"description"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
+}
+
+type UserGroupMember struct {
+	UserGroupID pgtype.UUID        `json:"user_group_id"`
+	UserID      pgtype.UUID        `json:"user_id"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
 type UserPermission struct {
 	UserID       pgtype.UUID        `json:"user_id"`
 	PermissionID pgtype.UUID        `json:"permission_id"`
@@ -95,4 +119,10 @@ type UserPermissionGroup struct {
 	UserID            pgtype.UUID        `json:"user_id"`
 	PermissionGroupID pgtype.UUID        `json:"permission_group_id"`
 	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+}
+
+type UserQualification struct {
+	UserID          pgtype.UUID        `json:"user_id"`
+	QualificationID pgtype.UUID        `json:"qualification_id"`
+	AssignedAt      pgtype.Timestamptz `json:"assigned_at"`
 }

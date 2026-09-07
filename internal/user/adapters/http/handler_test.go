@@ -47,6 +47,16 @@ type mockService struct {
 	listRolesFunc            func(ctx context.Context, actor *core.User) (*core.RoleListResult, error)
 	createRoleFunc           func(ctx context.Context, actor *core.User, input core.CreateRoleInput) (*core.RoleGroup, error)
 	updateRoleFunc           func(ctx context.Context, actor *core.User, id string, input core.UpdateRoleInput) (*core.RoleGroup, error)
+	listAdminUsersFunc       func(ctx context.Context, actor *core.User) ([]*core.AdminUserSummary, error)
+	getUserDetailFunc        func(ctx context.Context, actor *core.User, userID string) (*core.AdminUserDetail, error)
+	createAdminUserFunc      func(ctx context.Context, actor *core.User, input core.CreateAdminUserInput) (*core.AdminUserWriteResult, error)
+	updateAdminUserFunc      func(ctx context.Context, actor *core.User, userID string, input core.UpdateAdminUserInput) (*core.AdminUserWriteResult, error)
+	deactivateAdminUserFunc  func(ctx context.Context, actor *core.User, userID string, confirmed bool) (*core.DeactivateUserResult, error)
+	listUserGroupsFunc       func(ctx context.Context, actor *core.User) ([]*core.UserGroup, error)
+	createUserGroupFunc      func(ctx context.Context, actor *core.User, input core.CreateUserGroupInput) (*core.UserGroup, error)
+	assignUserGroupFunc      func(ctx context.Context, actor *core.User, groupID string, userIDs []string) (*core.UserGroup, error)
+	listUserGroupMembersFunc func(ctx context.Context, actor *core.User, groupID string) ([]string, error)
+	deleteUserGroupFunc      func(ctx context.Context, actor *core.User, groupID string) error
 	revokeOtherCalls     *int
 	revokeAllCalls       *int
 }
@@ -251,6 +261,76 @@ func (m *mockService) UpdateRole(ctx context.Context, actor *core.User, id strin
 		return m.updateRoleFunc(ctx, actor, id, input)
 	}
 	return &core.RoleGroup{ID: id, Name: input.Name, Description: input.Description, Permissions: input.Permissions}, nil
+}
+
+func (m *mockService) ListUsers(ctx context.Context, actor *core.User) ([]*core.AdminUserSummary, error) {
+	if m.listAdminUsersFunc != nil {
+		return m.listAdminUsersFunc(ctx, actor)
+	}
+	return []*core.AdminUserSummary{}, nil
+}
+
+func (m *mockService) GetUserDetail(ctx context.Context, actor *core.User, userID string) (*core.AdminUserDetail, error) {
+	if m.getUserDetailFunc != nil {
+		return m.getUserDetailFunc(ctx, actor, userID)
+	}
+	return &core.AdminUserDetail{ID: userID}, nil
+}
+
+func (m *mockService) CreateAdminUser(ctx context.Context, actor *core.User, input core.CreateAdminUserInput) (*core.AdminUserWriteResult, error) {
+	if m.createAdminUserFunc != nil {
+		return m.createAdminUserFunc(ctx, actor, input)
+	}
+	return &core.AdminUserWriteResult{Message: core.MsgUserCreated, User: &core.AdminUserDetail{ID: "u-1", Vorname: input.Vorname, Nachname: input.Nachname, Email: input.Email, Status: input.Status}}, nil
+}
+
+func (m *mockService) UpdateAdminUser(ctx context.Context, actor *core.User, userID string, input core.UpdateAdminUserInput) (*core.AdminUserWriteResult, error) {
+	if m.updateAdminUserFunc != nil {
+		return m.updateAdminUserFunc(ctx, actor, userID, input)
+	}
+	return &core.AdminUserWriteResult{Message: core.MsgUserUpdated, User: &core.AdminUserDetail{ID: userID, Vorname: input.Vorname, Nachname: input.Nachname, Email: input.Email, Status: input.Status}}, nil
+}
+
+func (m *mockService) DeactivateUser(ctx context.Context, actor *core.User, userID string, confirmed bool) (*core.DeactivateUserResult, error) {
+	if m.deactivateAdminUserFunc != nil {
+		return m.deactivateAdminUserFunc(ctx, actor, userID, confirmed)
+	}
+	return &core.DeactivateUserResult{Message: core.MsgUserDeactivated, UserID: userID, Email: "volunteer@gear.local"}, nil
+}
+
+func (m *mockService) ListUserGroups(ctx context.Context, actor *core.User) ([]*core.UserGroup, error) {
+	if m.listUserGroupsFunc != nil {
+		return m.listUserGroupsFunc(ctx, actor)
+	}
+	return []*core.UserGroup{}, nil
+}
+
+func (m *mockService) CreateUserGroup(ctx context.Context, actor *core.User, input core.CreateUserGroupInput) (*core.UserGroup, error) {
+	if m.createUserGroupFunc != nil {
+		return m.createUserGroupFunc(ctx, actor, input)
+	}
+	return &core.UserGroup{ID: "ug-1", Name: input.Name, Description: input.Description}, nil
+}
+
+func (m *mockService) AssignUserGroupMembers(ctx context.Context, actor *core.User, groupID string, userIDs []string) (*core.UserGroup, error) {
+	if m.assignUserGroupFunc != nil {
+		return m.assignUserGroupFunc(ctx, actor, groupID, userIDs)
+	}
+	return &core.UserGroup{ID: groupID}, nil
+}
+
+func (m *mockService) ListUserGroupMembers(ctx context.Context, actor *core.User, groupID string) ([]string, error) {
+	if m.listUserGroupMembersFunc != nil {
+		return m.listUserGroupMembersFunc(ctx, actor, groupID)
+	}
+	return []string{}, nil
+}
+
+func (m *mockService) DeleteUserGroup(ctx context.Context, actor *core.User, groupID string) error {
+	if m.deleteUserGroupFunc != nil {
+		return m.deleteUserGroupFunc(ctx, actor, groupID)
+	}
+	return nil
 }
 
 // stubValidator always authenticates the caller as an active user. Used to
@@ -1707,6 +1787,27 @@ func (r *changePasswordRepo) UpdateGroup(_ context.Context, _, _, _ string, _ []
 func (r *changePasswordRepo) ListAllPermissions(_ context.Context) ([]*core.PermissionCatalogEntry, error) {
 	return nil, nil
 }
+
+func (r *changePasswordRepo) ListUsers(_ context.Context) ([]*core.AdminUserSummary, error) { return nil, nil }
+func (r *changePasswordRepo) GetUserDetail(_ context.Context, _ string) (*core.AdminUserDetail, error) {
+	return nil, nil
+}
+func (r *changePasswordRepo) CreateAdminUser(_ context.Context, _, _, _, _ string, _, _, _ []string) (*core.User, error) {
+	return nil, nil
+}
+func (r *changePasswordRepo) UpdateAdminUser(_ context.Context, _, _, _, _, _ string, _, _, _ []string) (*core.User, error) {
+	return nil, nil
+}
+func (r *changePasswordRepo) DeactivateUser(_ context.Context, _ string) (*core.User, error) { return nil, nil }
+func (r *changePasswordRepo) ListUserGroups(_ context.Context) ([]*core.UserGroup, error)     { return nil, nil }
+func (r *changePasswordRepo) CreateUserGroup(_ context.Context, _, _ string) (*core.UserGroup, error) {
+	return nil, nil
+}
+func (r *changePasswordRepo) AssignUserGroupMembers(_ context.Context, _ string, _ []string) (*core.UserGroup, error) {
+	return nil, nil
+}
+func (r *changePasswordRepo) ListUserGroupMembers(_ context.Context, _ string) ([]string, error) { return nil, nil }
+func (r *changePasswordRepo) DeleteUserGroup(_ context.Context, _ string) error                { return nil }
 
 func (r *changePasswordRepo) InsertAuditEvent(_ context.Context, _ string, operation, _, _ string) error {
 	r.audit = append(r.audit, operation)

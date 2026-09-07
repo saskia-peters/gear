@@ -11,6 +11,25 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const addQualificationToUser = `-- name: AddQualificationToUser :exec
+INSERT INTO user_qualifications (user_id, qualification_id)
+VALUES ($1, $2)
+ON CONFLICT DO NOTHING
+`
+
+type AddQualificationToUserParams struct {
+	UserID          pgtype.UUID `json:"user_id"`
+	QualificationID pgtype.UUID `json:"qualification_id"`
+}
+
+// Assign a qualification to a user (Story 2.6 persistence seam; the assignment
+// EDITING surface ships with Story 2.7). ON CONFLICT DO NOTHING makes a
+// duplicate assignment a no-op.
+func (q *Queries) AddQualificationToUser(ctx context.Context, arg AddQualificationToUserParams) error {
+	_, err := q.db.Exec(ctx, addQualificationToUser, arg.UserID, arg.QualificationID)
+	return err
+}
+
 const addUserToGroup = `-- name: AddUserToGroup :exec
 INSERT INTO user_permission_groups (user_id, permission_group_id)
 SELECT $1, g.id
@@ -311,6 +330,75 @@ func (q *Queries) CreateAdminRecoveryRequest(ctx context.Context, arg CreateAdmi
 	return err
 }
 
+const createAdminUser = `-- name: CreateAdminUser :one
+INSERT INTO users (email, display_name, first_name, last_name, password_hash, state)
+VALUES ($1, $2, $3, $4, '', $5)
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password
+`
+
+type CreateAdminUserParams struct {
+	Email       string `json:"email"`
+	DisplayName string `json:"display_name"`
+	FirstName   string `json:"first_name"`
+	LastName    string `json:"last_name"`
+	State       string `json:"state"`
+}
+
+type CreateAdminUserRow struct {
+	ID                         pgtype.UUID        `json:"id"`
+	Email                      string             `json:"email"`
+	DisplayName                string             `json:"display_name"`
+	FirstName                  string             `json:"first_name"`
+	LastName                   string             `json:"last_name"`
+	PasswordHash               string             `json:"password_hash"`
+	State                      string             `json:"state"`
+	IsMfaEnabled               bool               `json:"is_mfa_enabled"`
+	TotpSecretEncrypted        pgtype.Text        `json:"totp_secret_encrypted"`
+	PendingTotpSecretEncrypted pgtype.Text        `json:"pending_totp_secret_encrypted"`
+	PendingTotpExpiresAt       pgtype.Timestamptz `json:"pending_totp_expires_at"`
+	Attributes                 []byte             `json:"attributes"`
+	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt                  pgtype.Timestamptz `json:"updated_at"`
+	PendingEmail               pgtype.Text        `json:"pending_email"`
+	MustChangePassword         bool               `json:"must_change_password"`
+}
+
+// Create a user from the admin surface (Story 2.6): the submitted profile
+// fields plus an explicit initial state (active or pending_approval — the
+// form allows either; admin-created users are typically active with credentials
+// provisioned out-of-band, so the password hash is written as ” and set later).
+// The email UNIQUE constraint is the belt-and-suspenders backstop behind the
+// repository's case-insensitive pre-check.
+func (q *Queries) CreateAdminUser(ctx context.Context, arg CreateAdminUserParams) (CreateAdminUserRow, error) {
+	row := q.db.QueryRow(ctx, createAdminUser,
+		arg.Email,
+		arg.DisplayName,
+		arg.FirstName,
+		arg.LastName,
+		arg.State,
+	)
+	var i CreateAdminUserRow
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.DisplayName,
+		&i.FirstName,
+		&i.LastName,
+		&i.PasswordHash,
+		&i.State,
+		&i.IsMfaEnabled,
+		&i.TotpSecretEncrypted,
+		&i.PendingTotpSecretEncrypted,
+		&i.PendingTotpExpiresAt,
+		&i.Attributes,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.PendingEmail,
+		&i.MustChangePassword,
+	)
+	return i, err
+}
+
 const createPasswordResetToken = `-- name: CreatePasswordResetToken :exec
 WITH invalidated AS (
     DELETE FROM password_reset_tokens
@@ -468,6 +556,38 @@ func (q *Queries) CreateSession(ctx context.Context, arg CreateSessionParams) (S
 	return i, err
 }
 
+const createUserGroup = `-- name: CreateUserGroup :one
+INSERT INTO user_groups (name, description)
+VALUES ($1, $2)
+RETURNING id, name, description, created_at
+`
+
+type CreateUserGroupParams struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
+}
+
+type CreateUserGroupRow struct {
+	ID          pgtype.UUID        `json:"id"`
+	Name        string             `json:"name"`
+	Description string             `json:"description"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+// Create an organisational user group (Story 2.6, AD-12). The name is unique
+// case-insensitively (a duplicate maps to ErrUserGroupNameTaken → 409).
+func (q *Queries) CreateUserGroup(ctx context.Context, arg CreateUserGroupParams) (CreateUserGroupRow, error) {
+	row := q.db.QueryRow(ctx, createUserGroup, arg.Name, arg.Description)
+	var i CreateUserGroupRow
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Description,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const deleteExpiredPasswordResetTokens = `-- name: DeleteExpiredPasswordResetTokens :exec
 DELETE FROM password_reset_tokens
 WHERE user_id = $1 AND expires_at < now()
@@ -478,6 +598,19 @@ WHERE user_id = $1 AND expires_at < now()
 // background sweeper is deferred.
 func (q *Queries) DeleteExpiredPasswordResetTokens(ctx context.Context, userID pgtype.UUID) error {
 	_, err := q.db.Exec(ctx, deleteExpiredPasswordResetTokens, userID)
+	return err
+}
+
+const deleteGroupMembers = `-- name: DeleteGroupMembers :exec
+DELETE FROM user_group_members
+WHERE user_group_id = $1
+`
+
+// Remove EVERY member row of an organisational user group (Story 2.6). Used by
+// the group-member assignment BEFORE InsertGroupMembers, both in ONE transaction
+// (delete-then-insert, separate statements — Story 2.5 lesson).
+func (q *Queries) DeleteGroupMembers(ctx context.Context, userGroupID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteGroupMembers, userGroupID)
 	return err
 }
 
@@ -547,6 +680,61 @@ type DeleteSessionsByUserExceptParams struct {
 // bypass the new second factor (review finding 1.6-2).
 func (q *Queries) DeleteSessionsByUserExcept(ctx context.Context, arg DeleteSessionsByUserExceptParams) error {
 	_, err := q.db.Exec(ctx, deleteSessionsByUserExcept, arg.UserID, arg.TokenHash)
+	return err
+}
+
+const deleteUserDirectGrants = `-- name: DeleteUserDirectGrants :exec
+DELETE FROM user_permissions
+WHERE user_id = $1
+`
+
+// Remove EVERY direct permission-grant row of a user (Story 2.6). Used by the
+// admin edit BEFORE InsertUserDirectGrants, both in ONE transaction
+// (delete-then-insert, separate statements — Story 2.5 lesson).
+func (q *Queries) DeleteUserDirectGrants(ctx context.Context, userID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteUserDirectGrants, userID)
+	return err
+}
+
+const deleteUserGroup = `-- name: DeleteUserGroup :exec
+DELETE FROM user_groups
+WHERE id = $1
+`
+
+// Remove an organisational user group (Story 2.6). Member rows cascade
+// (ON DELETE CASCADE). Membership grants no permission (AD-12), so deleting a
+// team never changes anyone's access.
+func (q *Queries) DeleteUserGroup(ctx context.Context, id pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteUserGroup, id)
+	return err
+}
+
+const deleteUserGroupMemberships = `-- name: DeleteUserGroupMemberships :exec
+DELETE FROM user_group_members
+WHERE user_id = $1
+`
+
+// Remove EVERY organisational user-group membership row of a user (Story 2.6).
+// Used by the admin edit BEFORE InsertUserGroupMemberships, both in ONE
+// transaction (delete-then-insert, separate statements — Story 2.5 lesson).
+func (q *Queries) DeleteUserGroupMemberships(ctx context.Context, userID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteUserGroupMemberships, userID)
+	return err
+}
+
+const deleteUserRoles = `-- name: DeleteUserRoles :exec
+DELETE FROM user_permission_groups
+WHERE user_id = $1
+`
+
+// Remove EVERY permission-group membership row of a user (Story 2.6). Used by
+// the admin edit BEFORE InsertUserRoles, both in ONE transaction, so the user's
+// role set is replaced atomically (delete-then-insert). NOTE: the delete and the
+// re-insert MUST be separate statements — a data-modifying CTE that deletes a
+// row blocks a same-statement re-insert of that row (PostgreSQL unique-index
+// behaviour, Story 2.5 lesson).
+func (q *Queries) DeleteUserRoles(ctx context.Context, userID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteUserRoles, userID)
 	return err
 }
 
@@ -829,6 +1017,39 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (GetUserByEm
 	return i, err
 }
 
+const getUserByID = `-- name: GetUserByID :one
+SELECT id, email, first_name, last_name, display_name, state
+FROM users
+WHERE id = $1
+`
+
+type GetUserByIDRow struct {
+	ID          pgtype.UUID `json:"id"`
+	Email       string      `json:"email"`
+	FirstName   string      `json:"first_name"`
+	LastName    string      `json:"last_name"`
+	DisplayName string      `json:"display_name"`
+	State       string      `json:"state"`
+}
+
+// A single user's profile for the admin detail surface (Story 2.6): the
+// editable profile fields plus state. The password hash is deliberately NOT
+// selected — no secret material in a detail response (NFR-O1). A zero-row
+// read (unknown id) maps to the uniform not-found in the repository.
+func (q *Queries) GetUserByID(ctx context.Context, id pgtype.UUID) (GetUserByIDRow, error) {
+	row := q.db.QueryRow(ctx, getUserByID, id)
+	var i GetUserByIDRow
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.FirstName,
+		&i.LastName,
+		&i.DisplayName,
+		&i.State,
+	)
+	return i, err
+}
+
 const incrementLoginAttempts = `-- name: IncrementLoginAttempts :exec
 INSERT INTO login_attempts (email, failed_count, lockout_until)
 VALUES ($1, 1, NULL)
@@ -896,6 +1117,27 @@ func (q *Queries) InsertAuditEventAnonymous(ctx context.Context, operation strin
 	return err
 }
 
+const insertGroupMembers = `-- name: InsertGroupMembers :exec
+INSERT INTO user_group_members (user_group_id, user_id)
+SELECT $1, u.id
+FROM users u
+WHERE u.id = ANY($2::uuid[])
+ON CONFLICT DO NOTHING
+`
+
+type InsertGroupMembersParams struct {
+	UserGroupID pgtype.UUID   `json:"user_group_id"`
+	Column2     []pgtype.UUID `json:"column_2"`
+}
+
+// Bulk insert the member rows of an organisational user group (Story 2.6). The
+// input is resolved user ids (already validated to exist via UsersExistByIDs).
+// An empty set empties the group (removing every member is valid).
+func (q *Queries) InsertGroupMembers(ctx context.Context, arg InsertGroupMembersParams) error {
+	_, err := q.db.Exec(ctx, insertGroupMembers, arg.UserGroupID, arg.Column2)
+	return err
+}
+
 const insertGroupPermissions = `-- name: InsertGroupPermissions :exec
 INSERT INTO permission_group_permissions (permission_group_id, permission_id)
 SELECT $1, p.id
@@ -914,6 +1156,69 @@ type InsertGroupPermissionsParams struct {
 // code set inserts zero rows (a group may have an empty additive set).
 func (q *Queries) InsertGroupPermissions(ctx context.Context, arg InsertGroupPermissionsParams) error {
 	_, err := q.db.Exec(ctx, insertGroupPermissions, arg.PermissionGroupID, arg.Column2)
+	return err
+}
+
+const insertUserDirectGrants = `-- name: InsertUserDirectGrants :exec
+INSERT INTO user_permissions (user_id, permission_id)
+SELECT $1, p.id
+FROM permissions p
+WHERE p.id = ANY($2::uuid[])
+ON CONFLICT DO NOTHING
+`
+
+type InsertUserDirectGrantsParams struct {
+	UserID  pgtype.UUID   `json:"user_id"`
+	Column2 []pgtype.UUID `json:"column_2"`
+}
+
+// Bulk insert a user's direct permission grants (Story 2.6, additive AD-12).
+// The input is resolved permission ids (the codes are validated against the 21
+// base codes by the core/repository). An empty set inserts zero rows.
+func (q *Queries) InsertUserDirectGrants(ctx context.Context, arg InsertUserDirectGrantsParams) error {
+	_, err := q.db.Exec(ctx, insertUserDirectGrants, arg.UserID, arg.Column2)
+	return err
+}
+
+const insertUserGroupMemberships = `-- name: InsertUserGroupMemberships :exec
+INSERT INTO user_group_members (user_id, user_group_id)
+SELECT $1, ug.id
+FROM user_groups ug
+WHERE ug.id = ANY($2::uuid[])
+ON CONFLICT DO NOTHING
+`
+
+type InsertUserGroupMembershipsParams struct {
+	UserID  pgtype.UUID   `json:"user_id"`
+	Column2 []pgtype.UUID `json:"column_2"`
+}
+
+// Bulk insert a user's organisational user-group memberships (Story 2.6). The
+// input is resolved user-group ids (already validated to exist). An empty set
+// inserts zero rows.
+func (q *Queries) InsertUserGroupMemberships(ctx context.Context, arg InsertUserGroupMembershipsParams) error {
+	_, err := q.db.Exec(ctx, insertUserGroupMemberships, arg.UserID, arg.Column2)
+	return err
+}
+
+const insertUserRoles = `-- name: InsertUserRoles :exec
+INSERT INTO user_permission_groups (user_id, permission_group_id)
+SELECT $1, p.id
+FROM permission_groups p
+WHERE p.id = ANY($2::uuid[])
+ON CONFLICT DO NOTHING
+`
+
+type InsertUserRolesParams struct {
+	UserID  pgtype.UUID   `json:"user_id"`
+	Column2 []pgtype.UUID `json:"column_2"`
+}
+
+// Bulk insert a user's permission-group membership rows (Story 2.6). The
+// input is resolved permission-group ids (already validated to exist). An empty
+// set inserts zero rows (removing all roles is valid).
+func (q *Queries) InsertUserRoles(ctx context.Context, arg InsertUserRolesParams) error {
+	_, err := q.db.Exec(ctx, insertUserRoles, arg.UserID, arg.Column2)
 	return err
 }
 
@@ -1315,6 +1620,325 @@ func (q *Queries) ListPermissionsByUser(ctx context.Context, userID pgtype.UUID)
 	return items, nil
 }
 
+const listQualifications = `-- name: ListQualifications :many
+SELECT id, name, description, expiry_kind, expires_at
+FROM qualifications
+ORDER BY name
+`
+
+type ListQualificationsRow struct {
+	ID          pgtype.UUID        `json:"id"`
+	Name        string             `json:"name"`
+	Description string             `json:"description"`
+	ExpiryKind  string             `json:"expiry_kind"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+}
+
+// The full qualification vocabulary (Story 2.6, AD-7/FR-22): every
+// qualification with its expiry model, ordered by name. The qualification
+// management surface (Story 2.7) edits these; Story 2.6 only needs the list for
+// the user-detail qualification view (via ListUserQualifications).
+func (q *Queries) ListQualifications(ctx context.Context) ([]ListQualificationsRow, error) {
+	rows, err := q.db.Query(ctx, listQualifications)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListQualificationsRow
+	for rows.Next() {
+		var i ListQualificationsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Description,
+			&i.ExpiryKind,
+			&i.ExpiresAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUserDirectGrants = `-- name: ListUserDirectGrants :many
+SELECT p.id, p.code, up.granted_at
+FROM user_permissions up
+JOIN permissions p ON p.id = up.permission_id
+WHERE up.user_id = $1
+ORDER BY p.code
+`
+
+type ListUserDirectGrantsRow struct {
+	ID        pgtype.UUID        `json:"id"`
+	Code      string             `json:"code"`
+	GrantedAt pgtype.Timestamptz `json:"granted_at"`
+}
+
+// The direct one-off permission grants a user holds (additive, AD-12), for the
+// user detail surface (Story 2.6). Codes ordered by code.
+func (q *Queries) ListUserDirectGrants(ctx context.Context, userID pgtype.UUID) ([]ListUserDirectGrantsRow, error) {
+	rows, err := q.db.Query(ctx, listUserDirectGrants, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUserDirectGrantsRow
+	for rows.Next() {
+		var i ListUserDirectGrantsRow
+		if err := rows.Scan(&i.ID, &i.Code, &i.GrantedAt); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUserGroupMemberIDs = `-- name: ListUserGroupMemberIDs :many
+SELECT user_id
+FROM user_group_members
+WHERE user_group_id = $1
+ORDER BY user_id
+`
+
+// The user ids that currently belong to an organisational user group (Story
+// 2.6), ordered by id. Drives the group-member editor's pre-checked set; the
+// assignment endpoint replaces this set atomically.
+func (q *Queries) ListUserGroupMemberIDs(ctx context.Context, userGroupID pgtype.UUID) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, listUserGroupMemberIDs, userGroupID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []pgtype.UUID
+	for rows.Next() {
+		var user_id pgtype.UUID
+		if err := rows.Scan(&user_id); err != nil {
+			return nil, err
+		}
+		items = append(items, user_id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUserGroupMemberships = `-- name: ListUserGroupMemberships :many
+SELECT ug.id, ug.name
+FROM user_groups ug
+JOIN user_group_members ugm ON ugm.user_group_id = ug.id
+WHERE ugm.user_id = $1
+ORDER BY ug.name
+`
+
+type ListUserGroupMembershipsRow struct {
+	ID   pgtype.UUID `json:"id"`
+	Name string      `json:"name"`
+}
+
+// The organisational user groups (teams) a user belongs to, for the user
+// detail surface (Story 2.6, AD-12). Membership grants NO permission by
+// itself — the resolution query never joins user_groups (already true).
+func (q *Queries) ListUserGroupMemberships(ctx context.Context, userID pgtype.UUID) ([]ListUserGroupMembershipsRow, error) {
+	rows, err := q.db.Query(ctx, listUserGroupMemberships, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUserGroupMembershipsRow
+	for rows.Next() {
+		var i ListUserGroupMembershipsRow
+		if err := rows.Scan(&i.ID, &i.Name); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUserGroups = `-- name: ListUserGroups :many
+SELECT id, name, description, created_at
+FROM user_groups
+ORDER BY name
+`
+
+type ListUserGroupsRow struct {
+	ID          pgtype.UUID        `json:"id"`
+	Name        string             `json:"name"`
+	Description string             `json:"description"`
+	CreatedAt   pgtype.Timestamptz `json:"created_at"`
+}
+
+// Every organisational user group (Story 2.6, AD-12), ordered by name, for the
+// admin user-group management surface and the user editor's assignment grid.
+func (q *Queries) ListUserGroups(ctx context.Context) ([]ListUserGroupsRow, error) {
+	rows, err := q.db.Query(ctx, listUserGroups)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUserGroupsRow
+	for rows.Next() {
+		var i ListUserGroupsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Description,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUserQualifications = `-- name: ListUserQualifications :many
+SELECT q.id, q.name, q.description, q.expiry_kind, q.expires_at, uq.assigned_at
+FROM user_qualifications uq
+JOIN qualifications q ON q.id = uq.qualification_id
+WHERE uq.user_id = $1
+ORDER BY q.name
+`
+
+type ListUserQualificationsRow struct {
+	ID          pgtype.UUID        `json:"id"`
+	Name        string             `json:"name"`
+	Description string             `json:"description"`
+	ExpiryKind  string             `json:"expiry_kind"`
+	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+	AssignedAt  pgtype.Timestamptz `json:"assigned_at"`
+}
+
+// The qualification assignments of a user (Story 2.6, AD-7/FR-22): the
+// vocabulary row plus the assignment timestamp. The expiry model lives on the
+// qualification (expiry_kind + optional expires_at); the core derives the
+// per-assignment display status (Gültig / Bald ablaufend / Abgelaufen /
+// Unbegrenzt). Ordered by qualification name.
+func (q *Queries) ListUserQualifications(ctx context.Context, userID pgtype.UUID) ([]ListUserQualificationsRow, error) {
+	rows, err := q.db.Query(ctx, listUserQualifications, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUserQualificationsRow
+	for rows.Next() {
+		var i ListUserQualificationsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Description,
+			&i.ExpiryKind,
+			&i.ExpiresAt,
+			&i.AssignedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUserRoles = `-- name: ListUserRoles :many
+SELECT pg.id, pg.name, pg.is_base_role
+FROM permission_groups pg
+JOIN user_permission_groups upg ON upg.permission_group_id = pg.id
+WHERE upg.user_id = $1
+ORDER BY pg.name
+`
+
+type ListUserRolesRow struct {
+	ID         pgtype.UUID `json:"id"`
+	Name       string      `json:"name"`
+	IsBaseRole bool        `json:"is_base_role"`
+}
+
+// The permission groups (roles) a user holds, for the user detail surface
+// (Story 2.6, AD-12). No secret material is selected.
+func (q *Queries) ListUserRoles(ctx context.Context, userID pgtype.UUID) ([]ListUserRolesRow, error) {
+	rows, err := q.db.Query(ctx, listUserRoles, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUserRolesRow
+	for rows.Next() {
+		var i ListUserRolesRow
+		if err := rows.Scan(&i.ID, &i.Name, &i.IsBaseRole); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listUsers = `-- name: ListUsers :many
+
+SELECT id, email, first_name, last_name, state
+FROM users
+ORDER BY last_name, first_name, email
+`
+
+type ListUsersRow struct {
+	ID        pgtype.UUID `json:"id"`
+	Email     string      `json:"email"`
+	FirstName string      `json:"first_name"`
+	LastName  string      `json:"last_name"`
+	State     string      `json:"state"`
+}
+
+// ============================================================================
+// User & Group Administration (Story 2.6, AD-2/AD-6/FR-19/FR-21/FR-22, AD-12)
+// ============================================================================
+// Every user for the admin "Benutzer" list surface (Story 2.6): id, names,
+// email and state, ordered by last name then first name. No secret material
+// (password hash, tokens) is selected — the listing never exposes credentials
+// (NFR-O1).
+func (q *Queries) ListUsers(ctx context.Context) ([]ListUsersRow, error) {
+	rows, err := q.db.Query(ctx, listUsers)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUsersRow
+	for rows.Next() {
+		var i ListUsersRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Email,
+			&i.FirstName,
+			&i.LastName,
+			&i.State,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const permissionGroupExists = `-- name: PermissionGroupExists :one
 SELECT EXISTS (
     SELECT 1 FROM permission_groups
@@ -1374,6 +1998,54 @@ func (q *Queries) PermissionGroupNameExistsExcept(ctx context.Context, arg Permi
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
+}
+
+const permissionGroupsExistByIDs = `-- name: PermissionGroupsExistByIDs :many
+SELECT id
+FROM permission_groups
+WHERE id = ANY($1::uuid[])
+ORDER BY id
+`
+
+// The permission-group ids that exist among the given set (Story 2.6). Used to
+// validate a user edit's role set: every requested role must exist (count
+// comparison → uniform 400).
+func (q *Queries) PermissionGroupsExistByIDs(ctx context.Context, dollar_1 []pgtype.UUID) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, permissionGroupsExistByIDs, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []pgtype.UUID
+	for rows.Next() {
+		var id pgtype.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const removeQualificationFromUser = `-- name: RemoveQualificationFromUser :exec
+DELETE FROM user_qualifications
+WHERE user_id = $1 AND qualification_id = $2
+`
+
+type RemoveQualificationFromUserParams struct {
+	UserID          pgtype.UUID `json:"user_id"`
+	QualificationID pgtype.UUID `json:"qualification_id"`
+}
+
+// Revoke a qualification from a user (Story 2.6 persistence seam; the
+// assignment EDITING surface ships with Story 2.7). Revocation is immediate
+// (FR-22/AD-2) because qualification resolution is live per request.
+func (q *Queries) RemoveQualificationFromUser(ctx context.Context, arg RemoveQualificationFromUserParams) error {
+	_, err := q.db.Exec(ctx, removeQualificationFromUser, arg.UserID, arg.QualificationID)
+	return err
 }
 
 const setUserMustChangePassword = `-- name: SetUserMustChangePassword :exec
@@ -1742,4 +2414,234 @@ func (q *Queries) UpdateUserProfile(ctx context.Context, arg UpdateUserProfilePa
 		&i.MustChangePassword,
 	)
 	return i, err
+}
+
+const updateUserProfileAdmin = `-- name: UpdateUserProfileAdmin :one
+UPDATE users
+SET email        = $2,
+    display_name = $3,
+    first_name   = $4,
+    last_name    = $5,
+    state        = $6,
+    updated_at   = now()
+WHERE id = $1
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password
+`
+
+type UpdateUserProfileAdminParams struct {
+	ID          pgtype.UUID `json:"id"`
+	Email       string      `json:"email"`
+	DisplayName string      `json:"display_name"`
+	FirstName   string      `json:"first_name"`
+	LastName    string      `json:"last_name"`
+	State       string      `json:"state"`
+}
+
+type UpdateUserProfileAdminRow struct {
+	ID                         pgtype.UUID        `json:"id"`
+	Email                      string             `json:"email"`
+	DisplayName                string             `json:"display_name"`
+	FirstName                  string             `json:"first_name"`
+	LastName                   string             `json:"last_name"`
+	PasswordHash               string             `json:"password_hash"`
+	State                      string             `json:"state"`
+	IsMfaEnabled               bool               `json:"is_mfa_enabled"`
+	TotpSecretEncrypted        pgtype.Text        `json:"totp_secret_encrypted"`
+	PendingTotpSecretEncrypted pgtype.Text        `json:"pending_totp_secret_encrypted"`
+	PendingTotpExpiresAt       pgtype.Timestamptz `json:"pending_totp_expires_at"`
+	Attributes                 []byte             `json:"attributes"`
+	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt                  pgtype.Timestamptz `json:"updated_at"`
+	PendingEmail               pgtype.Text        `json:"pending_email"`
+	MustChangePassword         bool               `json:"must_change_password"`
+}
+
+// Replace an existing user's profile fields AND state from the admin surface
+// (Story 2.6). Email and state are touched here (unlike the self-service
+// UpdateUserProfile); the email UNIQUE constraint is the backstop behind the
+// repository's case-insensitive pre-check (existence-first, uniform 404 before
+// any 409). A zero-row update (unknown id) maps to the uniform not-found.
+func (q *Queries) UpdateUserProfileAdmin(ctx context.Context, arg UpdateUserProfileAdminParams) (UpdateUserProfileAdminRow, error) {
+	row := q.db.QueryRow(ctx, updateUserProfileAdmin,
+		arg.ID,
+		arg.Email,
+		arg.DisplayName,
+		arg.FirstName,
+		arg.LastName,
+		arg.State,
+	)
+	var i UpdateUserProfileAdminRow
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.DisplayName,
+		&i.FirstName,
+		&i.LastName,
+		&i.PasswordHash,
+		&i.State,
+		&i.IsMfaEnabled,
+		&i.TotpSecretEncrypted,
+		&i.PendingTotpSecretEncrypted,
+		&i.PendingTotpExpiresAt,
+		&i.Attributes,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.PendingEmail,
+		&i.MustChangePassword,
+	)
+	return i, err
+}
+
+const userEmailExists = `-- name: UserEmailExists :one
+SELECT EXISTS (
+    SELECT 1 FROM users
+    WHERE lower(email) = lower($1)
+)
+`
+
+// Case-insensitive email-uniqueness guard (Story 2.6): reports whether ANY
+// user already holds the given email. The schema's UNIQUE constraint is
+// exact-match only, so this closes the "A@x.de" vs "a@X.de" duplicate window
+// inside the create transaction. A pre-existing exact match also trips the
+// constraint (23505) as a belt-and-suspenders fallback.
+func (q *Queries) UserEmailExists(ctx context.Context, lower string) (bool, error) {
+	row := q.db.QueryRow(ctx, userEmailExists, lower)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const userEmailExistsExcept = `-- name: UserEmailExistsExcept :one
+SELECT EXISTS (
+    SELECT 1 FROM users
+    WHERE lower(email) = lower($1) AND id <> $2
+)
+`
+
+type UserEmailExistsExceptParams struct {
+	Lower string      `json:"lower"`
+	ID    pgtype.UUID `json:"id"`
+}
+
+// Case-insensitive email-uniqueness guard for UPDATE (Story 2.6): like
+// UserEmailExists but EXCLUDING the target user itself, so keeping the user's
+// OWN email (or a case variant) stays legal while any other holder of the
+// address maps to the uniform 409 conflict.
+func (q *Queries) UserEmailExistsExcept(ctx context.Context, arg UserEmailExistsExceptParams) (bool, error) {
+	row := q.db.QueryRow(ctx, userEmailExistsExcept, arg.Lower, arg.ID)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const userExists = `-- name: UserExists :one
+SELECT EXISTS (
+    SELECT 1 FROM users
+    WHERE id = $1
+)
+`
+
+// Existence check for a user by id (Story 2.6). Run FIRST inside the admin
+// create/edit so an unknown id maps to the uniform 404 before the
+// duplicate-email check (an update of a nonexistent user must never answer 409
+// "email taken").
+func (q *Queries) UserExists(ctx context.Context, id pgtype.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, userExists, id)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const userGroupExists = `-- name: UserGroupExists :one
+SELECT EXISTS (
+    SELECT 1 FROM user_groups
+    WHERE id = $1
+)
+`
+
+// Existence check for an organisational user group by id (Story 2.6). Run
+// FIRST inside group-member assignment so an unknown group maps to the uniform
+// 404 before any member work.
+func (q *Queries) UserGroupExists(ctx context.Context, id pgtype.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, userGroupExists, id)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const userGroupNameExists = `-- name: UserGroupNameExists :one
+SELECT EXISTS (
+    SELECT 1 FROM user_groups
+    WHERE lower(name) = lower($1)
+)
+`
+
+// Case-insensitive duplicate-name guard for a user group (Story 2.6): the
+// schema's UNIQUE constraint is exact-match only, so this closes the
+// "gruppe ost" vs "Gruppe Ost" window inside the create transaction.
+func (q *Queries) UserGroupNameExists(ctx context.Context, lower string) (bool, error) {
+	row := q.db.QueryRow(ctx, userGroupNameExists, lower)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
+const userGroupsExistByIDs = `-- name: UserGroupsExistByIDs :many
+SELECT id
+FROM user_groups
+WHERE id = ANY($1::uuid[])
+ORDER BY id
+`
+
+// The user-group ids that exist among the given set (Story 2.6). Used to
+// validate a user edit's user-group set: every requested group must exist
+// (count comparison → uniform 400).
+func (q *Queries) UserGroupsExistByIDs(ctx context.Context, dollar_1 []pgtype.UUID) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, userGroupsExistByIDs, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []pgtype.UUID
+	for rows.Next() {
+		var id pgtype.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const usersExistByIDs = `-- name: UsersExistByIDs :many
+SELECT id
+FROM users
+WHERE id = ANY($1::uuid[])
+ORDER BY id
+`
+
+// The user ids that exist among the given set (Story 2.6). Used to validate a
+// group-member assignment: every requested member must exist (the count
+// comparison catches an unknown id → uniform 400).
+func (q *Queries) UsersExistByIDs(ctx context.Context, dollar_1 []pgtype.UUID) ([]pgtype.UUID, error) {
+	rows, err := q.db.Query(ctx, usersExistByIDs, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []pgtype.UUID
+	for rows.Next() {
+		var id pgtype.UUID
+		if err := rows.Scan(&id); err != nil {
+			return nil, err
+		}
+		items = append(items, id)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
 }

@@ -586,3 +586,293 @@ SELECT EXISTS (
     SELECT 1 FROM permission_groups
     WHERE lower(name) = lower($1) AND id <> $2
 );
+
+-- ============================================================================
+-- User & Group Administration (Story 2.6, AD-2/AD-6/FR-19/FR-21/FR-22, AD-12)
+-- ============================================================================
+
+-- name: ListUsers :many
+-- Every user for the admin "Benutzer" list surface (Story 2.6): id, names,
+-- email and state, ordered by last name then first name. No secret material
+-- (password hash, tokens) is selected — the listing never exposes credentials
+-- (NFR-O1).
+SELECT id, email, first_name, last_name, state
+FROM users
+ORDER BY last_name, first_name, email;
+
+-- name: GetUserByID :one
+-- A single user's profile for the admin detail surface (Story 2.6): the
+-- editable profile fields plus state. The password hash is deliberately NOT
+-- selected — no secret material in a detail response (NFR-O1). A zero-row
+-- read (unknown id) maps to the uniform not-found in the repository.
+SELECT id, email, first_name, last_name, display_name, state
+FROM users
+WHERE id = $1;
+
+-- name: ListUserRoles :many
+-- The permission groups (roles) a user holds, for the user detail surface
+-- (Story 2.6, AD-12). No secret material is selected.
+SELECT pg.id, pg.name, pg.is_base_role
+FROM permission_groups pg
+JOIN user_permission_groups upg ON upg.permission_group_id = pg.id
+WHERE upg.user_id = $1
+ORDER BY pg.name;
+
+-- name: ListUserGroupMemberships :many
+-- The organisational user groups (teams) a user belongs to, for the user
+-- detail surface (Story 2.6, AD-12). Membership grants NO permission by
+-- itself — the resolution query never joins user_groups (already true).
+SELECT ug.id, ug.name
+FROM user_groups ug
+JOIN user_group_members ugm ON ugm.user_group_id = ug.id
+WHERE ugm.user_id = $1
+ORDER BY ug.name;
+
+-- name: ListUserDirectGrants :many
+-- The direct one-off permission grants a user holds (additive, AD-12), for the
+-- user detail surface (Story 2.6). Codes ordered by code.
+SELECT p.id, p.code, up.granted_at
+FROM user_permissions up
+JOIN permissions p ON p.id = up.permission_id
+WHERE up.user_id = $1
+ORDER BY p.code;
+
+-- name: ListUserQualifications :many
+-- The qualification assignments of a user (Story 2.6, AD-7/FR-22): the
+-- vocabulary row plus the assignment timestamp. The expiry model lives on the
+-- qualification (expiry_kind + optional expires_at); the core derives the
+-- per-assignment display status (Gültig / Bald ablaufend / Abgelaufen /
+-- Unbegrenzt). Ordered by qualification name.
+SELECT q.id, q.name, q.description, q.expiry_kind, q.expires_at, uq.assigned_at
+FROM user_qualifications uq
+JOIN qualifications q ON q.id = uq.qualification_id
+WHERE uq.user_id = $1
+ORDER BY q.name;
+
+-- name: CreateAdminUser :one
+-- Create a user from the admin surface (Story 2.6): the submitted profile
+-- fields plus an explicit initial state (active or pending_approval — the
+-- form allows either; admin-created users are typically active with credentials
+-- provisioned out-of-band, so the password hash is written as '' and set later).
+-- The email UNIQUE constraint is the belt-and-suspenders backstop behind the
+-- repository's case-insensitive pre-check.
+INSERT INTO users (email, display_name, first_name, last_name, password_hash, state)
+VALUES ($1, $2, $3, $4, '', $5)
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password;
+
+-- name: UpdateUserProfileAdmin :one
+-- Replace an existing user's profile fields AND state from the admin surface
+-- (Story 2.6). Email and state are touched here (unlike the self-service
+-- UpdateUserProfile); the email UNIQUE constraint is the backstop behind the
+-- repository's case-insensitive pre-check (existence-first, uniform 404 before
+-- any 409). A zero-row update (unknown id) maps to the uniform not-found.
+UPDATE users
+SET email        = $2,
+    display_name = $3,
+    first_name   = $4,
+    last_name    = $5,
+    state        = $6,
+    updated_at   = now()
+WHERE id = $1
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password;
+
+-- name: UserEmailExists :one
+-- Case-insensitive email-uniqueness guard (Story 2.6): reports whether ANY
+-- user already holds the given email. The schema's UNIQUE constraint is
+-- exact-match only, so this closes the "A@x.de" vs "a@X.de" duplicate window
+-- inside the create transaction. A pre-existing exact match also trips the
+-- constraint (23505) as a belt-and-suspenders fallback.
+SELECT EXISTS (
+    SELECT 1 FROM users
+    WHERE lower(email) = lower($1)
+);
+
+-- name: UserEmailExistsExcept :one
+-- Case-insensitive email-uniqueness guard for UPDATE (Story 2.6): like
+-- UserEmailExists but EXCLUDING the target user itself, so keeping the user's
+-- OWN email (or a case variant) stays legal while any other holder of the
+-- address maps to the uniform 409 conflict.
+SELECT EXISTS (
+    SELECT 1 FROM users
+    WHERE lower(email) = lower($1) AND id <> $2
+);
+
+-- name: ListUserGroups :many
+-- Every organisational user group (Story 2.6, AD-12), ordered by name, for the
+-- admin user-group management surface and the user editor's assignment grid.
+SELECT id, name, description, created_at
+FROM user_groups
+ORDER BY name;
+
+-- name: CreateUserGroup :one
+-- Create an organisational user group (Story 2.6, AD-12). The name is unique
+-- case-insensitively (a duplicate maps to ErrUserGroupNameTaken → 409).
+INSERT INTO user_groups (name, description)
+VALUES ($1, $2)
+RETURNING id, name, description, created_at;
+
+-- name: UserGroupNameExists :one
+-- Case-insensitive duplicate-name guard for a user group (Story 2.6): the
+-- schema's UNIQUE constraint is exact-match only, so this closes the
+-- "gruppe ost" vs "Gruppe Ost" window inside the create transaction.
+SELECT EXISTS (
+    SELECT 1 FROM user_groups
+    WHERE lower(name) = lower($1)
+);
+
+-- name: UserGroupExists :one
+-- Existence check for an organisational user group by id (Story 2.6). Run
+-- FIRST inside group-member assignment so an unknown group maps to the uniform
+-- 404 before any member work.
+SELECT EXISTS (
+    SELECT 1 FROM user_groups
+    WHERE id = $1
+);
+
+-- name: DeleteUserGroup :exec
+-- Remove an organisational user group (Story 2.6). Member rows cascade
+-- (ON DELETE CASCADE). Membership grants no permission (AD-12), so deleting a
+-- team never changes anyone's access.
+DELETE FROM user_groups
+WHERE id = $1;
+
+-- name: UserExists :one
+-- Existence check for a user by id (Story 2.6). Run FIRST inside the admin
+-- create/edit so an unknown id maps to the uniform 404 before the
+-- duplicate-email check (an update of a nonexistent user must never answer 409
+-- "email taken").
+SELECT EXISTS (
+    SELECT 1 FROM users
+    WHERE id = $1
+);
+
+-- name: UsersExistByIDs :many
+-- The user ids that exist among the given set (Story 2.6). Used to validate a
+-- group-member assignment: every requested member must exist (the count
+-- comparison catches an unknown id → uniform 400).
+SELECT id
+FROM users
+WHERE id = ANY($1::uuid[])
+ORDER BY id;
+
+-- name: PermissionGroupsExistByIDs :many
+-- The permission-group ids that exist among the given set (Story 2.6). Used to
+-- validate a user edit's role set: every requested role must exist (count
+-- comparison → uniform 400).
+SELECT id
+FROM permission_groups
+WHERE id = ANY($1::uuid[])
+ORDER BY id;
+
+-- name: UserGroupsExistByIDs :many
+-- The user-group ids that exist among the given set (Story 2.6). Used to
+-- validate a user edit's user-group set: every requested group must exist
+-- (count comparison → uniform 400).
+SELECT id
+FROM user_groups
+WHERE id = ANY($1::uuid[])
+ORDER BY id;
+
+-- name: DeleteUserRoles :exec
+-- Remove EVERY permission-group membership row of a user (Story 2.6). Used by
+-- the admin edit BEFORE InsertUserRoles, both in ONE transaction, so the user's
+-- role set is replaced atomically (delete-then-insert). NOTE: the delete and the
+-- re-insert MUST be separate statements — a data-modifying CTE that deletes a
+-- row blocks a same-statement re-insert of that row (PostgreSQL unique-index
+-- behaviour, Story 2.5 lesson).
+DELETE FROM user_permission_groups
+WHERE user_id = $1;
+
+-- name: InsertUserRoles :exec
+-- Bulk insert a user's permission-group membership rows (Story 2.6). The
+-- input is resolved permission-group ids (already validated to exist). An empty
+-- set inserts zero rows (removing all roles is valid).
+INSERT INTO user_permission_groups (user_id, permission_group_id)
+SELECT $1, p.id
+FROM permission_groups p
+WHERE p.id = ANY($2::uuid[])
+ON CONFLICT DO NOTHING;
+
+-- name: DeleteUserGroupMemberships :exec
+-- Remove EVERY organisational user-group membership row of a user (Story 2.6).
+-- Used by the admin edit BEFORE InsertUserGroupMemberships, both in ONE
+-- transaction (delete-then-insert, separate statements — Story 2.5 lesson).
+DELETE FROM user_group_members
+WHERE user_id = $1;
+
+-- name: InsertUserGroupMemberships :exec
+-- Bulk insert a user's organisational user-group memberships (Story 2.6). The
+-- input is resolved user-group ids (already validated to exist). An empty set
+-- inserts zero rows.
+INSERT INTO user_group_members (user_id, user_group_id)
+SELECT $1, ug.id
+FROM user_groups ug
+WHERE ug.id = ANY($2::uuid[])
+ON CONFLICT DO NOTHING;
+
+-- name: DeleteUserDirectGrants :exec
+-- Remove EVERY direct permission-grant row of a user (Story 2.6). Used by the
+-- admin edit BEFORE InsertUserDirectGrants, both in ONE transaction
+-- (delete-then-insert, separate statements — Story 2.5 lesson).
+DELETE FROM user_permissions
+WHERE user_id = $1;
+
+-- name: InsertUserDirectGrants :exec
+-- Bulk insert a user's direct permission grants (Story 2.6, additive AD-12).
+-- The input is resolved permission ids (the codes are validated against the 21
+-- base codes by the core/repository). An empty set inserts zero rows.
+INSERT INTO user_permissions (user_id, permission_id)
+SELECT $1, p.id
+FROM permissions p
+WHERE p.id = ANY($2::uuid[])
+ON CONFLICT DO NOTHING;
+
+-- name: DeleteGroupMembers :exec
+-- Remove EVERY member row of an organisational user group (Story 2.6). Used by
+-- the group-member assignment BEFORE InsertGroupMembers, both in ONE transaction
+-- (delete-then-insert, separate statements — Story 2.5 lesson).
+DELETE FROM user_group_members
+WHERE user_group_id = $1;
+
+-- name: ListUserGroupMemberIDs :many
+-- The user ids that currently belong to an organisational user group (Story
+-- 2.6), ordered by id. Drives the group-member editor's pre-checked set; the
+-- assignment endpoint replaces this set atomically.
+SELECT user_id
+FROM user_group_members
+WHERE user_group_id = $1
+ORDER BY user_id;
+
+-- name: InsertGroupMembers :exec
+-- Bulk insert the member rows of an organisational user group (Story 2.6). The
+-- input is resolved user ids (already validated to exist via UsersExistByIDs).
+-- An empty set empties the group (removing every member is valid).
+INSERT INTO user_group_members (user_group_id, user_id)
+SELECT $1, u.id
+FROM users u
+WHERE u.id = ANY($2::uuid[])
+ON CONFLICT DO NOTHING;
+
+-- name: ListQualifications :many
+-- The full qualification vocabulary (Story 2.6, AD-7/FR-22): every
+-- qualification with its expiry model, ordered by name. The qualification
+-- management surface (Story 2.7) edits these; Story 2.6 only needs the list for
+-- the user-detail qualification view (via ListUserQualifications).
+SELECT id, name, description, expiry_kind, expires_at
+FROM qualifications
+ORDER BY name;
+
+-- name: AddQualificationToUser :exec
+-- Assign a qualification to a user (Story 2.6 persistence seam; the assignment
+-- EDITING surface ships with Story 2.7). ON CONFLICT DO NOTHING makes a
+-- duplicate assignment a no-op.
+INSERT INTO user_qualifications (user_id, qualification_id)
+VALUES ($1, $2)
+ON CONFLICT DO NOTHING;
+
+-- name: RemoveQualificationFromUser :exec
+-- Revoke a qualification from a user (Story 2.6 persistence seam; the
+-- assignment EDITING surface ships with Story 2.7). Revocation is immediate
+-- (FR-22/AD-2) because qualification resolution is live per request.
+DELETE FROM user_qualifications
+WHERE user_id = $1 AND qualification_id = $2;
