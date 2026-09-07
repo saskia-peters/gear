@@ -4,11 +4,12 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
 import { Sidebar } from './Sidebar.tsx'
 
-const IS_ADMIN_KEY = 'gear.is_admin'
+const PERMISSIONS_KEY = 'gear.permissions'
 
-// Story 2.1 task evidence: the ADMIN module's existence is hidden for
-// non-admins (no links/menu hints, FR-19) and shown only when the
-// server-authoritative cached is_admin flag is true.
+// Story 2.3 task evidence: the ADMIN module's existence is hidden for callers
+// with no admin-module code (no links/menu hints, FR-19) and shown only when
+// the server-authoritative cached resolved permission set contains an
+// admin-module code.
 describe('Sidebar', () => {
   beforeEach(() => {
     localStorage.clear()
@@ -30,8 +31,8 @@ describe('Sidebar', () => {
     expect(screen.queryByText(/ADMIN/i)).not.toBeInTheDocument()
   })
 
-  it('ADMIN: the ADMIN module link is rendered when the cached is_admin flag is true', () => {
-    localStorage.setItem(IS_ADMIN_KEY, 'true')
+  it('ADMIN: the ADMIN module link is rendered when the cached resolved set contains an admin-module code', () => {
+    localStorage.setItem(PERMISSIONS_KEY, JSON.stringify(['tools.manage']))
     render(
       <MemoryRouter>
         <Sidebar />

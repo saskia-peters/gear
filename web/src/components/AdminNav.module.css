@@ -1,0 +1,105 @@
+.nav {
+  flex-shrink: 0;
+  width: 100%;
+  background-color: var(--gear-color-surface-raised);
+  border-bottom: 1px solid var(--gear-color-border-hairline);
+}
+
+/* Mobile (≤640px): a hamburger toggle that expands the vertical list. */
+.toggle {
+  display: inline-flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gear-space-2);
+  width: 100%;
+  min-height: 48px;
+  padding: var(--gear-space-2) var(--gear-space-4);
+  background-color: transparent;
+  border: none;
+  color: var(--gear-color-ink-primary);
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  line-height: var(--gear-font-label-line-height);
+  cursor: pointer;
+  text-align: left;
+}
+
+.toggle:focus-visible {
+  outline: 2px solid var(--gear-focus-ring-color);
+  outline-offset: 2px;
+}
+
+.toggleIcon {
+  color: var(--gear-color-ink-secondary);
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0 var(--gear-space-3) var(--gear-space-3);
+  display: none;
+  flex-direction: column;
+  gap: var(--gear-space-1);
+}
+
+.list.open {
+  display: flex;
+}
+
+.link {
+  display: flex;
+  align-items: center;
+  min-height: 48px;
+  padding: var(--gear-space-2) var(--gear-space-4);
+  border-radius: var(--gear-radius-md);
+  color: var(--gear-color-ink-primary);
+  text-decoration: none;
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  line-height: var(--gear-font-label-line-height);
+  transition: background-color 0.15s ease;
+}
+
+.link:hover {
+  background-color: var(--gear-color-surface-base);
+  text-decoration: none;
+}
+
+.link:focus-visible {
+  outline: 2px solid var(--gear-focus-ring-color);
+  outline-offset: 2px;
+}
+
+.active,
+.active:hover {
+  background-color: var(--gear-color-brand);
+  color: var(--gear-color-ink-on-brand);
+}
+
+/* Tablet (641–1024px): persistent vertical sidebar. */
+@media (min-width: 641px) {
+  .nav {
+    width: 200px;
+    border-bottom: none;
+    border-right: 1px solid var(--gear-color-border-hairline);
+  }
+
+  .toggle {
+    display: none;
+  }
+
+  .list,
+  .list.open {
+    display: flex;
+    padding: var(--gear-space-3);
+    position: sticky;
+    top: 0;
+  }
+}
+
+/* Wide (>1024px): a fuller persistent sidebar, distinct from the tablet tier. */
+@media (min-width: 1025px) {
+  .nav {
+    width: 240px;
+  }
+}

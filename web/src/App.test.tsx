@@ -2,16 +2,44 @@
 import { render, screen, within, waitFor, act, cleanup } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { MemoryRouter } from 'react-router-dom'
+import { MemoryRouter, useNavigate } from 'react-router-dom'
 import App, { AppRoutes } from './App.tsx'
 import { ThemeProvider } from './context/ThemeContext.tsx'
 import { Sidebar } from './components/Sidebar.tsx'
 
 const TOKEN_STORAGE_KEY = 'gear.session_token'
-const IS_ADMIN_KEY = 'gear.is_admin'
+const PERMISSIONS_KEY = 'gear.permissions'
+
+// The admin role carries all 21 base codes (migration 000010 + admin.recovery.approve
+// from Story 1.1). A representative full set for admin-driven tests.
+const ALL_ADMIN_CODES = [
+  'dashboard.view',
+  'inspection.submit',
+  'inspection.history.view',
+  'report.export',
+  'tool.reinstate',
+  'tools.manage',
+  'tool_types.manage',
+  'users.view',
+  'users.approve',
+  'users.manage',
+  'user_groups.manage',
+  'roles.create',
+  'roles.edit',
+  'roles.assign',
+  'qualifications.manage',
+  'dsgvo.access_report',
+  'dsgvo.delete',
+  'admin.recovery.approve',
+  'admin.settings.email',
+  'admin.settings.backup',
+  'schedules.manage',
+]
 
 // validProfile is the GET /api/v1/auth/profile response the hardened RequireAuth
-// guard uses to validate a stored session server-side (Story 1.8).
+// guard uses to validate a stored session server-side (Story 1.8). It also
+// carries the resolved permission set (Story 2.3) so the same stubbed response
+// satisfies both the profile validation and the /me/permissions fetch.
 function validProfile(overrides: Record<string, unknown> = {}) {
   return {
     ok: true,
@@ -23,6 +51,7 @@ function validProfile(overrides: Record<string, unknown> = {}) {
       last_name: 'Mustermann',
       display_name: 'Max Mustermann',
       is_admin: false,
+      permissions: [],
       ...overrides,
     }),
   }
@@ -139,31 +168,35 @@ describe('App & Dashboard Foundation', () => {
     // (review finding 1.8-8): the no-token branch clears it like the 401 path.
     localStorage.setItem('gear.display_name', 'Max Mustermann')
     localStorage.setItem('gear.is_mfa_enabled', 'true')
-    localStorage.setItem(IS_ADMIN_KEY, 'true')
+    localStorage.setItem('gear.is_admin', 'true')
+    localStorage.setItem(PERMISSIONS_KEY, JSON.stringify(['users.manage']))
     await renderApp()
 
     expect(screen.getByRole('heading', { level: 2, name: 'Anmeldung' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Anmelden' })).toBeInTheDocument()
     expect(localStorage.getItem('gear.display_name')).toBeNull()
     expect(localStorage.getItem('gear.is_mfa_enabled')).toBeNull()
-    expect(localStorage.getItem(IS_ADMIN_KEY)).toBeNull()
+    expect(localStorage.getItem('gear.is_admin')).toBeNull()
+    expect(localStorage.getItem(PERMISSIONS_KEY)).toBeNull()
   })
 
-  it('SIDEBAR_ADMIN_E2E: a stored token validated with is_admin=true renders the ADMIN link in the shell', async () => {
+  it('SIDEBAR_ADMIN_E2E: a stored token validated with an admin resolved set renders the ADMIN link in the shell', async () => {
     // Pins review finding 1.8-12: RequireAuth's GET /auth/profile drives the
-    // server-authoritative admin flag, and the sidebar reflects it.
-    stubSessionValidation(validProfile({ is_admin: true }))
+    // server-authoritative session, and the resolved permission set (from
+    // /me/permissions) drives the ADMIN module visibility (Story 2.3).
+    stubSessionValidation(validProfile({ is_admin: true, permissions: ALL_ADMIN_CODES }))
     await renderApp()
 
     expect(screen.getByRole('link', { name: 'GEAR' })).toBeInTheDocument()
     expect(screen.getByRole('link', { name: 'ADMIN' })).toHaveAttribute('href', '/admin')
   })
 
-  it('ADMIN_ROUTE (CLIENT_ADMIN_NAV): a genuine admin navigating to /admin sees the module, resolved server-side', async () => {
-    // The route guard resolves is_admin from GET /api/v1/auth/profile — NOT from
-    // the forgeable cached flag (review finding 2.1-2) — so no stale/forged
-    // cache is seeded here.
-    stubSessionValidation(validProfile({ is_admin: true }))
+  it('ADMIN_ROUTE (CLIENT_ADMIN_NAV): a genuine admin navigating to /admin sees the Verwaltung landing, resolved server-side', async () => {
+    // The route guard resolves the session from GET /api/v1/auth/profile and the
+    // admin-module visibility from the resolved permission set — NOT from the
+    // forgeable cached flag (review finding 2.1-2) — so no stale/forged cache is
+    // seeded here.
+    stubSessionValidation(validProfile({ is_admin: true, permissions: ALL_ADMIN_CODES }))
     await act(async () => {
       render(
         <ThemeProvider>
@@ -175,7 +208,7 @@ describe('App & Dashboard Foundation', () => {
     })
 
     expect(
-      await screen.findByRole('heading', { level: 2, name: 'Admin-Modul' }),
+      await screen.findByRole('heading', { level: 2, name: 'Verwaltung — Start' }),
     ).toBeInTheDocument()
     // The admin sees the ADMIN module navigation too (server-authoritative).
     expect(screen.getByRole('link', { name: 'ADMIN' })).toHaveAttribute('href', '/admin')
@@ -203,9 +236,80 @@ describe('App & Dashboard Foundation', () => {
     expect(screen.queryByRole('link', { name: 'ADMIN' })).not.toBeInTheDocument()
   })
 
+  it('ADMIN_ROUTE_FORGED_CACHE: a forged gear.permissions cache does not unlock the admin module (server-authoritative)', async () => {
+    // The attacker forges an admin-module code in localStorage, but the server
+    // resolves NO admin codes. The guard must gate on the server response, not
+    // the forgeable cache (review finding 2.1-2, FR-19), and overwrite the
+    // forged cache with the server-resolved empty set.
+    localStorage.setItem(PERMISSIONS_KEY, JSON.stringify(['tools.manage']))
+    stubSessionValidation(validProfile({ is_admin: false }))
+    await act(async () => {
+      render(
+        <ThemeProvider>
+          <MemoryRouter initialEntries={['/admin']}>
+            <AppRoutes />
+          </MemoryRouter>
+        </ThemeProvider>,
+      )
+    })
+
+    expect(
+      await screen.findByRole('heading', { level: 2, name: 'Übersicht' }),
+    ).toBeInTheDocument()
+    expect(
+      screen.queryByRole('heading', { name: 'Verwaltung — Start' }),
+    ).not.toBeInTheDocument()
+    expect(JSON.parse(localStorage.getItem(PERMISSIONS_KEY) ?? '[]')).toEqual([])
+  })
+
+  it('ADMIN_ROUTE_FORGED_CACHE_SPA_NAV: RequireAdminModule re-resolves server-side on SPA navigation', async () => {
+    // RequireAuth's session check does NOT rerun on SPA navigation (its effect
+    // is mounted once). The attacker forges the cache AFTER the initial load and
+    // then navigates to /admin — RequireAdminModule must re-fetch
+    // /me/permissions on mount and fail closed, not trust the forged cache.
+    function NavHarness() {
+      const navigate = useNavigate()
+      return (
+        <div>
+          <button type="button" onClick={() => navigate('/admin')}>
+            Zu /admin
+          </button>
+          <AppRoutes />
+        </div>
+      )
+    }
+    const user = userEvent.setup()
+    stubSessionValidation(validProfile({ is_admin: false }))
+    render(
+      <ThemeProvider>
+        <MemoryRouter initialEntries={['/']}>
+          <NavHarness />
+        </MemoryRouter>
+      </ThemeProvider>,
+    )
+    await screen.findByRole('heading', { level: 2, name: 'Übersicht' })
+
+    // Forge an admin-module code after the initial server round-trips.
+    localStorage.setItem(PERMISSIONS_KEY, JSON.stringify(['tools.manage']))
+
+    // SPA-navigate to the admin module.
+    await user.click(screen.getByRole('button', { name: 'Zu /admin' }))
+
+    // The mount-fetch resolves an empty set → redirected back to the Dashboard,
+    // and the forged cache is replaced by the server result.
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { level: 2, name: 'Übersicht' })).toBeInTheDocument()
+    })
+    expect(
+      screen.queryByRole('heading', { name: 'Verwaltung — Start' }),
+    ).not.toBeInTheDocument()
+    expect(localStorage.getItem(PERMISSIONS_KEY)).toBeNull()
+  })
+
   it('ADMIN_RECOVERY_ROUTE_NONADMIN: a non-admin force-navigating to /admin/recovery is redirected to the Dashboard', async () => {
-    // The recovery surface is part of the isolated admin module: a non-admin
-    // never sees it (server-side RequirePermission would 403 the requests).
+    // The recovery surface is part of the isolated admin module: a caller with
+    // no admin-module code never sees it (server-side RequirePermission would
+    // 403 the requests).
     stubSessionValidation(validProfile({ is_admin: false }))
     await act(async () => {
       render(
@@ -223,6 +327,155 @@ describe('App & Dashboard Foundation', () => {
     expect(
       screen.queryByRole('heading', { name: 'Admin-Wiederherstellung' }),
     ).not.toBeInTheDocument()
+  })
+
+  it('NAV_SCHIRRMEISTER: a schirrmeister sees the ADMIN module and the Werkzeuge entry is reachable', async () => {
+    // schirrmeister = dashboard.view + inspection.submit + tools.manage +
+    // tool_types.manage. Only Werkzeuge (+ Übersicht) are exposed (FR-19).
+    stubSessionValidation(
+      validProfile({
+        is_admin: false,
+        permissions: ['dashboard.view', 'inspection.submit', 'tools.manage', 'tool_types.manage'],
+      }),
+    )
+    await act(async () => {
+      render(
+        <ThemeProvider>
+          <MemoryRouter initialEntries={['/admin']}>
+            <AppRoutes />
+          </MemoryRouter>
+        </ThemeProvider>,
+      )
+    })
+
+    expect(
+      await screen.findByRole('heading', { level: 2, name: 'Verwaltung — Start' }),
+    ).toBeInTheDocument()
+    expect(screen.getByRole('link', { name: 'ADMIN' })).toHaveAttribute('href', '/admin')
+    // Only Werkzeuge is shown as a card (Benutzer/Rollen/DSGVO are hidden).
+    const cards = screen.getByRole('region', { name: 'Verwaltungsbereiche' })
+    expect(within(cards).getByRole('link', { name: /Werkzeuge/ })).toHaveAttribute('href', '/admin/werkzeuge')
+    expect(within(cards).queryByRole('link', { name: /Benutzer/ })).not.toBeInTheDocument()
+    expect(within(cards).queryByRole('link', { name: /Rollen/ })).not.toBeInTheDocument()
+    expect(within(cards).queryByRole('link', { name: /DSGVO/ })).not.toBeInTheDocument()
+  })
+
+  it('NAV_FUEHRENDE: a fuehrende (after migration 000011) sees the Werkzeuge entry', async () => {
+    // fuehrende now carries tools.manage + tool_types.manage (user decision,
+    // migration 000011) so the Werkzeuge entry shows.
+    stubSessionValidation(
+      validProfile({
+        is_admin: false,
+        permissions: [
+          'dashboard.view',
+          'inspection.submit',
+          'inspection.history.view',
+          'report.export',
+          'tool.reinstate',
+          'tools.manage',
+          'tool_types.manage',
+        ],
+      }),
+    )
+    await act(async () => {
+      render(
+        <ThemeProvider>
+          <MemoryRouter initialEntries={['/admin']}>
+            <AppRoutes />
+          </MemoryRouter>
+        </ThemeProvider>,
+      )
+    })
+
+    expect(
+      await screen.findByRole('heading', { level: 2, name: 'Verwaltung — Start' }),
+    ).toBeInTheDocument()
+    const cards = screen.getByRole('region', { name: 'Verwaltungsbereiche' })
+    expect(within(cards).getByRole('link', { name: /Werkzeuge/ })).toHaveAttribute('href', '/admin/werkzeuge')
+    expect(within(cards).queryByRole('link', { name: /Benutzer/ })).not.toBeInTheDocument()
+  })
+
+  it('ROUTE_BLOCKED: a caller without users.* is redirected to the Dashboard when force-navigating to /admin/benutzer', async () => {
+    // A schirrmeister holds only tools.manage — /admin/benutzer is gated to the
+    // users.* codes and must not leak the admin surface (FR-19). Redirect to the
+    // Dashboard, never a "Zugriff verweigert" leak. The ADMIN module itself
+    // remains visible (the caller holds an admin-module code — Werkzeuge), but
+    // the Benutzer surface is never rendered.
+    stubSessionValidation(
+      validProfile({
+        is_admin: false,
+        permissions: ['tools.manage', 'tool_types.manage'],
+      }),
+    )
+    await act(async () => {
+      render(
+        <ThemeProvider>
+          <MemoryRouter initialEntries={['/admin/benutzer']}>
+            <AppRoutes />
+          </MemoryRouter>
+        </ThemeProvider>,
+      )
+    })
+
+    expect(
+      await screen.findByRole('heading', { level: 2, name: 'Übersicht' }),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Benutzer' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('link', { name: /Geräte verwalten/ })).not.toBeInTheDocument()
+  })
+
+  it.each([
+    ['rollen', '/admin/rollen', 'Rollen'],
+    ['qualifikationen', '/admin/qualifikationen', 'Qualifikationen'],
+    ['einstellungen', '/admin/einstellungen', 'Einstellungen'],
+    ['dsgvo', '/admin/dsgvo', 'DSGVO'],
+  ])(
+    'ROUTE_BLOCKED_%s: a caller without %s codes is redirected to the Dashboard',
+    async (_key, route, surfaceHeading) => {
+      // The caller holds a code for ANOTHER entry (werkzeuge → tools.manage)
+      // but NOT any of the target entry's codes. The route guard must not leak
+      // the target surface (FR-19): redirect to the Dashboard, never a
+      // "Zugriff verweigert" branch.
+      stubSessionValidation(
+        validProfile({
+          is_admin: false,
+          permissions: ['tools.manage', 'tool_types.manage'],
+        }),
+      )
+      await act(async () => {
+        render(
+          <ThemeProvider>
+            <MemoryRouter initialEntries={[route]}>
+              <AppRoutes />
+            </MemoryRouter>
+          </ThemeProvider>,
+        )
+      })
+
+      expect(
+        await screen.findByRole('heading', { level: 2, name: 'Übersicht' }),
+      ).toBeInTheDocument()
+      expect(
+        screen.queryByRole('heading', { name: surfaceHeading }),
+      ).not.toBeInTheDocument()
+    },
+  )
+
+  it('NAV_FETCH_FAIL: a failed /me/permissions fetch hides the ADMIN entry (fail closed)', async () => {
+    // The profile validates but the permissions fetch fails (network error).
+    // No admin code is cached → no ADMIN entry anywhere (FR-19), no crash.
+    vi.stubGlobal(
+      'fetch',
+      vi.fn()
+        .mockResolvedValueOnce(validProfile({ is_admin: false }))
+        .mockRejectedValueOnce(new Error('network down')),
+    )
+    await renderApp()
+
+    await waitFor(() => {
+      expect(screen.getByRole('heading', { level: 2, name: 'Übersicht' })).toBeInTheDocument()
+    })
+    expect(screen.queryByRole('link', { name: 'ADMIN' })).not.toBeInTheDocument()
   })
 
   it('REQUIRE_AUTH_VALID: a stored token validated server-side grants access to the dashboard', async () => {
@@ -245,12 +498,17 @@ describe('App & Dashboard Foundation', () => {
       expect(screen.getByRole('heading', { level: 2, name: 'Anmeldung' })).toBeInTheDocument()
     })
     expect(localStorage.getItem(TOKEN_STORAGE_KEY)).toBeNull()
-    expect(localStorage.getItem(IS_ADMIN_KEY)).toBeNull()
+    expect(localStorage.getItem('gear.is_admin')).toBeNull()
+    expect(localStorage.getItem(PERMISSIONS_KEY)).toBeNull()
   })
 
   it('REQUIRE_AUTH_PAGESHOW: re-validates on bfcache restore (pageshow persisted) so logout is enforced after back navigation', async () => {
+    // RequireAuth now makes two server calls per validation (profile +
+    // permissions), so the mock sequence provides both for the first validation
+    // and a 401 for the re-validation's profile call (which aborts early).
     const mock = vi
       .fn()
+      .mockResolvedValueOnce(validProfile())
       .mockResolvedValueOnce(validProfile())
       .mockResolvedValueOnce(
         Promise.resolve({
@@ -488,8 +746,8 @@ describe('Sidebar', () => {
     expect(screen.queryByRole('link', { name: 'ADMIN' })).not.toBeInTheDocument()
   })
 
-  it('ADMIN module is shown only when the cached is_admin flag is true', () => {
-    localStorage.setItem(IS_ADMIN_KEY, 'true')
+  it('ADMIN module is shown only when the cached resolved set contains an admin-module code', () => {
+    localStorage.setItem(PERMISSIONS_KEY, JSON.stringify(['tools.manage']))
     render(
       <MemoryRouter>
         <Sidebar />

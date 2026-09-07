@@ -1,0 +1,124 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  width: 100%;
+}
+
+.body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+}
+
+.main {
+  flex: 1;
+  width: 100%;
+  max-width: 860px;
+  margin: 0 auto;
+  padding: var(--gear-space-8) var(--gear-space-margin-mobile);
+  box-sizing: border-box;
+}
+
+.title {
+  font-size: var(--gear-font-display-size);
+  font-weight: var(--gear-font-display-weight);
+  line-height: var(--gear-font-display-line-height);
+  letter-spacing: var(--gear-font-display-letter-spacing);
+  color: var(--gear-color-ink-primary);
+  margin: 0 0 var(--gear-space-2);
+}
+
+.subtitle {
+  font-size: var(--gear-font-body-size);
+  color: var(--gear-color-ink-secondary);
+  line-height: var(--gear-font-body-line-height);
+  margin: 0 0 var(--gear-space-8);
+  max-width: 560px;
+}
+
+.grid {
+  display: grid;
+  grid-template-columns: 1fr;
+  gap: var(--gear-space-4);
+  margin-bottom: var(--gear-space-8);
+}
+
+.card {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-2);
+  min-height: 96px;
+  padding: var(--gear-space-4) var(--gear-space-5);
+  background-color: var(--gear-color-surface-raised);
+  border: 1px solid var(--gear-color-border-hairline);
+  border-radius: var(--gear-radius-md);
+  text-decoration: none;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.card:hover {
+  background-color: var(--gear-color-surface-base);
+  border-color: var(--gear-color-brand);
+  text-decoration: none;
+}
+
+.card:focus-visible {
+  outline: 2px solid var(--gear-focus-ring-color);
+  outline-offset: 2px;
+}
+
+.cardTitle {
+  font-size: var(--gear-font-title-size);
+  font-weight: var(--gear-font-title-weight);
+  line-height: var(--gear-font-title-line-height);
+  color: var(--gear-color-brand);
+}
+
+.cardDescription {
+  font-size: var(--gear-font-body-size);
+  color: var(--gear-color-ink-secondary);
+  line-height: var(--gear-font-body-line-height);
+}
+
+.pending {
+  margin-bottom: var(--gear-space-8);
+}
+
+.pendingTitle {
+  font-size: var(--gear-font-title-size);
+  font-weight: var(--gear-font-title-weight);
+  line-height: var(--gear-font-title-line-height);
+  color: var(--gear-color-ink-primary);
+  margin: 0 0 var(--gear-space-4);
+}
+
+.secondaryLink {
+  font-size: var(--gear-font-label-size);
+  color: var(--gear-color-brand);
+  text-decoration: none;
+  min-height: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0 var(--gear-space-2);
+}
+
+.secondaryLink:hover {
+  text-decoration: underline;
+}
+
+/* Tablet and wide: the admin nav sits as a persistent sidebar to the left. */
+@media (min-width: 641px) {
+  .body {
+    flex-direction: row;
+  }
+}
+
+/* Two-column card grid on wide screens. */
+@media (min-width: 641px) {
+  .grid {
+    grid-template-columns: repeat(2, 1fr);
+  }
+}

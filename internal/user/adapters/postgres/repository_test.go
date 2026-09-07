@@ -1527,8 +1527,10 @@ func TestPostgresBasePermissionSeedResolution(t *testing.T) {
 	}
 
 	fuehrende := newGroupUser("fuehrende")
-	if got := resolve(fuehrende); !sameCodeSet(got, []string{"dashboard.view", "inspection.submit", "inspection.history.view", "report.export", "tool.reinstate"}) {
-		t.Errorf("fuehrende permissions = %v, want [dashboard.view inspection.submit inspection.history.view report.export tool.reinstate]", got)
+	// 7 codes after migration 000011 (Story 2.3, user decision): fuehrende now
+	// also carries tools.manage + tool_types.manage like schirrmeister.
+	if got := resolve(fuehrende); !sameCodeSet(got, []string{"dashboard.view", "inspection.submit", "inspection.history.view", "report.export", "tool.reinstate", "tools.manage", "tool_types.manage"}) {
+		t.Errorf("fuehrende permissions = %v, want [dashboard.view inspection.submit inspection.history.view report.export tool.reinstate tools.manage tool_types.manage]", got)
 	}
 
 	// 4. UNION/DISTINCT: a user in helfende + schirrmeister (BOTH grant

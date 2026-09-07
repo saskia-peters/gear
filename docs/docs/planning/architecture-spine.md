@@ -318,8 +318,8 @@ The **additive** permission set each of the four base roles ships with. A tick m
 | --- | :---: | :---: | :---: | :---: |
 | `dashboard.view` | ✔ | ✔ | ✔ | ✔ |
 | `inspection.submit` | ✔ | ✔ | ✔ | ✔ |
-| `tools.manage` | | ✔ | | ✔ |
-| `tool_types.manage` | | ✔ | | ✔ |
+| `tools.manage` | | ✔ | ✔ | ✔ |
+| `tool_types.manage` | | ✔ | ✔ | ✔ |
 | `inspection.history.view` | | ✔ | ✔ | ✔ |
 | `report.export` | | | ✔ | ✔ |
 | `tool.reinstate` | | | ✔ | ✔ |
@@ -338,7 +338,7 @@ The **additive** permission set each of the four base roles ships with. A tick m
 | `admin.settings.backup` | | | | ✔ |
 | `schedules.manage` | | | | ✔ |
 
-> **Reading the matrix:** `helfende` = "volunteer who inspects". `schirrmeister` = **equipment caretaker** — everything a volunteer can do, **plus** managing tools and tool types (and their inspection history). `fuehrende` = **leadership** — inspection plus history, PDF export, and reinstate (but not tool/tool-type administration, which belongs to the Schirrmeister). `admin` = **everything**. All four are editable by an admin, and new custom groups can be added (AD-12). Inspection still always needs the tool type's required qualification (AD-7), independent of these roles.
+> **Reading the matrix:** `helfende` = "volunteer who inspects". `schirrmeister` = **equipment caretaker** — everything a volunteer can do, **plus** managing tools and tool types (and their inspection history). `fuehrende` = **leadership** — inspection plus history, PDF export, reinstate, and (per user decision, Story 2.3) tool/tool-type administration as a fellow caretaker alongside the Schirrmeister. `admin` = **everything**. All four are editable by an admin, and new custom groups can be added (AD-12). Inspection still always needs the tool type's required qualification (AD-7), independent of these roles.
 
 **Entity relations** (derivations are AD-4/AD-5; attribute detail is owned by code):
 

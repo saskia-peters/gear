@@ -25,6 +25,7 @@ export function authHeaders(): HeadersInit {
 const MFA_ENABLED_KEY = 'gear.is_mfa_enabled'
 const DISPLAY_NAME_KEY = 'gear.display_name'
 const IS_ADMIN_KEY = 'gear.is_admin'
+const PERMISSIONS_KEY = 'gear.permissions'
 
 export interface AuthUserInfo {
   displayName?: string
@@ -101,9 +102,42 @@ export function adminForbiddenHandled(res: { status: number }): boolean {
   return true
 }
 
+// getPermissions reports the cached resolved permission set (Story 2.3). The
+// value is only ever set from a server response (GET /api/v1/auth/me/permissions);
+// the client never derives it. Absence of the key is treated as an empty set.
+export function getPermissions(): string[] {
+  try {
+    const raw = localStorage.getItem(PERMISSIONS_KEY)
+    if (!raw) return []
+    const parsed: unknown = JSON.parse(raw)
+    return Array.isArray(parsed) ? parsed.filter((v): v is string => typeof v === 'string') : []
+  } catch {
+    return []
+  }
+}
+
+// savePermissions updates the cached resolved permission set from the
+// server-authoritative GET /me/permissions response (AD-2/AD-6). The server
+// remains the source of truth; this only keeps client-side filtering in sync.
+export function savePermissions(permissions: string[]): void {
+  if (Array.isArray(permissions) && permissions.length > 0) {
+    localStorage.setItem(PERMISSIONS_KEY, JSON.stringify(permissions))
+  } else {
+    localStorage.removeItem(PERMISSIONS_KEY)
+  }
+}
+
+// hasPermission reports whether the cached resolved permission set contains the
+// given code (Story 2.3). It is a convenience for components that need a single
+// code check; the nav/landing filtering uses filteredAdminNav on the full set.
+export function hasPermission(code: string): boolean {
+  return getPermissions().includes(code)
+}
+
 export function clearAuthState(): void {
   localStorage.removeItem(SESSION_TOKEN_KEY)
   localStorage.removeItem(MFA_ENABLED_KEY)
   localStorage.removeItem(DISPLAY_NAME_KEY)
   localStorage.removeItem(IS_ADMIN_KEY)
+  localStorage.removeItem(PERMISSIONS_KEY)
 }
