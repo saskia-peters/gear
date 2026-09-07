@@ -11,6 +11,28 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const addUserToGroup = `-- name: AddUserToGroup :exec
+INSERT INTO user_permission_groups (user_id, permission_group_id)
+SELECT $1, g.id
+FROM permission_groups g
+WHERE g.name = $2
+ON CONFLICT DO NOTHING
+`
+
+type AddUserToGroupParams struct {
+	UserID    pgtype.UUID `json:"user_id"`
+	GroupName string      `json:"group_name"`
+}
+
+// Idempotent role seed (Story 2.4, AD-2/AD-12): grants the named permission
+// group (e.g. the default 'helfende' role) to the user. ON CONFLICT DO NOTHING
+// makes re-application a no-op, so an already-in-helfende user is never
+// duplicated.
+func (q *Queries) AddUserToGroup(ctx context.Context, arg AddUserToGroupParams) error {
+	_, err := q.db.Exec(ctx, addUserToGroup, arg.UserID, arg.GroupName)
+	return err
+}
+
 const approveAdminRecovery = `-- name: ApproveAdminRecovery :one
 UPDATE password_reset_tokens
 SET approved_by_user_id = $2,
@@ -919,6 +941,51 @@ func (q *Queries) ListAdminRecoveryRequest(ctx context.Context) ([]ListAdminReco
 	return items, nil
 }
 
+const listPendingUsers = `-- name: ListPendingUsers :many
+SELECT id, email, first_name, last_name, created_at
+FROM users
+WHERE state = 'pending_approval'
+ORDER BY created_at ASC, id ASC
+`
+
+type ListPendingUsersRow struct {
+	ID        pgtype.UUID        `json:"id"`
+	Email     string             `json:"email"`
+	FirstName string             `json:"first_name"`
+	LastName  string             `json:"last_name"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
+// Pending-approval users for the admin approval surface (Story 2.4, FR-20):
+// the submitted profile details plus id and created_at, oldest first. The
+// password hash and other secret material are deliberately NOT selected — the
+// listing must never expose credentials (NFR-O1).
+func (q *Queries) ListPendingUsers(ctx context.Context) ([]ListPendingUsersRow, error) {
+	rows, err := q.db.Query(ctx, listPendingUsers)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListPendingUsersRow
+	for rows.Next() {
+		var i ListPendingUsersRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Email,
+			&i.FirstName,
+			&i.LastName,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPermissionGroupsByUser = `-- name: ListPermissionGroupsByUser :many
 SELECT pg.id, pg.name, pg.description, pg.is_base_role
 FROM permission_groups pg
@@ -1032,6 +1099,69 @@ type SetUserPendingTotpSecretParams struct {
 func (q *Queries) SetUserPendingTotpSecret(ctx context.Context, arg SetUserPendingTotpSecretParams) error {
 	_, err := q.db.Exec(ctx, setUserPendingTotpSecret, arg.ID, arg.PendingTotpSecretEncrypted, arg.PendingTotpExpiresAt)
 	return err
+}
+
+const setUserState = `-- name: SetUserState :one
+UPDATE users
+SET state = $1, updated_at = now()
+WHERE id = $2 AND state = $3
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password
+`
+
+type SetUserStateParams struct {
+	StateNew     string      `json:"state_new"`
+	ID           pgtype.UUID `json:"id"`
+	StateCurrent string      `json:"state_current"`
+}
+
+type SetUserStateRow struct {
+	ID                         pgtype.UUID        `json:"id"`
+	Email                      string             `json:"email"`
+	DisplayName                string             `json:"display_name"`
+	FirstName                  string             `json:"first_name"`
+	LastName                   string             `json:"last_name"`
+	PasswordHash               string             `json:"password_hash"`
+	State                      string             `json:"state"`
+	IsMfaEnabled               bool               `json:"is_mfa_enabled"`
+	TotpSecretEncrypted        pgtype.Text        `json:"totp_secret_encrypted"`
+	PendingTotpSecretEncrypted pgtype.Text        `json:"pending_totp_secret_encrypted"`
+	PendingTotpExpiresAt       pgtype.Timestamptz `json:"pending_totp_expires_at"`
+	Attributes                 []byte             `json:"attributes"`
+	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt                  pgtype.Timestamptz `json:"updated_at"`
+	PendingEmail               pgtype.Text        `json:"pending_email"`
+	MustChangePassword         bool               `json:"must_change_password"`
+}
+
+// Conditional account-state transition (Story 2.4, FR-20): flips a user from
+// an EXPECTED current state to a new state — pending_approval -> active on
+// approve, pending_approval -> deactivated on reject — in one statement. The
+// WHERE guard makes the transition atomic against a concurrent change: a
+// zero-row update (unknown id, or the user left the expected state) is a no-op
+// the caller maps to the uniform not-found/conflict (no existence leak beyond
+// what the admin already sees, FR-19). Also used later for deactivate.
+func (q *Queries) SetUserState(ctx context.Context, arg SetUserStateParams) (SetUserStateRow, error) {
+	row := q.db.QueryRow(ctx, setUserState, arg.StateNew, arg.ID, arg.StateCurrent)
+	var i SetUserStateRow
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.DisplayName,
+		&i.FirstName,
+		&i.LastName,
+		&i.PasswordHash,
+		&i.State,
+		&i.IsMfaEnabled,
+		&i.TotpSecretEncrypted,
+		&i.PendingTotpSecretEncrypted,
+		&i.PendingTotpExpiresAt,
+		&i.Attributes,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.PendingEmail,
+		&i.MustChangePassword,
+	)
+	return i, err
 }
 
 const setUserTotpSecret = `-- name: SetUserTotpSecret :exec

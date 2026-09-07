@@ -72,6 +72,16 @@ type Service interface {
 	DenyAdminRecovery(ctx context.Context, approver *core.User, targetEmail, reason string) (*core.AdminRecoveryDenyResult, error)
 	ListAdminRecoveryRequest(ctx context.Context, caller *core.User) ([]*core.AdminRecoveryRequest, error)
 	CompleteAdminRecovery(ctx context.Context, rawToken, newPassword, confirm string) (*core.AdminRecoveryCompleteResult, error)
+	// User approval workflow (Story 2.4, FR-20): ListPending returns the
+	// pending-approval users (oldest first) for the admin review surface;
+	// ApproveUser activates a pending user and seeds the default 'helfende'
+	// role (atomic); RejectUser moves a pending user to deactivated so the
+	// pending record disappears and the account can neither log in nor
+	// re-register. All three are gated by `users.approve` at the route mount
+	// and re-verified in the core (AD-6).
+	ListPending(ctx context.Context, actor *core.User) ([]*core.PendingUser, error)
+	ApproveUser(ctx context.Context, actor *core.User, userID string) (*core.UserApprovalResult, error)
+	RejectUser(ctx context.Context, actor *core.User, userID string) (*core.UserApprovalResult, error)
 }
 
 // Repository is the outbound persistence port for User data.
@@ -105,6 +115,10 @@ type Repository interface {
 	ConsumeAdminRecoveryToken(ctx context.Context, tokenHash string) (*core.AdminRecoveryToken, error)
 	ListAdminRecoveryRequest(ctx context.Context) ([]*core.AdminRecoveryRequest, error)
 	DenyAdminRecovery(ctx context.Context, userID string) error
+	// User approval persistence (Story 2.4, FR-20).
+	ListPendingUsers(ctx context.Context) ([]*core.PendingUser, error)
+	ApproveUser(ctx context.Context, userID string) (*core.User, error)
+	RejectUser(ctx context.Context, userID string) (*core.User, error)
 }
 
 // PasswordHasher is the outbound password hashing port (AD-13).

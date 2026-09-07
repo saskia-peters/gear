@@ -41,6 +41,9 @@ type mockService struct {
 	listAdminRecoveryFunc    func(ctx context.Context, caller *core.User) ([]*core.AdminRecoveryRequest, error)
 	completeAdminRecoveryFunc func(ctx context.Context, rawToken, newPassword, confirm string) (*core.AdminRecoveryCompleteResult, error)
 	resolvePermissionFunc    func(ctx context.Context, user *core.User) ([]string, error)
+	listPendingFunc          func(ctx context.Context, actor *core.User) ([]*core.PendingUser, error)
+	approveUserFunc          func(ctx context.Context, actor *core.User, userID string) (*core.UserApprovalResult, error)
+	rejectUserFunc           func(ctx context.Context, actor *core.User, userID string) (*core.UserApprovalResult, error)
 	revokeOtherCalls     *int
 	revokeAllCalls       *int
 }
@@ -203,6 +206,27 @@ func (m *mockService) CompleteAdminRecovery(ctx context.Context, rawToken, newPa
 	}
 	// Default: no valid token, so the reset-endpoint fallback must fail.
 	return nil, core.ErrAdminRecoveryInvalid
+}
+
+func (m *mockService) ListPending(ctx context.Context, actor *core.User) ([]*core.PendingUser, error) {
+	if m.listPendingFunc != nil {
+		return m.listPendingFunc(ctx, actor)
+	}
+	return []*core.PendingUser{}, nil
+}
+
+func (m *mockService) ApproveUser(ctx context.Context, actor *core.User, userID string) (*core.UserApprovalResult, error) {
+	if m.approveUserFunc != nil {
+		return m.approveUserFunc(ctx, actor, userID)
+	}
+	return &core.UserApprovalResult{Message: core.MsgUserApproved, UserID: userID, Email: "volunteer@gear.local"}, nil
+}
+
+func (m *mockService) RejectUser(ctx context.Context, actor *core.User, userID string) (*core.UserApprovalResult, error) {
+	if m.rejectUserFunc != nil {
+		return m.rejectUserFunc(ctx, actor, userID)
+	}
+	return &core.UserApprovalResult{Message: core.MsgUserRejected, UserID: userID, Email: "volunteer@gear.local"}, nil
 }
 
 // stubValidator always authenticates the caller as an active user. Used to
@@ -1632,6 +1656,18 @@ func (r *changePasswordRepo) ListAdminRecoveryRequest(_ context.Context) ([]*cor
 
 func (r *changePasswordRepo) DenyAdminRecovery(_ context.Context, _ string) error {
 	return nil
+}
+
+func (r *changePasswordRepo) ListPendingUsers(_ context.Context) ([]*core.PendingUser, error) {
+	return nil, nil
+}
+
+func (r *changePasswordRepo) ApproveUser(_ context.Context, _ string) (*core.User, error) {
+	return nil, core.ErrUserNotPending
+}
+
+func (r *changePasswordRepo) RejectUser(_ context.Context, _ string) (*core.User, error) {
+	return nil, core.ErrUserNotPending
 }
 
 func (r *changePasswordRepo) InsertAuditEvent(_ context.Context, _ string, operation, _, _ string) error {

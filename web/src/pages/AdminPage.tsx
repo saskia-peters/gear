@@ -1,7 +1,7 @@
 import { Link } from 'react-router-dom'
 import { Header } from '../components/Header.tsx'
 import { AdminNav } from '../components/AdminNav.tsx'
-import { EmptyState } from '../components/EmptyState.tsx'
+import { PendingApprovals } from '../components/PendingApprovals.tsx'
 import { getPermissions, hasPermission } from '../auth/authState.ts'
 import { filteredAdminNav } from '../auth/permissions.ts'
 import styles from './AdminPage.module.css'
@@ -17,10 +17,13 @@ import styles from './AdminPage.module.css'
 // branch lives here.
 export function AdminPage() {
   const entries = filteredAdminNav(getPermissions())
-  // The pending-approvals section only matters to callers who can act on it:
-  // a tools-only schirrmeister/fuehrende sees the cards + subtitle but not the
-  // approvals (they hold no users.approve/users.view).
-  const canViewApprovals = hasPermission('users.approve') || hasPermission('users.view')
+  // The pending-approvals section only matters to callers who can ACT on it:
+  // the server's /users/* endpoints require `users.approve` (AD-6/FR-20). A
+  // caller holding only users.view (or a tools-only schirrmeister/fuehrende)
+  // must NOT mount the widget — the server would 403 them and
+  // adminForbiddenHandled would force them out of the admin module. Matching
+  // the server gate exactly keeps a users.view-only caller safely on the page.
+  const canViewApprovals = hasPermission('users.approve')
 
   return (
     <div className={styles.page}>
@@ -50,10 +53,7 @@ export function AdminPage() {
           {canViewApprovals && (
             <section aria-label="Ausstehende Anträge" className={styles.pending}>
               <h3 className={styles.pendingTitle}>Ausstehende Anträge</h3>
-              <EmptyState
-                message="Keine ausstehenden Anträge"
-                description="Neue Freigaben von Mitgliedern erscheinen hier."
-              />
+              <PendingApprovals />
             </section>
           )}
 

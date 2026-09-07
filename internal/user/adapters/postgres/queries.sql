@@ -433,3 +433,37 @@ WHERE user_id = $1
   AND recovery_target_admin = true
   AND approved_by_user_id IS NULL
   AND expires_at > now();
+
+-- name: ListPendingUsers :many
+-- Pending-approval users for the admin approval surface (Story 2.4, FR-20):
+-- the submitted profile details plus id and created_at, oldest first. The
+-- password hash and other secret material are deliberately NOT selected — the
+-- listing must never expose credentials (NFR-O1).
+SELECT id, email, first_name, last_name, created_at
+FROM users
+WHERE state = 'pending_approval'
+ORDER BY created_at ASC, id ASC;
+
+-- name: SetUserState :one
+-- Conditional account-state transition (Story 2.4, FR-20): flips a user from
+-- an EXPECTED current state to a new state — pending_approval -> active on
+-- approve, pending_approval -> deactivated on reject — in one statement. The
+-- WHERE guard makes the transition atomic against a concurrent change: a
+-- zero-row update (unknown id, or the user left the expected state) is a no-op
+-- the caller maps to the uniform not-found/conflict (no existence leak beyond
+-- what the admin already sees, FR-19). Also used later for deactivate.
+UPDATE users
+SET state = @state_new, updated_at = now()
+WHERE id = @id AND state = @state_current
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password;
+
+-- name: AddUserToGroup :exec
+-- Idempotent role seed (Story 2.4, AD-2/AD-12): grants the named permission
+-- group (e.g. the default 'helfende' role) to the user. ON CONFLICT DO NOTHING
+-- makes re-application a no-op, so an already-in-helfende user is never
+-- duplicated.
+INSERT INTO user_permission_groups (user_id, permission_group_id)
+SELECT @user_id, g.id
+FROM permission_groups g
+WHERE g.name = @group_name
+ON CONFLICT DO NOTHING;

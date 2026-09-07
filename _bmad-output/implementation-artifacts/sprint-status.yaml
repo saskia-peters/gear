@@ -55,7 +55,7 @@ development_status:
   2-1-admin-module-access-isolation: done
   2-2-resolution-of-active-permission-set: review
   2-3-admin-ux-foundation: review
-  2-4-user-approval-workflow: backlog
+  2-4-user-approval-workflow: review
   2-5-role-permission-group-management: backlog
   2-6-user-group-administration: backlog
   2-7-qualification-management: backlog

@@ -57,6 +57,15 @@ type mockRepo struct {
 	// store error (review finding 1.10: real errors must propagate, only
 	// ErrNoRows maps to ErrAdminRecoveryInvalid).
 	adminRecoveryErr error
+	// User approval (Story 2.4): listPendingUsers is returned by
+	// ListPendingUsers; approveUserFunc/rejectUserFunc override the default
+	// pending->active / pending->deactivated transition.
+	listPendingUsers []*PendingUser
+	listPendingErr   error
+	approveErr       error
+	rejectErr        error
+	approveUserFunc  func(ctx context.Context, userID string) (*User, error)
+	rejectUserFunc   func(ctx context.Context, userID string) (*User, error)
 }
 
 func newMockRepo() *mockRepo {
@@ -542,6 +551,48 @@ func (m *mockRepo) DenyAdminRecovery(_ context.Context, userID string) error {
 		}
 	}
 	return nil
+}
+
+// ListPendingUsers returns the configured pending list (Story 2.4).
+func (m *mockRepo) ListPendingUsers(_ context.Context) ([]*PendingUser, error) {
+	if m.listPendingErr != nil {
+		return nil, m.listPendingErr
+	}
+	return m.listPendingUsers, nil
+}
+
+// ApproveUser activates the pending user and returns it (Story 2.4). The
+// default implementation mirrors the postgres adapter's contract: an unknown
+// or non-pending user maps to ErrUserNotPending.
+func (m *mockRepo) ApproveUser(ctx context.Context, userID string) (*User, error) {
+	if m.approveUserFunc != nil {
+		return m.approveUserFunc(ctx, userID)
+	}
+	if m.approveErr != nil {
+		return nil, m.approveErr
+	}
+	u := m.userByID(userID)
+	if u == nil || u.State != StatePendingApproval {
+		return nil, ErrUserNotPending
+	}
+	u.State = StateActive
+	return u, nil
+}
+
+// RejectUser deactivates the pending user and returns it (Story 2.4).
+func (m *mockRepo) RejectUser(ctx context.Context, userID string) (*User, error) {
+	if m.rejectUserFunc != nil {
+		return m.rejectUserFunc(ctx, userID)
+	}
+	if m.rejectErr != nil {
+		return nil, m.rejectErr
+	}
+	u := m.userByID(userID)
+	if u == nil || u.State != StatePendingApproval {
+		return nil, ErrUserNotPending
+	}
+	u.State = StateDeactivated
+	return u, nil
 }
 
 // userByID finds a user by ID across the email-keyed map (the mock repository

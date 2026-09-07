@@ -308,3 +308,170 @@ func TestComposedAdminRecoveryRoutesReachable(t *testing.T) {
 		t.Errorf("volunteer 403 body hints at the admin module: %s", rec.Body.String())
 	}
 }
+
+// TestComposedAdminUserApprovalFlow covers the Story 2.4 HTTP contract through
+// the REAL wiring (postgres repo + service + admin router behind the outer
+// admin-only gateway and the inner users.approve gate): list pending, approve
+// (→ active + helfende seed + audit), reject (→ deactivated + audit), the
+// uniform 404 for an unknown/non-pending target, and the hidden-existence 403
+// for a caller without `users.approve`.
+func TestComposedAdminUserApprovalFlow(t *testing.T) {
+	r, repo, sm, pool := newComposedAdminRouter(t, discardLogger())
+	stamp := time.Now().Format("20060102150405.000000")
+
+	adminEmail := fmt.Sprintf("apprcomp.admin.%s@gear.local", stamp)
+	_, adminToken := createActiveUser(t, pool, repo, sm, adminEmail, "Appr Admin", "Appr", "Admin", true)
+
+	volunteerEmail := fmt.Sprintf("apprcomp.vol.%s@gear.local", stamp)
+	_, volunteerToken := createActiveUser(t, pool, repo, sm, volunteerEmail, "Appr Vol", "Appr", "Vol", false)
+
+	// A genuine pending registration (Story 1.3): stays pending_approval.
+	pendingEmail := fmt.Sprintf("apprcomp.pend.%s@gear.local", stamp)
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), "DELETE FROM users WHERE email = $1", pendingEmail)
+	})
+	pending, err := repo.CreateRegisteredUser(context.Background(), pendingEmail, "Tim Müller", "Tim", "Müller", argon2DummyHash)
+	if err != nil {
+		t.Fatalf("creating pending user failed: %v", err)
+	}
+
+	// LIST_PENDING: the admin reaches the surface and sees the pending request.
+	rec := doComposedAdminGET(r, adminToken, "/api/v1/admin/users/pending")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pending list: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), pendingEmail) {
+		t.Errorf("pending list missing %s: %s", pendingEmail, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "password") {
+		t.Errorf("pending list leaks password material: %s", rec.Body.String())
+	}
+
+	// LIST_FORBIDDEN: a caller without users.approve gets the uniform
+	// hidden-existence 403 (no admin hint).
+	rec = doComposedAdminGET(r, volunteerToken, "/api/v1/admin/users/pending")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("volunteer pending: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(strings.ToLower(rec.Body.String()), "admin") {
+		t.Errorf("volunteer 403 body hints at the admin module: %s", rec.Body.String())
+	}
+
+	// APPROVE_VALID: the user moves to active, helfende is seeded, audit row.
+	rec = doComposedAdminPOST(r, adminToken, "/api/v1/admin/users/"+pending.ID+"/approve", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("approve: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), usercore.MsgUserApproved) {
+		t.Errorf("approve body missing confirmation: %s", rec.Body.String())
+	}
+	var activeState string
+	if err := pool.QueryRow(context.Background(), "SELECT state FROM users WHERE id = $1", pending.ID).Scan(&activeState); err != nil {
+		t.Fatalf("reading state after approve failed: %v", err)
+	}
+	if activeState != string(usercore.StateActive) {
+		t.Errorf("state after approve = %q, want active", activeState)
+	}
+	var helfendeCnt int
+	if err := pool.QueryRow(context.Background(), `
+		SELECT COUNT(*) FROM user_permission_groups upg
+		JOIN permission_groups g ON g.id = upg.permission_group_id
+		WHERE upg.user_id = $1 AND g.name = 'helfende'`, pending.ID).Scan(&helfendeCnt); err != nil {
+		t.Fatalf("counting helfende failed: %v", err)
+	}
+	if helfendeCnt != 1 {
+		t.Errorf("helfende memberships = %d, want 1", helfendeCnt)
+	}
+	var approveAudit int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM audit_log WHERE operation = 'user.approve' AND operation_detail = 'target=' || $1`, pendingEmail).Scan(&approveAudit); err != nil {
+		t.Fatalf("counting approve audit failed: %v", err)
+	}
+	if approveAudit != 1 {
+		t.Errorf("approve audit rows = %d, want 1", approveAudit)
+	}
+
+	// APPROVE_NONPENDING: approving the same (now active) user is a uniform 404
+	// (no leak beyond what the admin already sees).
+	rec = doComposedAdminPOST(r, adminToken, "/api/v1/admin/users/"+pending.ID+"/approve", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("re-approve: status = %d, want 404 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// A second pending user to reject.
+	rejectEmail := fmt.Sprintf("apprcomp.rej.%s@gear.local", stamp)
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), "DELETE FROM users WHERE email = $1", rejectEmail)
+	})
+	rejectTarget, err := repo.CreateRegisteredUser(context.Background(), rejectEmail, "Paul Lehne", "Paul", "Lehne", argon2DummyHash)
+	if err != nil {
+		t.Fatalf("creating reject target failed: %v", err)
+	}
+
+	// REJECT_VALID: the pending record disappears (state deactivated) + audit.
+	rec = doComposedAdminPOST(r, adminToken, "/api/v1/admin/users/"+rejectTarget.ID+"/reject", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reject: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), usercore.MsgUserRejected) {
+		t.Errorf("reject body missing confirmation: %s", rec.Body.String())
+	}
+	var deactState string
+	if err := pool.QueryRow(context.Background(), "SELECT state FROM users WHERE id = $1", rejectTarget.ID).Scan(&deactState); err != nil {
+		t.Fatalf("reading state after reject failed: %v", err)
+	}
+	if deactState != string(usercore.StateDeactivated) {
+		t.Errorf("state after reject = %q, want deactivated", deactState)
+	}
+	rec = doComposedAdminGET(r, adminToken, "/api/v1/admin/users/pending")
+	if strings.Contains(rec.Body.String(), rejectEmail) {
+		t.Errorf("rejected user still in pending list: %s", rec.Body.String())
+	}
+	var rejectAudit int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM audit_log WHERE operation = 'user.reject' AND operation_detail = 'target=' || $1`, rejectEmail).Scan(&rejectAudit); err != nil {
+		t.Fatalf("counting reject audit failed: %v", err)
+	}
+	if rejectAudit != 1 {
+		t.Errorf("reject audit rows = %d, want 1", rejectAudit)
+	}
+
+	// APPROVE_UNKNOWN / REJECT_UNKNOWN: a nonexistent id is a uniform 404.
+	unknown := "00000000-0000-0000-0000-000000000000"
+	rec = doComposedAdminPOST(r, adminToken, "/api/v1/admin/users/"+unknown+"/approve", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("approve unknown: status = %d, want 404", rec.Code)
+	}
+	rec = doComposedAdminPOST(r, adminToken, "/api/v1/admin/users/"+unknown+"/reject", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("reject unknown: status = %d, want 404", rec.Code)
+	}
+
+	// APPROVE_UNKNOWN / REJECT_UNKNOWN (malformed id): a non-UUID {userID} is
+	// the uniform 404 not_found through the REAL wiring — never a 500.
+	for _, path := range []string{"/api/v1/admin/users/not-a-uuid/approve", "/api/v1/admin/users/not-a-uuid/reject"} {
+		rec = doComposedAdminPOST(r, adminToken, path, nil)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("malformed id %s: status = %d, want 404 (body %s)", path, rec.Code, rec.Body.String())
+		}
+	}
+
+	// REJECT_NONPENDING: an already-active user cannot be rejected — uniform 404.
+	rec = doComposedAdminPOST(r, adminToken, "/api/v1/admin/users/"+pending.ID+"/reject", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("reject active: status = %d, want 404 (body %s)", rec.Code, rec.Body.String())
+	}
+	if activeState := queryUserState(t, pool, pending.ID); activeState != string(usercore.StateActive) {
+		t.Errorf("reject changed an active user's state: %q", activeState)
+	}
+}
+
+// queryUserState reads a user's state directly from the DB.
+func queryUserState(t *testing.T, pool *pgxpool.Pool, userID string) string {
+	t.Helper()
+	var state string
+	if err := pool.QueryRow(context.Background(), "SELECT state FROM users WHERE id = $1", userID).Scan(&state); err != nil {
+		t.Fatalf("querying user state failed: %v", err)
+	}
+	return state
+}

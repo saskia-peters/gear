@@ -1,11 +1,16 @@
 package http
 
 import (
+	"context"
+	"errors"
 	"net/http"
 
 	"github.com/go-chi/chi/v5"
 
+	"github.com/saskia-peters/gear/internal/platform/auth"
 	"github.com/saskia-peters/gear/internal/platform/httpapi"
+	"github.com/saskia-peters/gear/internal/user/core"
+	"github.com/saskia-peters/gear/internal/user/ports"
 )
 
 // AdminRoutes returns the isolated admin-module router (Story 2.1, review
@@ -16,6 +21,13 @@ import (
 // this router only carries admin surfaces. The 404/405 responders answer with
 // the uniform JSON envelope so no admin sub-path can ever emit a plain-text
 // body.
+//
+// The user-approval surface (Story 2.4, FR-20) lives under /users and is gated
+// by its OWN `users.approve` permission (AD-6): the outer mount gates the whole
+// group with an admin-only code, and this per-route gate makes the approval
+// endpoints reachable ONLY by holders of `users.approve` (Design Notes spec
+// 2.4). The gateway is re-applied here with the real auth middleware so the 403
+// stays the uniform hidden-existence envelope (FR-19).
 func (h *Handler) AdminRoutes() http.Handler {
 	r := chi.NewRouter()
 	r.NotFound(httpapi.NotFoundHandler())
@@ -25,7 +37,37 @@ func (h *Handler) AdminRoutes() http.Handler {
 	r.Post("/recovery/approve", h.AdminRecoveryApprove)
 	r.Post("/recovery/deny", h.AdminRecoveryDeny)
 	r.Get("/recovery/pending", h.AdminRecoveryPending)
+
+	// User approval surface (Story 2.4): a dedicated users sub-mount gated by
+	// `users.approve` — a caller without it gets the uniform 403 with no admin
+	// hint (FR-19), and a tools-only schirrmeister who reaches the landing is
+	// denied server-side even though the widget is gated out client-side.
+	users := chi.NewRouter()
+	users.NotFound(httpapi.NotFoundHandler())
+	users.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
+	users.Use(auth.RequireAdminPermission(h.validator, userApprovalResolver{h.service}, core.UserApprovePermission, h.logger))
+	users.Get("/pending", h.ListPendingUsers)
+	users.Post("/{userID}/approve", h.ApproveUser)
+	users.Post("/{userID}/reject", h.RejectUser)
+	r.Mount("/users", users)
+
 	return r
+}
+
+// userApprovalResolver adapts the service's ResolvePermissionSet to the auth
+// gateway's PermissionResolver interface so the users sub-mount can be gated
+// by the REAL RequireAdminPermission middleware (the service port resolves the
+// live set per request, AD-12). The resolver only needs the caller's ID, so a
+// bare user value suffices.
+type userApprovalResolver struct {
+	svc ports.Service
+}
+
+func (r userApprovalResolver) ListPermissionsByUser(ctx context.Context, userID string) ([]string, error) {
+	if r.svc == nil {
+		return nil, errors.New("user http: service not wired for permission resolution")
+	}
+	return r.svc.ResolvePermissionSet(ctx, &core.User{ID: userID})
 }
 
 // adminStatus is the minimal admin root handler proving the /api/v1/admin

@@ -695,6 +695,153 @@ func (r *Repository) DenyAdminRecovery(ctx context.Context, userID string) error
 	return r.queries.DenyAdminRecovery(ctx, uid)
 }
 
+// txBeginner is the subset of pgxpool.Pool that can open a transaction. The
+// Queries handle is constructed over the pool (New(pool) in the composition
+// root), so beginTx recovers it from the underlying DBTX without a separate
+// constructor dependency.
+type txBeginner interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
+
+// beginTx opens a fresh transaction on the underlying pool. A Queries handle
+// built over anything that is not transaction-capable (only conceivable in a
+// unit test) surfaces a clear error instead of panicking.
+func (r *Repository) beginTx(ctx context.Context) (pgx.Tx, error) {
+	if r.queries == nil {
+		return nil, errors.New("user postgres: nil queries")
+	}
+	pool, ok := r.queries.db.(txBeginner)
+	if !ok {
+		return nil, errors.New("user postgres: db handle does not support transactions")
+	}
+	return pool.Begin(ctx)
+}
+
+// ListPendingUsers returns the pending-approval users, oldest first (Story 2.4,
+// FR-20). Only the profile details plus id and created_at are selected — the
+// password hash and other secret material are never exposed (NFR-O1).
+func (r *Repository) ListPendingUsers(ctx context.Context) ([]*core.PendingUser, error) {
+	rows, err := r.queries.ListPendingUsers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*core.PendingUser, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, &core.PendingUser{
+			ID:        uuidToString(row.ID.Bytes),
+			Vorname:   row.FirstName,
+			Nachname:  row.LastName,
+			Email:     row.Email,
+			CreatedAt: row.CreatedAt.Time,
+		})
+	}
+	return out, nil
+}
+
+// ApproveUser atomically transitions a pending-approval user to active AND
+// seeds the default 'helfende' base role in ONE transaction (Story 2.4,
+// FR-20/AD-2): the state flip and the role seed are all-or-nothing, so there is
+// never a half-approved user. The role seed is idempotent (ON CONFLICT DO
+// NOTHING), so an already-in-helfende user is never duplicated. An unknown id,
+// a malformed (non-UUID) id, or a user that left `pending_approval`
+// (concurrently approved, rejected or deleted) maps to core.ErrUserNotPending —
+// the uniform not-found the admin already sees (no existence leak, FR-19).
+//
+// The seed outcome is VERIFIED: a missing 'helfende' group would make the
+// INSERT a silent zero-row no-op, so after the insert the membership is
+// re-checked and a failed seed fails the transaction (the state flip is rolled
+// back) instead of silently approving a user with no role.
+func (r *Repository) ApproveUser(ctx context.Context, userID string) (*core.User, error) {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return nil, core.ErrUserNotPending
+	}
+
+	tx, err := r.beginTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op after Commit
+
+	q := r.queries.WithTx(tx)
+	row, err := q.SetUserState(ctx, SetUserStateParams{
+		StateNew:     string(core.StateActive),
+		StateCurrent: string(core.StatePendingApproval),
+		ID:           uid,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, core.ErrUserNotPending
+		}
+		return nil, err
+	}
+	if err := q.AddUserToGroup(ctx, AddUserToGroupParams{
+		UserID:    uid,
+		GroupName: core.DefaultUserRoleGroup,
+	}); err != nil {
+		return nil, err
+	}
+	// Guard the silent no-op: the seed must actually land. If the user is NOT
+	// in 'helfende' after the insert — a missing group row would make the
+	// INSERT affect zero rows without an error — fail and roll back the state
+	// flip (no half-approved user).
+	seeded, err := q.IsUserInPermissionGroup(ctx, IsUserInPermissionGroupParams{
+		UserID: uid,
+		Name:   core.DefaultUserRoleGroup,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !seeded {
+		return nil, fmt.Errorf("user postgres: role seed failed: %q group missing or user not added", core.DefaultUserRoleGroup)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+
+	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
+		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail)
+}
+
+// RejectUser atomically transitions a pending-approval user to deactivated
+// (Story 2.4, FR-20): the pending record disappears from the pending list and
+// the account can neither log in (login requires active state, AD-2) nor
+// re-register (the email stays taken). An unknown id or a user that left
+// `pending_approval` maps to core.ErrUserNotPending.
+func (r *Repository) RejectUser(ctx context.Context, userID string) (*core.User, error) {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return nil, core.ErrUserNotPending
+	}
+
+	tx, err := r.beginTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op after Commit
+
+	q := r.queries.WithTx(tx)
+	row, err := q.SetUserState(ctx, SetUserStateParams{
+		StateNew:     string(core.StateDeactivated),
+		StateCurrent: string(core.StatePendingApproval),
+		ID:           uid,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, core.ErrUserNotPending
+		}
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+
+	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
+		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail)
+}
+
 func uuidToString(b [16]byte) string {
 	return fmt.Sprintf("%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
 		b[0], b[1], b[2], b[3],

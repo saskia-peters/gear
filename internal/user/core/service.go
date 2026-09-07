@@ -73,6 +73,17 @@ type Repository interface {
 	ConsumeAdminRecoveryToken(ctx context.Context, tokenHash string) (*AdminRecoveryToken, error)
 	ListAdminRecoveryRequest(ctx context.Context) ([]*AdminRecoveryRequest, error)
 	DenyAdminRecovery(ctx context.Context, userID string) error
+	// User approval persistence (Story 2.4, FR-20): ListPendingUsers returns
+	// the pending-approval users oldest first (profile details only, never the
+	// password hash); ApproveUser atomically transitions a pending user to
+	// active AND seeds the default 'helfende' role (idempotent) in one
+	// transaction; RejectUser atomically transitions a pending user to
+	// deactivated so the pending record disappears and the account can neither
+	// log in nor re-register. Both return the resulting user for the audit
+	// detail and map an unknown/non-pending target to ErrUserNotPending.
+	ListPendingUsers(ctx context.Context) ([]*PendingUser, error)
+	ApproveUser(ctx context.Context, userID string) (*User, error)
+	RejectUser(ctx context.Context, userID string) (*User, error)
 }
 
 // SecretCipher encrypts/decrypts the TOTP shared secret at rest (NFR-S4). The

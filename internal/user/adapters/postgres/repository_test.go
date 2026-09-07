@@ -1562,3 +1562,362 @@ func TestPostgresBasePermissionSeedResolution(t *testing.T) {
 		t.Errorf("permissions after revoke = %v, want [dashboard.view inspection.submit]", got)
 	}
 }
+
+// TestPostgresUserApprovalRepository covers the Story 2.4 persistence contract
+// (FR-20): list pending users oldest-first (profile details only, no secrets),
+// approve → active + helfende seed (idempotent, atomic), reject → deactivated
+// and removed from the pending surface, plus the full core flow — audit rows
+// (user.approve / user.reject) and login-after-approve — against the REAL
+// postgres repository.
+func TestPostgresUserApprovalRepository(t *testing.T) {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Skipf("skipping db integration test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping db integration test (db ping failed): %v", err)
+	}
+
+	repo := NewRepository(New(pool))
+	stamp := time.Now().Format("20060102150405.000000")
+	p1Email := "approval.p1." + stamp + "@gear.local"
+	p2Email := "approval.p2." + stamp + "@gear.local"
+	p3Email := "approval.p3." + stamp + "@gear.local"
+
+	// Fresh pending users; cleanup deletes ONLY these rows (audit actor refs
+	// are ON DELETE SET NULL, groups/sessions cascade), never shared data.
+	for _, email := range []string{p1Email, p2Email, p3Email} {
+		t.Cleanup(func() {
+			_, _ = pool.Exec(ctx, "DELETE FROM users WHERE email = $1", email)
+		})
+	}
+
+	createPending := func(email, first, last string) *core.User {
+		t.Helper()
+		u, err := repo.CreateRegisteredUser(ctx, email, first+" "+last, first, last, "$argon2id$v=19$dummyhash")
+		if err != nil {
+			t.Fatalf("CreateRegisteredUser(%s) failed: %v", email, err)
+		}
+		return u
+	}
+
+	p1 := createPending(p1Email, "Tim", "Müller")
+	p2 := createPending(p2Email, "Lena", "Schmidt")
+	p3 := createPending(p3Email, "Nils", "Becker")
+
+	// Deterministic ordering: backdate p1 so it is strictly the oldest.
+	if _, err := pool.Exec(ctx, "UPDATE users SET created_at = now() - interval '2 minutes' WHERE id = $1", p1.ID); err != nil {
+		t.Fatalf("backdating p1 failed: %v", err)
+	}
+
+	// LIST_PENDING: oldest first, profile details only. The shared dev DB holds
+	// pending rows from other test binaries, so only the RELATIVE order of this
+	// test's three users is asserted — p1 (backdated) must sort before p2, p2
+	// before p3.
+	pending, err := repo.ListPendingUsers(ctx)
+	if err != nil {
+		t.Fatalf("ListPendingUsers failed: %v", err)
+	}
+	idx := map[string]int{}
+	for i, p := range pending {
+		idx[p.ID] = i
+		if p.Vorname == "" || p.Nachname == "" || p.Email == "" || p.CreatedAt.IsZero() {
+			t.Errorf("pending[%d] missing profile detail: %+v", i, p)
+		}
+	}
+	if i1, ok := idx[p1.ID]; !ok {
+		t.Errorf("p1 missing from pending list")
+	} else if i2, ok := idx[p2.ID]; !ok {
+		t.Errorf("p2 missing from pending list")
+	} else if i3, ok := idx[p3.ID]; !ok {
+		t.Errorf("p3 missing from pending list")
+	} else if i1 >= i2 || i2 >= i3 {
+		t.Errorf("pending order wrong: p1=%d p2=%d p3=%d, want p1 < p2 < p3", i1, i2, i3)
+	}
+
+	// APPROVE_VALID: state → active, helfende role seeded exactly once.
+	approved, err := repo.ApproveUser(ctx, p1.ID)
+	if err != nil {
+		t.Fatalf("ApproveUser(p1) failed: %v", err)
+	}
+	if approved.State != core.StateActive {
+		t.Errorf("approved state = %q, want active", approved.State)
+	}
+	if !groupMembershipCount(t, pool, approved.ID, core.DefaultUserRoleGroup, 1) {
+		t.Fatalf("helfende membership not exactly 1 after approve")
+	}
+
+	// APPROVE_NONPENDING: a second approve of the same (now active) user is a
+	// no-op error — no duplicate role row.
+	if _, err := repo.ApproveUser(ctx, p1.ID); !errors.Is(err, core.ErrUserNotPending) {
+		t.Errorf("re-approve err = %v, want ErrUserNotPending", err)
+	}
+	if !groupMembershipCount(t, pool, approved.ID, core.DefaultUserRoleGroup, 1) {
+		t.Errorf("helfende membership duplicated after re-approve")
+	}
+
+	// APPROVE_IDEMPOTENT: a pending user ALREADY in helfende is approved without
+	// duplicating the membership (ON CONFLICT DO NOTHING).
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO user_permission_groups (user_id, permission_group_id)
+		SELECT $1, g.id FROM permission_groups g WHERE g.name = 'helfende'`, p3.ID); err != nil {
+		t.Fatalf("pre-seeding helfende for p3 failed: %v", err)
+	}
+	if _, err := repo.ApproveUser(ctx, p3.ID); err != nil {
+		t.Fatalf("ApproveUser(p3, already in helfende) failed: %v", err)
+	}
+	if !groupMembershipCount(t, pool, p3.ID, core.DefaultUserRoleGroup, 1) {
+		t.Errorf("helfende membership duplicated for pre-seeded p3")
+	}
+
+	// APPROVE_UNKNOWN: a nonexistent id maps to the uniform not-found error.
+	if _, err := repo.ApproveUser(ctx, "00000000-0000-0000-0000-000000000000"); !errors.Is(err, core.ErrUserNotPending) {
+		t.Errorf("approve unknown err = %v, want ErrUserNotPending", err)
+	}
+
+	// APPROVE_UNKNOWN (malformed id): a non-UUID is treated EXACTLY like an
+	// unknown id — a UUID parse failure must NOT surface as a raw 500 error but
+	// map to the same uniform not-found the admin already sees (FR-19).
+	if _, err := repo.ApproveUser(ctx, "not-a-uuid"); !errors.Is(err, core.ErrUserNotPending) {
+		t.Errorf("approve malformed id err = %v, want ErrUserNotPending", err)
+	}
+	if _, err := repo.RejectUser(ctx, "not-a-uuid"); !errors.Is(err, core.ErrUserNotPending) {
+		t.Errorf("reject malformed id err = %v, want ErrUserNotPending", err)
+	}
+
+	// REJECT_VALID: state → deactivated and gone from the pending surface.
+	rejected, err := repo.RejectUser(ctx, p2.ID)
+	if err != nil {
+		t.Fatalf("RejectUser(p2) failed: %v", err)
+	}
+	if rejected.State != core.StateDeactivated {
+		t.Errorf("rejected state = %q, want deactivated", rejected.State)
+	}
+	pending, err = repo.ListPendingUsers(ctx)
+	if err != nil {
+		t.Fatalf("ListPendingUsers after reject failed: %v", err)
+	}
+	for _, p := range pending {
+		if p.ID == p2.ID {
+			t.Errorf("rejected user still in pending list: %+v", p)
+		}
+	}
+
+	// REJECT_NONPENDING: a second reject of the (now deactivated) user errors.
+	if _, err := repo.RejectUser(ctx, p2.ID); !errors.Is(err, core.ErrUserNotPending) {
+		t.Errorf("re-reject err = %v, want ErrUserNotPending", err)
+	}
+
+	// Full core flow against the REAL repo: an admin approves → audit row
+	// (user.approve, actor + target email) AND login succeeds (AD-2/AD-6);
+	// a rejection writes the user.reject audit.
+	hasher := crypto.NewHasher()
+	sm := core.NewSessionManager(repo, time.Hour)
+	svc := core.NewService(repo, hasher, sm, crypto.NewSecretCipher(make([]byte, 32)), discardLogger())
+
+	adminEmail := "approval.admin." + stamp + "@gear.local"
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, "DELETE FROM users WHERE email = $1", adminEmail)
+	})
+	admin, err := repo.CreateRegisteredUser(ctx, adminEmail, "Vera Waltung", "Vera", "Waltung", "$argon2id$v=19$dummyhash")
+	if err != nil {
+		t.Fatalf("creating approval admin failed: %v", err)
+	}
+	if _, err := pool.Exec(ctx, "UPDATE users SET state = 'active' WHERE id = $1", admin.ID); err != nil {
+		t.Fatalf("activating approval admin failed: %v", err)
+	}
+	if _, err := pool.Exec(ctx, `
+		INSERT INTO user_permission_groups (user_id, permission_group_id)
+		SELECT $1, g.id FROM permission_groups g WHERE g.name = 'admin'`, admin.ID); err != nil {
+		t.Fatalf("granting admin role failed: %v", err)
+	}
+	admin.State = core.StateActive
+
+	// A fresh pending volunteer with a REAL password hash so login-after-approve
+	// exercises the actual Argon2id verify.
+	volEmail := "approval.vol." + stamp + "@gear.local"
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, "DELETE FROM users WHERE email = $1", volEmail)
+	})
+	volPassword := "freiwillig123"
+	volHash, err := hasher.Hash(volPassword)
+	if err != nil {
+		t.Fatalf("hashing volunteer password failed: %v", err)
+	}
+	vol, err := repo.CreateRegisteredUser(ctx, volEmail, "Frei Willig", "Frei", "Willig", volHash)
+	if err != nil {
+		t.Fatalf("creating volunteer failed: %v", err)
+	}
+
+	approveRes, err := svc.ApproveUser(ctx, admin, vol.ID)
+	if err != nil {
+		t.Fatalf("svc.ApproveUser failed: %v", err)
+	}
+	if approveRes.Email != volEmail {
+		t.Errorf("approve result email = %q, want %q", approveRes.Email, volEmail)
+	}
+	var approveAudits int
+	if err := pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM audit_log WHERE operation = 'user.approve' AND operation_detail = 'target=' || $1`, volEmail).Scan(&approveAudits); err != nil {
+		t.Fatalf("counting user.approve audit failed: %v", err)
+	}
+	if approveAudits != 1 {
+		t.Errorf("user.approve audit rows = %d, want 1", approveAudits)
+	}
+
+	// LOGIN_AFTER_APPROVE: the approved volunteer logs in with resolved
+	// permissions (the default helfende set, AD-2/AD-6).
+	loginRes, err := svc.Login(ctx, core.LoginInput{Email: volEmail, Password: volPassword})
+	if err != nil {
+		t.Fatalf("login after approve failed: %v", err)
+	}
+	if loginRes.Token == "" {
+		t.Errorf("login returned no session token")
+	}
+
+	// REJECT_VALID (core): audit row user.reject with the target email. A
+	// fresh pending user is used — p3 was approved above.
+	rejectEmail := "approval.rej." + stamp + "@gear.local"
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, "DELETE FROM users WHERE email = $1", rejectEmail)
+	})
+	rejectTarget := createPending(rejectEmail, "Paul", "Abgelehnt")
+	rejectRes, err := svc.RejectUser(ctx, admin, rejectTarget.ID)
+	if err != nil {
+		t.Fatalf("svc.RejectUser failed: %v", err)
+	}
+	if rejectRes.Email != rejectEmail {
+		t.Errorf("reject result email = %q, want %q", rejectRes.Email, rejectEmail)
+	}
+	var rejectAudits int
+	if err := pool.QueryRow(ctx,
+		`SELECT COUNT(*) FROM audit_log WHERE operation = 'user.reject' AND operation_detail = 'target=' || $1`, rejectEmail).Scan(&rejectAudits); err != nil {
+		t.Fatalf("counting user.reject audit failed: %v", err)
+	}
+	if rejectAudits != 1 {
+		t.Errorf("user.reject audit rows = %d, want 1", rejectAudits)
+	}
+}
+
+// TestPostgresApproveUserRoleSeedRollback proves the all-or-nothing invariant
+// of ApproveUser (Story 2.4, AD-2): when the role-seed step fails AFTER a valid
+// state flip, the whole transaction rolls back — the user's state stays
+// `pending_approval` and no membership row is committed. The seed failure is
+// forced by renaming the 'helfende' group mid-test (an INSERT ... SELECT with a
+// no-longer-matching group is a zero-row no-op, which the seed guard now
+// detects and turns into a rollback). Renames are safe because this suite runs
+// without t.Parallel and no other test asserts on the helfende membership count.
+func TestPostgresApproveUserRoleSeedRollback(t *testing.T) {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Skipf("skipping db integration test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping db integration test (db ping failed): %v", err)
+	}
+
+	repo := NewRepository(New(pool))
+	stamp := time.Now().Format("20060102150405.000000")
+	email := "approval.rollback." + stamp + "@gear.local"
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, "DELETE FROM users WHERE email = $1", email)
+	})
+	u, err := repo.CreateRegisteredUser(ctx, email, "Roll Back", "Roll", "Back", "$argon2id$v=19$dummyhash")
+	if err != nil {
+		t.Fatalf("CreateRegisteredUser failed: %v", err)
+	}
+
+	// Force the seed to fail: temporarily rename the 'helfende' group so the
+	// INSERT ... SELECT resolves no row (a silent no-op). Restore it in ALL
+	// paths (deferred) so the shared DB is left untouched.
+	renameGroup := func(from, to string) {
+		if _, err := pool.Exec(ctx, `UPDATE permission_groups SET name = $2 WHERE name = $1`, from, to); err != nil {
+			t.Fatalf("renaming %q group failed: %v", from, err)
+		}
+	}
+	const tmpName = "helfende_rollback_tmp"
+	renameGroup(core.DefaultUserRoleGroup, tmpName)
+	// Safety net: if a panic or Fatal interrupts before the immediate restore
+	// below, this defer still restores the group. Registered AFTER defer
+	// pool.Close(), so LIFO ordering runs it FIRST while the pool is open
+	// (t.Cleanup would run after pool.Close and fail — see the shared-pool
+	// cleanup pattern in this file).
+	defer func() {
+		if _, err := pool.Exec(context.Background(), `UPDATE permission_groups SET name = $2 WHERE name = $1`, tmpName, core.DefaultUserRoleGroup); err != nil {
+			t.Errorf("restoring %q group failed: %v", core.DefaultUserRoleGroup, err)
+		}
+	}()
+
+	_, err = repo.ApproveUser(ctx, u.ID)
+	// Restore immediately (the deferred safety net is then a no-op) so a Fatal
+	// in the assertions below cannot leave the shared DB renamed.
+	renameGroup(tmpName, core.DefaultUserRoleGroup)
+
+	if err == nil {
+		t.Fatalf("ApproveUser with missing helfende group succeeded; want a seed-failure error")
+	}
+
+	// All-or-nothing: the state flip was NOT committed.
+	var state string
+	if err := pool.QueryRow(ctx, "SELECT state FROM users WHERE id = $1", u.ID).Scan(&state); err != nil {
+		t.Fatalf("reading state after failed approve failed: %v", err)
+	}
+	if state != string(core.StatePendingApproval) {
+		t.Errorf("state after failed approve = %q, want pending_approval (rollback)", state)
+	}
+
+	// And no membership row was committed (either under the tmp name or a
+	// leftover under the real name — the rollback must have removed it).
+	if groupMembershipCount(t, pool, u.ID, core.DefaultUserRoleGroup, 0) {
+		if n := groupMembershipRawCount(t, pool, u.ID); n != 0 {
+			t.Errorf("membership rows after failed approve = %d, want 0 (rollback)", n)
+		}
+	}
+}
+
+// groupMembershipRawCount counts ALL permission-group memberships of a user
+// regardless of group name (used to prove the rollback removed every row).
+func groupMembershipRawCount(t *testing.T, pool *pgxpool.Pool, userID string) int {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM user_permission_groups WHERE user_id = $1`, userID).Scan(&n); err != nil {
+		t.Fatalf("counting raw memberships failed: %v", err)
+	}
+	return n
+}
+
+// groupMembershipCount reports whether the user holds EXACTLY want rows of the
+// named permission group (used to assert the idempotent helfende seed).
+func groupMembershipCount(t *testing.T, pool *pgxpool.Pool, userID, group string, want int) bool {
+	t.Helper()
+	var n int
+	if err := pool.QueryRow(context.Background(), `
+		SELECT COUNT(*)
+		FROM user_permission_groups upg
+		JOIN permission_groups g ON g.id = upg.permission_group_id
+		WHERE upg.user_id = $1 AND g.name = $2`, userID, group).Scan(&n); err != nil {
+		t.Fatalf("counting group membership failed: %v", err)
+	}
+	return n == want
+}

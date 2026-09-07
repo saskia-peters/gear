@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { render, screen, within, cleanup } from '@testing-library/react'
-import { describe, it, expect, beforeEach, afterEach } from 'vitest'
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { MemoryRouter } from 'react-router-dom'
 import { AdminPage } from './AdminPage.tsx'
 import { ThemeProvider } from '../context/ThemeContext.tsx'
@@ -14,9 +14,18 @@ function seedPermissions(codes: string[]) {
 describe('AdminPage', () => {
   beforeEach(() => {
     localStorage.clear()
+    // The live PendingApprovals widget fetches the pending list on mount; a
+    // stubbed empty response keeps every test hermetic (no real network) while
+    // exercising the real component.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ users: [] }),
+    }))
   })
 
   afterEach(() => {
+    vi.unstubAllGlobals()
     cleanup()
   })
 
@@ -59,9 +68,9 @@ describe('AdminPage', () => {
     expect(within(cards).queryByRole('link', { name: /DSGVO/ })).not.toBeInTheDocument()
   })
 
-  it('APPROVALS_GATED: a tools-only caller (no users.*) does not see the pending-approvals section', () => {
-    // schirrmeister/fuehrende hold tools codes but no users.approve/users.view:
-    // they get the cards + subtitle, not the approvals they cannot act on.
+  it('APPROVALS_GATED: a tools-only caller (no users.approve) does not see the pending-approvals section', () => {
+    // schirrmeister/fuehrende hold tools codes but no users.approve: they get
+    // the cards + subtitle, not the approvals they cannot act on.
     seedPermissions(['tools.manage', 'tool_types.manage'])
     render(
       <ThemeProvider>
@@ -79,8 +88,32 @@ describe('AdminPage', () => {
     ).not.toBeInTheDocument()
   })
 
-  it('LANDING_EMPTY: the empty state announces "Keine ausstehenden Anträge"', () => {
-    // users.approve opens the pending-approvals section.
+  it('APPROVALS_GATED: a users.view-only caller does NOT mount the widget (server requires users.approve)', () => {
+    // The server /users/* endpoints require ONLY users.approve (AD-6/FR-20).
+    // A users.view-only caller must not mount the widget: it would be 403'd
+    // and adminForbiddenHandled would force them out of the admin module.
+    seedPermissions(['users.view'])
+    render(
+      <ThemeProvider>
+        <MemoryRouter>
+          <AdminPage />
+        </MemoryRouter>
+      </ThemeProvider>,
+    )
+
+    expect(
+      screen.queryByRole('heading', { level: 3, name: 'Ausstehende Anträge' }),
+    ).not.toBeInTheDocument()
+    // The caller is NOT navigated away — the landing still renders.
+    expect(
+      screen.getByRole('heading', { level: 2, name: 'Verwaltung — Start' }),
+    ).toBeInTheDocument()
+    expect(screen.queryByRole('heading', { name: 'Keine ausstehenden Anträge' })).not.toBeInTheDocument()
+  })
+
+  it('LANDING_EMPTY: the empty state announces "Keine ausstehenden Anträge"', async () => {
+    // users.approve opens the pending-approvals section. The live widget's
+    // fetch resolves to an empty list, so the empty state renders.
     seedPermissions(['users.approve'])
     render(
       <ThemeProvider>
@@ -94,7 +127,7 @@ describe('AdminPage', () => {
       screen.getByRole('heading', { level: 3, name: 'Ausstehende Anträge' }),
     ).toBeInTheDocument()
     expect(
-      screen.getByRole('heading', { name: 'Keine ausstehenden Anträge' }),
+      await screen.findByRole('heading', { name: 'Keine ausstehenden Anträge' }),
     ).toBeInTheDocument()
   })
 
