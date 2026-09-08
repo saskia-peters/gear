@@ -243,6 +243,166 @@ func resolveQualificationAssigneeIDs(ctx context.Context, q *Queries, ids []stri
 	return uuids, nil
 }
 
+// AssignQualificationToUser assigns a qualification to a user (Spec 2.9) with
+// an optional per-assignment expires_at. A `fixed` qualification REQUIRES a
+// per-assignment expires_at; an `unlimited` one must NOT carry one (the core
+// enforces this rule). An unknown user maps to core.ErrAdminUserNotFound → 404;
+// an unknown qualification maps to core.ErrQualificationNotFound → 404. The
+// qualification's expiry_kind is read so the fixed-vs-unlimited rule can be
+// enforced before the insert.
+func (r *Repository) AssignQualificationToUser(ctx context.Context, userID, qualificationID string, expiresAt *time.Time) error {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return core.ErrAdminUserNotFound
+	}
+	qid, err := uuidFromString(qualificationID)
+	if err != nil {
+		return core.ErrQualificationNotFound
+	}
+
+	tx, err := r.beginTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op after Commit
+
+	q := r.queries.WithTx(tx)
+
+	userExists, err := q.UserExists(ctx, uid)
+	if err != nil {
+		return err
+	}
+	if !userExists {
+		return core.ErrAdminUserNotFound
+	}
+
+	exists, err := q.QualificationExists(ctx, qid)
+	if err != nil {
+		return err
+	}
+	if !exists {
+		return core.ErrQualificationNotFound
+	}
+
+	// Enforce the fixed-vs-unlimited assignment rule (Spec 2.9 human decision A)
+	// at the persistence seam as a belt-and-suspenders check on top of the core.
+	// A targeted expiry-kind lookup (review finding 2.9) instead of scanning the
+	// whole vocabulary.
+	expiryRow, err := q.GetQualificationExpiryKindByID(ctx, qid)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return core.ErrQualificationNotFound
+		}
+		return err
+	}
+	switch expiryRow.ExpiryKind {
+	case core.QualificationExpiryUnlimited:
+		if expiresAt != nil {
+			return core.ErrQualificationInvalidExpiresAt
+		}
+	case core.QualificationExpiryFixed:
+		if expiresAt == nil {
+			return core.ErrQualificationExpiryRequired
+		}
+	default:
+		return core.ErrQualificationNotFound
+	}
+
+	if err := q.AddQualificationToUser(ctx, AddQualificationToUserParams{
+		UserID:          uid,
+		QualificationID: qid,
+		ExpiresAt:       timestamptzFromPtr(expiresAt),
+	}); err != nil {
+		return err
+	}
+	return tx.Commit(ctx)
+}
+
+// UpdateUserQualificationExpiry updates a user's per-assignment valid-until
+// (Spec 2.9): a nil expiresAt clears the override (reverting to the vocabulary
+// expiry); a value overrides it. An unknown user/qualification pair maps to
+// core.ErrQualificationAssignmentNotFound → 404.
+func (r *Repository) UpdateUserQualificationExpiry(ctx context.Context, userID, qualificationID string, expiresAt *time.Time) error {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return core.ErrQualificationAssignmentNotFound
+	}
+	qid, err := uuidFromString(qualificationID)
+	if err != nil {
+		return core.ErrQualificationAssignmentNotFound
+	}
+	if expiresAt != nil {
+		// An `unlimited` qualification must NEVER carry a per-assignment
+		// expires_at (Spec 2.9: "Unbegrenzt" never expires) — reject the
+		// override at the persistence seam too (review finding 2.9).
+		expiryRow, err := r.queries.GetQualificationExpiryKindByID(ctx, qid)
+		if err != nil {
+			if errors.Is(err, pgx.ErrNoRows) {
+				return core.ErrQualificationAssignmentNotFound
+			}
+			return err
+		}
+		if expiryRow.ExpiryKind == core.QualificationExpiryUnlimited {
+			return core.ErrQualificationInvalidExpiresAt
+		}
+	}
+	rowsAffected, err := r.queries.UpdateUserQualificationExpiry(ctx, UpdateUserQualificationExpiryParams{
+		UserID:          uid,
+		QualificationID: qid,
+		ExpiresAt:       timestamptzFromPtr(expiresAt),
+	})
+	if err != nil {
+		return err
+	}
+	if rowsAffected == 0 {
+		return core.ErrQualificationAssignmentNotFound
+	}
+	return nil
+}
+
+// RevokeQualificationFromUser revokes a qualification from a user (Spec 2.9).
+// An unknown user maps to core.ErrAdminUserNotFound → 404; an unknown
+// qualification maps to core.ErrQualificationNotFound → 404. Revocation is
+// immediate (AD-7/FR-22) because resolution is live per request.
+func (r *Repository) RevokeQualificationFromUser(ctx context.Context, userID, qualificationID string) error {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return core.ErrAdminUserNotFound
+	}
+	qid, err := uuidFromString(qualificationID)
+	if err != nil {
+		return core.ErrQualificationNotFound
+	}
+	userExists, err := r.queries.UserExists(ctx, uid)
+	if err != nil {
+		return err
+	}
+	if !userExists {
+		return core.ErrAdminUserNotFound
+	}
+	qualExists, err := r.queries.QualificationExists(ctx, qid)
+	if err != nil {
+		return err
+	}
+	if !qualExists {
+		return core.ErrQualificationNotFound
+	}
+	rows, err := r.queries.RemoveQualificationFromUser(ctx, RemoveQualificationFromUserParams{
+		UserID:          uid,
+		QualificationID: qid,
+	})
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		// Unassigned pair: consistent with UpdateUserQualificationExpiry, an
+		// unassigned assignment maps to the uniform not-found (review finding
+		// 2.9).
+		return core.ErrQualificationAssignmentNotFound
+	}
+	return nil
+}
+
 // qualificationFromRow maps an sqlc qualification row to the core domain value.
 func qualificationFromRow(id pgtype.UUID, name, description, expiryKind string, expiresAt pgtype.Timestamptz) *core.Qualification {
 	q := &core.Qualification{

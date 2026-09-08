@@ -62,6 +62,17 @@ export interface AdminUserDetail {
   user_groups: UserGroupRef[]
   direct_grants: DirectGrantRef[]
   qualifications: QualificationAssignment[]
+  resolved_permissions?: PermissionSource[]
+}
+
+// PermissionSource annotates one resolved permission of a user with its source
+// (Spec 2.9 provenance): source_kind is 'role' (individual permission-group
+// membership), 'group' (inherited via an organisational user-group), or
+// 'direct'; source_name is the role name, the user-group name, or 'direct'.
+export interface PermissionSource {
+  code: string
+  source_kind: 'role' | 'group' | 'direct'
+  source_name: string
 }
 
 // UserGroup is an organisational team (AD-12: membership grants no permission).

@@ -125,7 +125,7 @@ flowchart TD
   - **A user's resolved permission set is the additive union (set-union, no precedence) of all permissions from all their permission-group memberships and their direct grants.** Users may hold more than one group/role at once (FR-6). Removing a group/direct grant subtracts exactly its permissions, immediately.
   - **Roles are just named permission groups.** Four **base roles** ship pre-seeded: `helfende`, `fuehrende`, `admin`, `schirrmeister` (see the role matrix). **Admins may create additional permission groups, give them a name, choose their permissions, and assign them to users** — and may also edit the permission sets of the base roles themselves (all are the same kind of entity). These groups are **flat: no groups inside groups in V1** — a permission group contains only permissions, never other groups.
   - **V1 flatness:** because groups cannot nest, resolution is a single level of union over a user's groups plus direct grants; there is no transitive inclusion to compute.
-  - **User groups are organisational only** (team membership) and grant **no** permission by themselves — only the permission-group/direct-grant path affects access (isolation from `user_groups` in the resolution, AD-2).
+  - **User groups are organisational** (team membership) and grant **no** permission BY THEMSELVES — but a team can hold permission groups (roles) via `user_group_permission_groups`, so membership grants those roles' permissions (Spec 2.9 three-way union: individual roles + team roles + direct grants). A team with no assigned roles still grants nothing (isolation preserved, AD-2/AD-12).
   - On approval (FR-5/FR-20) a new user is seeded with the **`helfende`** base role; an admin can add/remove roles thereafter.
 
 ### AD-13 — Self-Service Password Management + Dual-Admin Credential Recovery
@@ -258,7 +258,7 @@ The one golang-migrate schema (NFR-R2, AD-11) holds every table the app persists
 | # | Table | Stores | Owned by | Notes / Non-technical meaning |
 | --- | --- | --- | --- | --- |
 | 1 | `users` | One row per person (name, email, account state, MFA flag) | User | The people. `state` = `pending_approval` / `active` / `deactivated` (FR-5). `attributes JSONB` carries flexible metadata (FR-7). |
-| 2 | `user_groups` | Organisational groups (e.g. "Gruppe Ost", "Fachgruppe Wassergefahren") | User | The **teams** volunteers are part of — purely organisational, grants **no** access by itself (AD-12). |
+| 2 | `user_groups` | Organisational groups (e.g. "Gruppe Ost", "Fachgruppe Wassergefahren") | User | The **teams** volunteers are part of — organisational by itself, but a team can hold roles via `user_group_permission_groups` (Spec 2.9) so membership inherits them. A role-less team grants nothing (AD-12). |
 | 3 | `user_group_members` | The link: which user is in which user group (many-to-many) | User | "Who belongs to which team." |
 | 4 | `permission_groups` | Named bundles of permissions — the **roles**. Pre-seeded: `helfende`, `fuehrende`, `admin`, `schirrmeister`; admins may add named groups (AD-12) | User | The **roles** that grant access. Users can belong to several at once; rights are additive (FR-6). Flat (no nesting). |
 | 5 | `permissions` | The granular permission codes (the base series below — one per app action) | User | Individual capabilities; a user may perform an action iff its permission is in their resolved set (AD-12). |
@@ -296,6 +296,7 @@ Every **action** in the app maps to exactly one permission code (AD-12). This is
 | `tools.manage` | Create/edit tools, CSV bulk import (FR-9) | Tool |
 | `tool_types.manage` | Create/edit tool types & checklist items (FR-8, FR-23) | Tool |
 | `users.view` | View the user directory | User |
+| `users.qualifications.manage` | Assign/revoke qualifications on users + edit per-user valid-until (Spec 2.9) | User |
 | `users.approve` | Approve/reject pending registrations (FR-20) | User |
 | `users.manage` | Create/edit/deactivate user accounts (FR-21) | User |
 | `user_groups.manage` | Create/edit user groups & assign members (FR-21) | User |
@@ -323,7 +324,8 @@ The **additive** permission set each of the four base roles ships with. A tick m
 | `inspection.history.view` | | ✔ | ✔ | ✔ |
 | `report.export` | | | ✔ | ✔ |
 | `tool.reinstate` | | | ✔ | ✔ |
-| `users.view` | | | | ✔ |
+| `users.view` | | ✔ | ✔ | ✔ |
+| `users.qualifications.manage` | | ✔ | ✔ | ✔ |
 | `users.approve` | | | | ✔ |
 | `users.manage` | | | | ✔ |
 | `user_groups.manage` | | | | ✔ |
@@ -338,7 +340,7 @@ The **additive** permission set each of the four base roles ships with. A tick m
 | `admin.settings.backup` | | | | ✔ |
 | `schedules.manage` | | | | ✔ |
 
-> **Reading the matrix:** `helfende` = "volunteer who inspects". `schirrmeister` = **equipment caretaker** — everything a volunteer can do, **plus** managing tools and tool types (and their inspection history). `fuehrende` = **leadership** — inspection plus history, PDF export, reinstate, and (per user decision, Story 2.3) tool/tool-type administration as a fellow caretaker alongside the Schirrmeister. `admin` = **everything**. All four are editable by an admin, and new custom groups can be added (AD-12). Inspection still always needs the tool type's required qualification (AD-7), independent of these roles.
+> **Reading the matrix:** `helfende` = "volunteer who inspects". `schirrmeister` = **equipment caretaker** — everything a volunteer can do, **plus** managing tools and tool types (and their inspection history). `fuehrende` = **leadership** — inspection plus history, PDF export, reinstate, tool/tool-type administration (per user decision, Story 2.3), and (Spec 2.9) reading the user directory + assigning qualifications/valid-until alongside the Schirrmeister. `admin` = **everything**. All four are editable by an admin, and new custom groups can be added (AD-12). Inspection still always needs the tool type's required qualification (AD-7), independent of these roles.
 
 **Entity relations** (derivations are AD-4/AD-5; attribute detail is owned by code):
 
@@ -407,7 +409,7 @@ flowchart TD
     E --> Q{"Does the set contain<br/>this action's permission?<br/>(AD-12)"}
     Q -- No --> X["Action blocked — HTTP 403<br/>(AD-6)"]
     Q -- Yes --> A["Action allowed<br/>e.g. inspection still needs qualification (AD-7)"]
-    G -. organisational only, no access effect .-> X
+    G -. organisational; grants access only via assigned roles (Spec 2.9) .-> X
 
     classDef user fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
     classDef teams fill:#eeeeee,stroke:#757575,color:#424242,stroke-width:1px;

@@ -29,9 +29,11 @@ const QualificationsManagePermission = "qualifications.manage"
 // from the user/role/group codes so qualification actions are separately
 // auditable.
 const (
-	AuditOperationQualificationCreate  = "qualification.create"
-	AuditOperationQualificationUpdate  = "qualification.update"
-	AuditOperationQualificationAssign  = "qualification.assign"
+	AuditOperationQualificationCreate        = "qualification.create"
+	AuditOperationQualificationUpdate        = "qualification.update"
+	AuditOperationQualificationAssign        = "qualification.assign"
+	AuditOperationQualificationRevoke        = "qualification.revoke"
+	AuditOperationQualificationValidUntilUpd = "qualification.valid_until.update"
 )
 
 // Qualification is one vocabulary entry (Story 2.7, AD-7/FR-22): the name,
@@ -145,6 +147,13 @@ var (
 	// ErrQualificationAssigneeUnknown is returned when an assigned user id does
 	// not exist (400 invalid).
 	ErrQualificationAssigneeUnknown = errors.New("qualification assignee is unknown")
+	// ErrQualificationExpiryRequired is returned when assigning a `fixed`
+	// qualification to a user WITHOUT a per-user expires_at (400 invalid,
+	// Spec 2.9 human decision A).
+	ErrQualificationExpiryRequired = errors.New("per-user qualification valid-until is required")
+	// ErrQualificationAssignmentNotFound is returned when updating a per-user
+	// valid-until for a user/qualification pair that is not assigned (404).
+	ErrQualificationAssignmentNotFound = errors.New("qualification assignment not found")
 )
 
 // German user-facing microcopy for the qualification-management surface
@@ -173,6 +182,18 @@ const (
 	// MsgQualificationAssigneeUnknown is the uniform 400 message for an unknown
 	// assigned person.
 	MsgQualificationAssigneeUnknown = "Eine ausgewählte Person ist ungültig."
+	// MsgQualificationExpiryRequired is the uniform 400 message when assigning
+	// a fixed qualification without a per-user valid-until (Spec 2.9).
+	MsgQualificationExpiryRequired = "Bitte gib ein Ablaufdatum für die Zuweisung an (diese Qualifikation ist nicht unbegrenzt gültig)."
+	// MsgQualificationAssignmentNotFound is the uniform 404 message when
+	// updating a per-user valid-until for an unassigned qualification.
+	MsgQualificationAssignmentNotFound = "Die Qualifikationszuweisung wurde nicht gefunden."
+	// MsgQualificationAssignedToUser confirms a successful per-user assignment.
+	MsgQualificationAssignedToUser = "Qualifikation zugewiesen. Die Änderung gilt ab sofort."
+	// MsgQualificationRevokedFromUser confirms a successful per-user revocation.
+	MsgQualificationRevokedFromUser = "Qualifikation entzogen. Die Änderung gilt ab sofort."
+	// MsgQualificationValidUntilUpdated confirms a successful valid-until edit.
+	MsgQualificationValidUntilUpdated = "Ablaufdatum aktualisiert. Die Änderung gilt ab sofort."
 	// MsgQualificationAssigneeRequired is the uniform 400 message when the
 	// assignee request omits the `user_ids` field (a malformed request must
 	// never silently revoke everyone — only an explicit empty array clears).
@@ -206,7 +227,7 @@ func (s *Service) ListQualifications(ctx context.Context, actor *User) (*Qualifi
 	if err != nil {
 		return nil, fmt.Errorf("user core: failed to list qualification vocabulary: %w", err)
 	}
-	users, err := s.repo.ListUsers(ctx)
+	users, err := s.repo.ListUsers(ctx, nil)
 	if err != nil {
 		return nil, fmt.Errorf("user core: failed to list roster users: %w", err)
 	}

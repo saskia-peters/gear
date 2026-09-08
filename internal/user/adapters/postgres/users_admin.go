@@ -28,10 +28,16 @@ import (
 // Kept in its own file so repository.go does not grow into a god-class
 // (standing convention).
 
-// ListUsers returns every user (id, names, email, state) ordered by last name
-// then first name (Story 2.6). No secret material is selected.
-func (r *Repository) ListUsers(ctx context.Context) ([]*core.AdminUserSummary, error) {
-	rows, err := r.queries.ListUsers(ctx)
+// ListUsers returns the users matching the optional status filter (id, names,
+// email, state) ordered by last name then first name (Story 2.6, Spec 2.9
+// status filter). A nil status returns every user. No secret material is
+// selected.
+func (r *Repository) ListUsers(ctx context.Context, status *string) ([]*core.AdminUserSummary, error) {
+	var statusParam pgtype.Text
+	if status != nil {
+		statusParam = pgtype.Text{String: *status, Valid: true}
+	}
+	rows, err := r.queries.ListUsers(ctx, statusParam)
 	if err != nil {
 		return nil, err
 	}
@@ -82,6 +88,20 @@ func (r *Repository) GetUserDetail(ctx context.Context, userID string) (*core.Ad
 	if err != nil {
 		return nil, err
 	}
+	// Resolved-permission provenance (Spec 2.9): every resolved code annotated
+	// with its source(s) — role name, user-group name, or 'direct'.
+	provRows, err := r.queries.ListResolvedPermissionSources(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+	provenance := make([]*core.PermissionProvenance, 0, len(provRows))
+	for _, row := range provRows {
+		provenance = append(provenance, &core.PermissionProvenance{
+			Code:       row.Code,
+			SourceKind: row.SourceKind,
+			SourceName: row.SourceName,
+		})
+	}
 
 	detail := &core.AdminUserDetail{
 		ID:       uuidToString(profile.ID.Bytes),
@@ -93,6 +113,7 @@ func (r *Repository) GetUserDetail(ctx context.Context, userID string) (*core.Ad
 		UserGroups: make([]core.UserGroupRef, 0, len(groups)),
 		DirectGrants: make([]core.DirectGrantRef, 0, len(grants)),
 		Qualifications: make([]core.QualificationAssignment, 0, len(quals)),
+		ResolvedPermissions: provenance,
 	}
 	for _, row := range roles {
 		detail.Roles = append(detail.Roles, core.RoleGroupRef{ID: uuidToString(row.ID.Bytes), Name: row.Name, IsBaseRole: row.IsBaseRole})
@@ -111,8 +132,17 @@ func (r *Repository) GetUserDetail(ctx context.Context, userID string) (*core.Ad
 			ExpiryKind:  row.ExpiryKind,
 			AssignedAt:  row.AssignedAt.Time,
 		}
-		if row.ExpiresAt.Valid {
-			t := row.ExpiresAt.Time
+		// Per-assignment valid-until (Spec 2.9): the per-assignment expires_at
+		// OVERRIDES the vocabulary expiry for the display status. The core's
+		// qualificationStatus reads ExpiresAt first, then falls back to the
+		// vocabulary expiry — so here we prefer the assignment override and
+		// carry the vocabulary date as the fallback.
+		effective := row.VocabExpiresAt
+		if row.AssignedExpiresAt.Valid {
+			effective = row.AssignedExpiresAt
+		}
+		if effective.Valid {
+			t := effective.Time
 			a.ExpiresAt = &t
 		}
 		detail.Qualifications = append(detail.Qualifications, a)
@@ -502,10 +532,105 @@ func (r *Repository) ListUserGroupMembers(ctx context.Context, groupID string) (
 	return out, nil
 }
 
+// ListUserGroupRoles returns the permission groups (roles) an organisational
+// user group grants its members (Spec 2.9, AD-12): id, name and is_base_role,
+// ordered by name. An unknown group maps to core.ErrUserGroupNotFound → 404.
+func (r *Repository) ListUserGroupRoles(ctx context.Context, groupID string) ([]*core.RoleGroupRef, error) {
+	gid, err := uuidFromString(groupID)
+	if err != nil {
+		return nil, core.ErrUserGroupNotFound
+	}
+	exists, err := r.queries.UserGroupExists(ctx, gid)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, core.ErrUserGroupNotFound
+	}
+	rows, err := r.queries.ListUserGroupRoles(ctx, gid)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*core.RoleGroupRef, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, &core.RoleGroupRef{
+			ID:         uuidToString(row.ID.Bytes),
+			Name:       row.Name,
+			IsBaseRole: row.IsBaseRole,
+		})
+	}
+	return out, nil
+}
+
+// ReplaceUserGroupRoles REPLACES the role set of an organisational user group
+// atomically (delete-then-insert in ONE transaction, Spec 2.9 — separate
+// statements, never a data-modifying CTE, Story 2.5 lesson). An unknown group
+// maps to core.ErrUserGroupNotFound → 404 (checked FIRST); an unknown role id
+// maps to core.ErrAdminUserUnknownRole → 400. Because permission resolution is
+// live per request (AD-2/FR-21), a member inherits the group's roles on the
+// very next request; removing a role revokes it from every member next request
+// (nothing cached). The updated role set is returned so the caller can echo it.
+func (r *Repository) ReplaceUserGroupRoles(ctx context.Context, groupID string, roleIDs []string) ([]*core.RoleGroupRef, error) {
+	gid, err := uuidFromString(groupID)
+	if err != nil {
+		return nil, core.ErrUserGroupNotFound
+	}
+
+	tx, err := r.beginTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op after Commit
+
+	q := r.queries.WithTx(tx)
+
+	exists, err := q.UserGroupExists(ctx, gid)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, core.ErrUserGroupNotFound
+	}
+
+	roleUUIDs, err := resolveExistingPermissionGroupIDs(ctx, q, roleIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := q.DeleteUserGroupRoles(ctx, gid); err != nil {
+		return nil, err
+	}
+	if len(roleUUIDs) > 0 {
+		if err := q.InsertUserGroupRoles(ctx, InsertUserGroupRolesParams{UserGroupID: gid, Column2: roleUUIDs}); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+
+	// Re-fetch the role set so the caller gets the committed rows.
+	rows, err := r.queries.ListUserGroupRoles(ctx, gid)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*core.RoleGroupRef, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, &core.RoleGroupRef{
+			ID:         uuidToString(row.ID.Bytes),
+			Name:       row.Name,
+			IsBaseRole: row.IsBaseRole,
+		})
+	}
+	return out, nil
+}
+
 // DeleteUserGroup removes an organisational user group (Story 2.6). Member rows
 // cascade (ON DELETE CASCADE). An unknown group maps to core.ErrUserGroupNotFound
-// → 404. Membership grants no permission (AD-12), so deleting a team never
-// changes anyone's access.
+// → 404. Membership grants no permission by itself (AD-12), but a team can hold
+// roles via `user_group_permission_groups` (Spec 2.9); deleting the team
+// cascades those away, so members immediately lose any access inherited
+// through it (live revocation, FR-21).
 func (r *Repository) DeleteUserGroup(ctx context.Context, groupID string) error {
 	gid, err := uuidFromString(groupID)
 	if err != nil {

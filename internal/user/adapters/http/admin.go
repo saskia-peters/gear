@@ -50,7 +50,7 @@ func (h *Handler) AdminRoutes() http.Handler {
 	users.NotFound(httpapi.NotFoundHandler())
 	users.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
 	users.Use(auth.RequireAnyPermission(h.validator, userApprovalResolver{h.service},
-		[]string{core.UserViewPermission, core.UserApprovePermission, core.UserManagePermission},
+		[]string{core.UserViewPermission, core.UserApprovePermission, core.UserManagePermission, core.UsersQualificationsManagePermission},
 		"users access denied", h.logger))
 	users.Get("/pending", h.ListPendingUsers)
 	users.Post("/{userID}/approve", h.ApproveUser)
@@ -60,6 +60,12 @@ func (h *Handler) AdminRoutes() http.Handler {
 	users.Get("/{userID}", h.GetAdminUserDetail)
 	users.Put("/{userID}", h.UpdateAdminUser)
 	users.Post("/{userID}/deactivate", h.DeactivateAdminUser)
+	// Per-user qualification assignment (Spec 2.9): gated by
+	// `users.qualifications.manage` — fuehrende/schirrmeister/admin assign,
+	// revoke, and edit a user's per-qualification valid-until here.
+	users.Post("/{userID}/qualifications/{qualificationID}", h.AssignUserQualificationHandler)
+	users.Delete("/{userID}/qualifications/{qualificationID}", h.RevokeUserQualificationHandler)
+	users.Put("/{userID}/qualifications/{qualificationID}/expiry", h.UpdateUserQualificationExpiryHandler)
 	r.Mount("/users", users)
 
 	// Organisational user-group surface (Story 2.6, AD-12): a dedicated
@@ -75,6 +81,8 @@ func (h *Handler) AdminRoutes() http.Handler {
 	userGroups.Post("/", h.CreateAdminUserGroup)
 	userGroups.Get("/{groupID}/members", h.ListAdminUserGroupMembers)
 	userGroups.Post("/{groupID}/members", h.AssignAdminUserGroupMembers)
+	userGroups.Get("/{groupID}/roles", h.ListUserGroupRolesHandler)
+	userGroups.Post("/{groupID}/roles", h.AssignUserGroupRolesHandler)
 	userGroups.Delete("/{groupID}", h.DeleteAdminUserGroup)
 	r.Mount("/user-groups", userGroups)
 

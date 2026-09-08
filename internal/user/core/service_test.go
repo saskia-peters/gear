@@ -100,6 +100,14 @@ type mockRepo struct {
 	updateAdminUserFunc  func(ctx context.Context, userID, email, firstName, lastName, state string, roleIDs, userGroupIDs, grantCodes []string) (*User, error)
 	deactivateUserFunc   func(ctx context.Context, userID string) (*User, error)
 	deleteUserGroupFunc  func(ctx context.Context, groupID string) error
+	// Admin Rework Effort 1 (Spec 2.9): userGroupRoles maps a user-group ID to
+	// the permission-group (role) IDs it grants its members; the mock keeps the
+	// resolved set (m.perms) consistent with the three-way union like the real
+	// repository. qualificationExpiry maps a userID+qualificationID to the
+	// per-assignment valid-until override.
+	userGroupRoles       map[string][]string
+	qualificationExpiry  map[string]*time.Time
+	listUserGroupRolesErr error
 }
 
 func newMockRepo() *mockRepo {
@@ -117,6 +125,8 @@ func newMockRepo() *mockRepo {
 		directGrants:     make(map[string][]string),
 		qualifications:   make(map[string]*QualificationAssignment),
 		userQualifications: make(map[string][]string),
+		userGroupRoles:     make(map[string][]string),
+		qualificationExpiry: make(map[string]*time.Time),
 	}
 }
 
@@ -797,8 +807,9 @@ func (m *mockRepo) seedUserGroup(id, name, description string, memberIDs ...stri
 }
 
 // ListUsers returns every user summary, ordered by last name then first name
-// (Story 2.6).
-func (m *mockRepo) ListUsers(_ context.Context) ([]*AdminUserSummary, error) {
+// (Story 2.6). The optional status filter (Spec 2.9) narrows to a single state
+// when set.
+func (m *mockRepo) ListUsers(_ context.Context, status *string) ([]*AdminUserSummary, error) {
 	if m.adminUsersErr != nil {
 		return nil, m.adminUsersErr
 	}
@@ -807,6 +818,9 @@ func (m *mockRepo) ListUsers(_ context.Context) ([]*AdminUserSummary, error) {
 	}
 	out := make([]*AdminUserSummary, 0, len(m.users))
 	for _, u := range m.users {
+		if status != nil && string(u.State) != *status {
+			continue
+		}
 		out = append(out, &AdminUserSummary{ID: u.ID, Vorname: u.FirstName, Nachname: u.LastName, Email: u.Email, Status: string(u.State)})
 	}
 	sort.SliceStable(out, func(i, j int) bool {
@@ -854,9 +868,16 @@ func (m *mockRepo) GetUserDetail(_ context.Context, userID string) (*AdminUserDe
 	}
 	for _, qid := range m.userQualifications[userID] {
 		if q := m.qualifications[qid]; q != nil {
-			detail.Qualifications = append(detail.Qualifications, QualificationAssignment{
+			assignment := QualificationAssignment{
 				ID: q.ID, Name: q.Name, Description: q.Description, ExpiryKind: q.ExpiryKind, ExpiresAt: q.ExpiresAt,
-			})
+			}
+			// Per-assignment valid-until override (Spec 2.9): a stored
+			// per-user expires_at takes precedence over the vocabulary expiry.
+			if perUser := m.qualificationExpiry[userID+"\x00"+qid]; perUser != nil {
+				assignment.ExpiresAt = perUser
+			}
+			assignment.Status = qualificationStatus(assignment, time.Now().UTC())
+			detail.Qualifications = append(detail.Qualifications, assignment)
 		}
 	}
 	sort.SliceStable(detail.Roles, func(i, j int) bool { return detail.Roles[i].Name < detail.Roles[j].Name })
@@ -1180,6 +1201,157 @@ func (m *mockRepo) ReplaceQualificationAssignees(_ context.Context, id string, u
 	return m.ListQualificationAssignees(context.Background(), id)
 }
 
+// ListUserGroupRoles returns the permission groups (roles) an organisational
+// user group grants its members (Spec 2.9). An unknown group maps to
+// ErrUserGroupNotFound.
+func (m *mockRepo) ListUserGroupRoles(_ context.Context, groupID string) ([]*RoleGroupRef, error) {
+	if m.userGroups[groupID] == nil {
+		return nil, ErrUserGroupNotFound
+	}
+	if m.listUserGroupRolesErr != nil {
+		return nil, m.listUserGroupRolesErr
+	}
+	var out []*RoleGroupRef
+	for _, roleID := range m.userGroupRoles[groupID] {
+		if g := m.roleGroups[roleID]; g != nil {
+			out = append(out, &RoleGroupRef{ID: g.ID, Name: g.Name, IsBaseRole: g.IsBaseRole})
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool { return out[i].Name < out[j].Name })
+	return out, nil
+}
+
+// ReplaceUserGroupRoles replaces an organisational user group's role set
+// atomically (Spec 2.9). An unknown group maps to ErrUserGroupNotFound; an
+// unknown role id maps to ErrAdminUserUnknownRole. Members inherit the roles
+// via the live resolved set, so removal is visible on the next resolution.
+func (m *mockRepo) ReplaceUserGroupRoles(_ context.Context, groupID string, roleIDs []string) ([]*RoleGroupRef, error) {
+	if m.userGroups[groupID] == nil {
+		return nil, ErrUserGroupNotFound
+	}
+	for _, roleID := range roleIDs {
+		if m.roleGroups[roleID] == nil {
+			return nil, ErrAdminUserUnknownRole
+		}
+	}
+	m.userGroupRoles[groupID] = roleIDs
+	// Recompute the resolved set of every member (three-way union: individual
+	// roles + team roles + direct grants) to mirror live per-request resolution.
+	for _, u := range m.users {
+		m.recomputePermissions(u.ID)
+	}
+	return m.ListUserGroupRoles(context.Background(), groupID)
+}
+
+// AssignQualificationToUser assigns a qualification to a user with an optional
+// per-assignment valid-until (Spec 2.9). A `fixed` qualification REQUIRES an
+// expires_at (ErrQualificationExpiryRequired); an `unlimited` one must NOT
+// carry one (ErrQualificationInvalidExpiresAt). Unknown user → 404, unknown
+// qualification → 404.
+func (m *mockRepo) AssignQualificationToUser(_ context.Context, userID, qualificationID string, expiresAt *time.Time) error {
+	if m.userByID(userID) == nil {
+		return ErrAdminUserNotFound
+	}
+	q := m.qualifications[qualificationID]
+	if q == nil {
+		return ErrQualificationNotFound
+	}
+	switch q.ExpiryKind {
+	case QualificationExpiryUnlimited:
+		if expiresAt != nil {
+			return ErrQualificationInvalidExpiresAt
+		}
+	case QualificationExpiryFixed:
+		if expiresAt == nil {
+			return ErrQualificationExpiryRequired
+		}
+	}
+	if !containsString(m.userQualifications[userID], qualificationID) {
+		m.userQualifications[userID] = append(m.userQualifications[userID], qualificationID)
+	}
+	if expiresAt != nil {
+		m.qualificationExpiry[userID+"\x00"+qualificationID] = expiresAt
+	}
+	return nil
+}
+
+// RevokeQualificationFromUser revokes a qualification from a user (Spec 2.9).
+// Unknown user → 404, unknown qualification → 404.
+func (m *mockRepo) RevokeQualificationFromUser(_ context.Context, userID, qualificationID string) error {
+	if m.userByID(userID) == nil {
+		return ErrAdminUserNotFound
+	}
+	if m.qualifications[qualificationID] == nil {
+		return ErrQualificationNotFound
+	}
+	if !containsString(m.userQualifications[userID], qualificationID) {
+		// Unassigned pair maps to the uniform not-found (review finding 2.9).
+		return ErrQualificationAssignmentNotFound
+	}
+	m.userQualifications[userID] = filterString(m.userQualifications[userID], qualificationID)
+	delete(m.qualificationExpiry, userID+"\x00"+qualificationID)
+	return nil
+}
+
+// UpdateUserQualificationExpiry edits a user's per-assignment valid-until
+// (Spec 2.9). An unknown user/qualification pair (not assigned) maps to
+// ErrQualificationAssignmentNotFound.
+func (m *mockRepo) UpdateUserQualificationExpiry(_ context.Context, userID, qualificationID string, expiresAt *time.Time) error {
+	if m.userByID(userID) == nil || m.qualifications[qualificationID] == nil {
+		return ErrQualificationAssignmentNotFound
+	}
+	if !containsString(m.userQualifications[userID], qualificationID) {
+		return ErrQualificationAssignmentNotFound
+	}
+	if q := m.qualifications[qualificationID]; q != nil && q.ExpiryKind == QualificationExpiryUnlimited && expiresAt != nil {
+		// An unlimited qualification must never carry a per-assignment expiry.
+		return ErrQualificationInvalidExpiresAt
+	}
+	if expiresAt == nil {
+		delete(m.qualificationExpiry, userID+"\x00"+qualificationID)
+	} else {
+		m.qualificationExpiry[userID+"\x00"+qualificationID] = expiresAt
+	}
+	return nil
+}
+
+// recomputePermissions rebuilds a user's resolved permission set as the
+// three-way additive union (Spec 2.9): individual roles + roles inherited via
+// user-groups + direct grants. Users with NO group memberships/roles/grants
+// (e.g. an admin whose perms were seeded directly via m.perms) are left
+// untouched so manually-seeded sets survive.
+func (m *mockRepo) recomputePermissions(userID string) {
+	if len(m.userRoleGroups[userID]) == 0 && len(m.userGroupMembers[userID]) == 0 && len(m.directGrants[userID]) == 0 {
+		return
+	}
+	set := map[string]bool{}
+	for _, roleID := range m.userRoleGroups[userID] {
+		if g := m.roleGroups[roleID]; g != nil {
+			for _, c := range g.Permissions {
+				set[c] = true
+			}
+		}
+	}
+	for _, groupID := range m.userGroupMembers[userID] {
+		for _, roleID := range m.userGroupRoles[groupID] {
+			if g := m.roleGroups[roleID]; g != nil {
+				for _, c := range g.Permissions {
+					set[c] = true
+				}
+			}
+		}
+	}
+	for _, c := range m.directGrants[userID] {
+		set[c] = true
+	}
+	var out []string
+	for c := range set {
+		out = append(out, c)
+	}
+	sort.Strings(out)
+	m.perms[userID] = out
+}
+
 // userByID finds a user by ID across the email-keyed map (the mock repository
 // keys users by email; lookups by ID iterate the values).
 func (m *mockRepo) userByID(userID string) *User {
@@ -1189,6 +1361,25 @@ func (m *mockRepo) userByID(userID string) *User {
 		}
 	}
 	return nil
+}
+
+func containsString(xs []string, v string) bool {
+	for _, x := range xs {
+		if x == v {
+			return true
+		}
+	}
+	return false
+}
+
+func filterString(xs []string, v string) []string {
+	out := xs[:0]
+	for _, x := range xs {
+		if x != v {
+			out = append(out, x)
+		}
+	}
+	return out
 }
 
 type mockHasher struct {

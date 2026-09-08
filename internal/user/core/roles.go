@@ -130,10 +130,10 @@ const RoleNameMaxLength = 120
 // (Story 2.5). An empty description is fine (it is stored as '').
 const RoleDescriptionMaxLength = 500
 
-// BasePermissionCodes is the full AD-12 base series (Story 2.2/2.5): the only
-// codes the role editor may grant. The list is the server-authoritative source
-// the catalog and the create/update validation draw from — it never drifts
-// from the seed.
+// BasePermissionCodes is the full AD-12 base series (Story 2.2/2.5, Spec 2.9):
+// the only codes the role editor may grant. The list is the server-authoritative
+// source the catalog and the create/update validation draw from — it never
+// drifts from the seed.
 var BasePermissionCodes = []string{
 	"dashboard.view",
 	"inspection.submit",
@@ -145,6 +145,7 @@ var BasePermissionCodes = []string{
 	"users.view",
 	"users.approve",
 	"users.manage",
+	"users.qualifications.manage",
 	"user_groups.manage",
 	"roles.create",
 	"roles.edit",
@@ -182,6 +183,7 @@ var permissionLabels = map[string]string{
 	"users.view":              "Benutzer ansehen",
 	"users.approve":           "Benutzerfreigaben erteilen",
 	"users.manage":            "Benutzer verwalten",
+	"users.qualifications.manage": "Qualifikationen an Benutzer vergeben",
 	"user_groups.manage":      "Benutzergruppen verwalten",
 	"roles.create":            "Rollen erstellen",
 	"roles.edit":              "Rollen bearbeiten",

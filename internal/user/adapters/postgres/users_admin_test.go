@@ -89,7 +89,7 @@ func TestPostgresUserGroupAdministration(t *testing.T) {
 	}
 
 	// LIST_USERS: the new user appears with names, email and state.
-	users, err := repo.ListUsers(ctx)
+	users, err := repo.ListUsers(ctx, nil)
 	if err != nil {
 		t.Fatalf("ListUsers failed: %v", err)
 	}
@@ -420,7 +420,7 @@ func TestPostgresAdminUserQualificationSeam(t *testing.T) {
 	if len(detail.Qualifications) != 1 || detail.Qualifications[0].Name != qualName || detail.Qualifications[0].ExpiryKind != core.QualificationExpiryUnlimited {
 		t.Errorf("qualifications = %+v, want the seeded unlimited qualification", detail.Qualifications)
 	}
-	if err := q.RemoveQualificationFromUser(ctx, RemoveQualificationFromUserParams{UserID: mustUUID(t, user.ID), QualificationID: mustUUID(t, qualID)}); err != nil {
+	if _, err := q.RemoveQualificationFromUser(ctx, RemoveQualificationFromUserParams{UserID: mustUUID(t, user.ID), QualificationID: mustUUID(t, qualID)}); err != nil {
 		t.Fatalf("RemoveQualificationFromUser failed: %v", err)
 	}
 	detail, err = repo.GetUserDetail(ctx, user.ID)

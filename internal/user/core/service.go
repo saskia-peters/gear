@@ -113,7 +113,7 @@ type Repository interface {
 	// AssignUserGroupMembers replaces a group's member set atomically (unknown
 	// member → ErrUserGroupMemberUnknown); ListUserGroupMembers returns the
 	// current member ids of a group.
-	ListUsers(ctx context.Context) ([]*AdminUserSummary, error)
+	ListUsers(ctx context.Context, status *string) ([]*AdminUserSummary, error)
 	GetUserDetail(ctx context.Context, userID string) (*AdminUserDetail, error)
 	CreateAdminUser(ctx context.Context, email, firstName, lastName, state string, roleIDs, userGroupIDs, grantCodes []string) (*User, error)
 	UpdateAdminUser(ctx context.Context, userID, email, firstName, lastName, state string, roleIDs, userGroupIDs, grantCodes []string) (*User, error)
@@ -137,6 +137,21 @@ type Repository interface {
 	UpdateQualification(ctx context.Context, id, name, description, expiryKind string, expiresAt *time.Time) (*Qualification, error)
 	ListQualificationAssignees(ctx context.Context, id string) ([]*QualificationAssignee, error)
 	ReplaceQualificationAssignees(ctx context.Context, id string, userIDs []string) ([]*QualificationAssignee, error)
+	// Admin Rework Effort 1 (Spec 2.9): ListUserGroupRoles returns the roles
+	// an organisational user group grants its members; ReplaceUserGroupRoles
+	// replaces a group's role set atomically (unknown group →
+	// ErrUserGroupNotFound, unknown role → ErrAdminUserUnknownRole).
+	// AssignQualificationToUser assigns a qualification to a user with an
+	// optional per-assignment valid-until (fixed qualification REQUIRES an
+	// expires_at → ErrQualificationExpiryRequired; unlimited must not carry one
+	// → ErrQualificationInvalidExpiresAt); RevokeQualificationFromUser revokes
+	// it; UpdateUserQualificationExpiry edits the per-assignment valid-until
+	// (unknown user/qualification pair → ErrQualificationAssignmentNotFound).
+	ListUserGroupRoles(ctx context.Context, groupID string) ([]*RoleGroupRef, error)
+	ReplaceUserGroupRoles(ctx context.Context, groupID string, roleIDs []string) ([]*RoleGroupRef, error)
+	AssignQualificationToUser(ctx context.Context, userID, qualificationID string, expiresAt *time.Time) error
+	RevokeQualificationFromUser(ctx context.Context, userID, qualificationID string) error
+	UpdateUserQualificationExpiry(ctx context.Context, userID, qualificationID string, expiresAt *time.Time) error
 }
 
 // SecretCipher encrypts/decrypts the TOTP shared secret at rest (NFR-S4). The

@@ -102,8 +102,14 @@ SET failed_count = 0, lockout_until = NULL, updated_at = now()
 WHERE email = $1;
 
 -- name: ListPermissionsByUser :many
--- Resolved permission set (AD-12): additive union of permission-group
--- memberships plus direct grants. Deduplicated via DISTINCT.
+-- Resolved permission set (AD-12): additive union of
+--   1. individual permission-group (role) memberships,
+--   2. roles INHERITED via organisational user-groups (a team holding a role
+--      grants its members that role's permissions, Spec 2.9), and
+--   3. direct one-off grants.
+-- Deduplicated via DISTINCT; no precedence, no subtraction. Resolved live per
+-- request (FR-21/FR-22) — removing a role from a group revokes it from all
+-- members on the next request.
 SELECT DISTINCT p.code
 FROM permissions p
 WHERE p.id IN (
@@ -111,6 +117,12 @@ WHERE p.id IN (
     FROM user_permission_groups upg
     JOIN permission_group_permissions pgp ON pgp.permission_group_id = upg.permission_group_id
     WHERE upg.user_id = $1
+    UNION
+    SELECT pgp.permission_id
+    FROM user_group_members ugm
+    JOIN user_group_permission_groups ugpg ON ugpg.user_group_id = ugm.user_group_id
+    JOIN permission_group_permissions pgp ON pgp.permission_group_id = ugpg.permission_group_id
+    WHERE ugm.user_id = $1
     UNION
     SELECT up.permission_id
     FROM user_permissions up
@@ -593,11 +605,13 @@ SELECT EXISTS (
 
 -- name: ListUsers :many
 -- Every user for the admin "Benutzer" list surface (Story 2.6): id, names,
--- email and state, ordered by last name then first name. No secret material
--- (password hash, tokens) is selected — the listing never exposes credentials
--- (NFR-O1).
+-- email and state, ordered by last name then first name. An optional `status`
+-- filter (active/pending_approval/deactivated) narrows the set; a NULL status
+-- returns all users (Spec 2.9 status filter). No secret material (password
+-- hash, tokens) is selected — the listing never exposes credentials (NFR-O1).
 SELECT id, email, first_name, last_name, state
 FROM users
+WHERE (sqlc.narg('status')::text IS NULL OR state = sqlc.narg('status')::text)
 ORDER BY last_name, first_name, email;
 
 -- name: GetUserByID :one
@@ -639,11 +653,12 @@ ORDER BY p.code;
 
 -- name: ListUserQualifications :many
 -- The qualification assignments of a user (Story 2.6, AD-7/FR-22): the
--- vocabulary row plus the assignment timestamp. The expiry model lives on the
--- qualification (expiry_kind + optional expires_at); the core derives the
--- per-assignment display status (Gültig / Bald ablaufend / Abgelaufen /
--- Unbegrenzt). Ordered by qualification name.
-SELECT q.id, q.name, q.description, q.expiry_kind, q.expires_at, uq.assigned_at
+-- vocabulary row, the assignment timestamp and the PER-ASSIGNMENT expires_at
+-- (Spec 2.9, nullable — overrides the vocabulary expiry when set). The core
+-- derives the per-assignment display status (Gültig / Bald ablaufend /
+-- Abgelaufen / Unbegrenzt) from the per-assignment expires_at first, then the
+-- vocabulary expires_at. Ordered by qualification name.
+SELECT q.id, q.name, q.description, q.expiry_kind, q.expires_at AS vocab_expires_at, uq.expires_at AS assigned_expires_at, uq.assigned_at
 FROM user_qualifications uq
 JOIN qualifications q ON q.id = uq.qualification_id
 WHERE uq.user_id = $1
@@ -853,6 +868,77 @@ FROM users u
 WHERE u.id = ANY($2::uuid[])
 ON CONFLICT DO NOTHING;
 
+-- name: ListUserGroupRoles :many
+-- The permission groups (roles) an organisational user group grants its members
+-- (Spec 2.9, AD-12): id + name + is_base_role, ordered by name. A member of the
+-- team inherits every role here via the resolution query.
+SELECT pg.id, pg.name, pg.is_base_role
+FROM permission_groups pg
+JOIN user_group_permission_groups ugpg ON ugpg.permission_group_id = pg.id
+WHERE ugpg.user_group_id = $1
+ORDER BY pg.name;
+
+-- name: DeleteUserGroupRoles :exec
+-- Remove EVERY role row of an organisational user group (Spec 2.9). Used by the
+-- group-role assignment BEFORE InsertUserGroupRoles, both in ONE transaction
+-- (delete-then-insert, separate statements — Story 2.5 lesson, never a
+-- data-modifying CTE).
+DELETE FROM user_group_permission_groups
+WHERE user_group_id = $1;
+
+-- name: InsertUserGroupRoles :exec
+-- Bulk insert the role rows of an organisational user group (Spec 2.9). The
+-- input is resolved permission-group ids (already validated to exist). An empty
+-- set removes every role (revoking inherited access from all members on the
+-- next request).
+INSERT INTO user_group_permission_groups (user_group_id, permission_group_id)
+SELECT $1, p.id
+FROM permission_groups p
+WHERE p.id = ANY($2::uuid[])
+ON CONFLICT DO NOTHING;
+
+-- name: ListGroupRolesByUser :many
+-- The roles a user inherits VIA organisational user-groups (Spec 2.9,
+-- provenance): the user-group id + name and the role id + name for every
+-- role a team the user belongs to grants. Used to annotate the resolved
+-- permission set on the user detail with its source(s).
+SELECT ug.id AS user_group_id, ug.name AS user_group_name, pg.id AS role_id, pg.name AS role_name
+FROM user_group_members ugm
+JOIN user_groups ug ON ug.id = ugm.user_group_id
+JOIN user_group_permission_groups ugpg ON ugpg.user_group_id = ug.id
+JOIN permission_groups pg ON pg.id = ugpg.permission_group_id
+WHERE ugm.user_id = $1
+ORDER BY ug.name, pg.name;
+
+-- name: ListResolvedPermissionSources :many
+-- Every resolved permission code of a user ANNOTATED with its source (Spec 2.9
+-- provenance): source_kind is 'role' (individual permission-group membership),
+-- 'group' (inherited via an organisational user-group), or 'direct' (direct
+-- one-off grant); source_name is the role name, the user-group name, or
+-- 'direct' respectively. A code may appear multiple times (multi-source); the
+-- core groups by code to list all sources. Powers Effort 2's "Alle
+-- Berechtigungen" view; computed server-side here (Effort 1).
+SELECT p.code, 'role' AS source_kind, pg.name AS source_name
+FROM user_permission_groups upg
+JOIN permission_groups pg ON pg.id = upg.permission_group_id
+JOIN permission_group_permissions pgp ON pgp.permission_group_id = pg.id
+JOIN permissions p ON p.id = pgp.permission_id
+WHERE upg.user_id = $1
+UNION ALL
+SELECT p.code, 'group' AS source_kind, ug.name AS source_name
+FROM user_group_members ugm
+JOIN user_groups ug ON ug.id = ugm.user_group_id
+JOIN user_group_permission_groups ugpg ON ugpg.user_group_id = ug.id
+JOIN permission_group_permissions pgp ON pgp.permission_group_id = ugpg.permission_group_id
+JOIN permissions p ON p.id = pgp.permission_id
+WHERE ugm.user_id = $1
+UNION ALL
+SELECT p.code, 'direct', 'direct'
+FROM user_permissions up
+JOIN permissions p ON p.id = up.permission_id
+WHERE up.user_id = $1
+ORDER BY 1;
+
 -- name: ListQualifications :many
 -- The full qualification vocabulary (Story 2.6, AD-7/FR-22): every
 -- qualification with its expiry model, ordered by name. The qualification
@@ -864,18 +950,41 @@ ORDER BY name;
 
 -- name: AddQualificationToUser :exec
 -- Assign a qualification to a user (Story 2.6 persistence seam; the assignment
--- EDITING surface ships with Story 2.7). ON CONFLICT DO NOTHING makes a
--- duplicate assignment a no-op.
-INSERT INTO user_qualifications (user_id, qualification_id)
-VALUES ($1, $2)
-ON CONFLICT DO NOTHING;
+-- EDITING surface ships with Story 2.7). A `fixed` qualification REQUIRES a
+-- per-assignment expires_at (Spec 2.9 human decision A); an `unlimited` one
+-- stores NULL. Re-assigning an already-assigned qualification UPDATES the
+-- per-assignment expires_at (review finding 2.9): a duplicate assignment with a
+-- new valid-until renews/overrides the stored one instead of silently no-oping.
+INSERT INTO user_qualifications (user_id, qualification_id, expires_at)
+VALUES ($1, $2, $3)
+ON CONFLICT (user_id, qualification_id)
+DO UPDATE SET expires_at = EXCLUDED.expires_at;
 
--- name: RemoveQualificationFromUser :exec
+-- name: UpdateUserQualificationExpiry :execrows
+-- Update a user's per-assignment valid-until (Spec 2.9): a NULL clears the
+-- override (reverting the status to the vocabulary expiry); a value overrides
+-- it. A zero-row update (unknown user/qualification pair) reports 0 rows the
+-- caller maps to the uniform not-found.
+UPDATE user_qualifications
+SET expires_at = $3
+WHERE user_id = $1 AND qualification_id = $2;
+
+-- name: RemoveQualificationFromUser :execrows
 -- Revoke a qualification from a user (Story 2.6 persistence seam; the
 -- assignment EDITING surface ships with Story 2.7). Revocation is immediate
--- (FR-22/AD-2) because qualification resolution is live per request.
+-- (FR-22/AD-2) because qualification resolution is live per request. A
+-- zero-row delete (unassigned pair) reports 0 rows the caller maps to the
+-- uniform not-found — consistent with UpdateUserQualificationExpiry.
 DELETE FROM user_qualifications
 WHERE user_id = $1 AND qualification_id = $2;
+
+-- name: GetQualificationExpiryKindByID :one
+-- The expiry model of ONE qualification by id (review finding 2.9): a targeted
+-- lookup so the assignment path does not scan the whole vocabulary. Zero rows
+-- (unknown id) map to the uniform not-found.
+SELECT id, expiry_kind
+FROM qualifications
+WHERE id = $1;
 
 -- ============================================================================
 -- Qualification Management (Story 2.7, AD-6/FR-19/FR-22/AD-7)

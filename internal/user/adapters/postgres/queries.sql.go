@@ -12,21 +12,26 @@ import (
 )
 
 const addQualificationToUser = `-- name: AddQualificationToUser :exec
-INSERT INTO user_qualifications (user_id, qualification_id)
-VALUES ($1, $2)
-ON CONFLICT DO NOTHING
+INSERT INTO user_qualifications (user_id, qualification_id, expires_at)
+VALUES ($1, $2, $3)
+ON CONFLICT (user_id, qualification_id)
+DO UPDATE SET expires_at = EXCLUDED.expires_at
 `
 
 type AddQualificationToUserParams struct {
-	UserID          pgtype.UUID `json:"user_id"`
-	QualificationID pgtype.UUID `json:"qualification_id"`
+	UserID          pgtype.UUID        `json:"user_id"`
+	QualificationID pgtype.UUID        `json:"qualification_id"`
+	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
 }
 
 // Assign a qualification to a user (Story 2.6 persistence seam; the assignment
-// EDITING surface ships with Story 2.7). ON CONFLICT DO NOTHING makes a
-// duplicate assignment a no-op.
+// EDITING surface ships with Story 2.7). A `fixed` qualification REQUIRES a
+// per-assignment expires_at (Spec 2.9 human decision A); an `unlimited` one
+// stores NULL. Re-assigning an already-assigned qualification UPDATES the
+// per-assignment expires_at (review finding 2.9): a duplicate assignment with a
+// new valid-until renews/overrides the stored one instead of silently no-oping.
 func (q *Queries) AddQualificationToUser(ctx context.Context, arg AddQualificationToUserParams) error {
-	_, err := q.db.Exec(ctx, addQualificationToUser, arg.UserID, arg.QualificationID)
+	_, err := q.db.Exec(ctx, addQualificationToUser, arg.UserID, arg.QualificationID, arg.ExpiresAt)
 	return err
 }
 
@@ -782,6 +787,20 @@ func (q *Queries) DeleteUserGroupMemberships(ctx context.Context, userID pgtype.
 	return err
 }
 
+const deleteUserGroupRoles = `-- name: DeleteUserGroupRoles :exec
+DELETE FROM user_group_permission_groups
+WHERE user_group_id = $1
+`
+
+// Remove EVERY role row of an organisational user group (Spec 2.9). Used by the
+// group-role assignment BEFORE InsertUserGroupRoles, both in ONE transaction
+// (delete-then-insert, separate statements — Story 2.5 lesson, never a
+// data-modifying CTE).
+func (q *Queries) DeleteUserGroupRoles(ctx context.Context, userGroupID pgtype.UUID) error {
+	_, err := q.db.Exec(ctx, deleteUserGroupRoles, userGroupID)
+	return err
+}
+
 const deleteUserRoles = `-- name: DeleteUserRoles :exec
 DELETE FROM user_permission_groups
 WHERE user_id = $1
@@ -966,6 +985,27 @@ func (q *Queries) GetPermissionByCode(ctx context.Context, code string) (GetPerm
 	row := q.db.QueryRow(ctx, getPermissionByCode, code)
 	var i GetPermissionByCodeRow
 	err := row.Scan(&i.ID, &i.Code, &i.Description)
+	return i, err
+}
+
+const getQualificationExpiryKindByID = `-- name: GetQualificationExpiryKindByID :one
+SELECT id, expiry_kind
+FROM qualifications
+WHERE id = $1
+`
+
+type GetQualificationExpiryKindByIDRow struct {
+	ID         pgtype.UUID `json:"id"`
+	ExpiryKind string      `json:"expiry_kind"`
+}
+
+// The expiry model of ONE qualification by id (review finding 2.9): a targeted
+// lookup so the assignment path does not scan the whole vocabulary. Zero rows
+// (unknown id) map to the uniform not-found.
+func (q *Queries) GetQualificationExpiryKindByID(ctx context.Context, id pgtype.UUID) (GetQualificationExpiryKindByIDRow, error) {
+	row := q.db.QueryRow(ctx, getQualificationExpiryKindByID, id)
+	var i GetQualificationExpiryKindByIDRow
+	err := row.Scan(&i.ID, &i.ExpiryKind)
 	return i, err
 }
 
@@ -1282,6 +1322,28 @@ func (q *Queries) InsertUserGroupMemberships(ctx context.Context, arg InsertUser
 	return err
 }
 
+const insertUserGroupRoles = `-- name: InsertUserGroupRoles :exec
+INSERT INTO user_group_permission_groups (user_group_id, permission_group_id)
+SELECT $1, p.id
+FROM permission_groups p
+WHERE p.id = ANY($2::uuid[])
+ON CONFLICT DO NOTHING
+`
+
+type InsertUserGroupRolesParams struct {
+	UserGroupID pgtype.UUID   `json:"user_group_id"`
+	Column2     []pgtype.UUID `json:"column_2"`
+}
+
+// Bulk insert the role rows of an organisational user group (Spec 2.9). The
+// input is resolved permission-group ids (already validated to exist). An empty
+// set removes every role (revoking inherited access from all members on the
+// next request).
+func (q *Queries) InsertUserGroupRoles(ctx context.Context, arg InsertUserGroupRolesParams) error {
+	_, err := q.db.Exec(ctx, insertUserGroupRoles, arg.UserGroupID, arg.Column2)
+	return err
+}
+
 const insertUserRoles = `-- name: InsertUserRoles :exec
 INSERT INTO user_permission_groups (user_id, permission_group_id)
 SELECT $1, p.id
@@ -1498,6 +1560,52 @@ func (q *Queries) ListGroupPermissionsByGroupIDs(ctx context.Context) ([]ListGro
 	return items, nil
 }
 
+const listGroupRolesByUser = `-- name: ListGroupRolesByUser :many
+SELECT ug.id AS user_group_id, ug.name AS user_group_name, pg.id AS role_id, pg.name AS role_name
+FROM user_group_members ugm
+JOIN user_groups ug ON ug.id = ugm.user_group_id
+JOIN user_group_permission_groups ugpg ON ugpg.user_group_id = ug.id
+JOIN permission_groups pg ON pg.id = ugpg.permission_group_id
+WHERE ugm.user_id = $1
+ORDER BY ug.name, pg.name
+`
+
+type ListGroupRolesByUserRow struct {
+	UserGroupID   pgtype.UUID `json:"user_group_id"`
+	UserGroupName string      `json:"user_group_name"`
+	RoleID        pgtype.UUID `json:"role_id"`
+	RoleName      string      `json:"role_name"`
+}
+
+// The roles a user inherits VIA organisational user-groups (Spec 2.9,
+// provenance): the user-group id + name and the role id + name for every
+// role a team the user belongs to grants. Used to annotate the resolved
+// permission set on the user detail with its source(s).
+func (q *Queries) ListGroupRolesByUser(ctx context.Context, userID pgtype.UUID) ([]ListGroupRolesByUserRow, error) {
+	rows, err := q.db.Query(ctx, listGroupRolesByUser, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListGroupRolesByUserRow
+	for rows.Next() {
+		var i ListGroupRolesByUserRow
+		if err := rows.Scan(
+			&i.UserGroupID,
+			&i.UserGroupName,
+			&i.RoleID,
+			&i.RoleName,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listPendingUsers = `-- name: ListPendingUsers :many
 SELECT id, email, first_name, last_name, created_at
 FROM users
@@ -1672,6 +1780,12 @@ WHERE p.id IN (
     JOIN permission_group_permissions pgp ON pgp.permission_group_id = upg.permission_group_id
     WHERE upg.user_id = $1
     UNION
+    SELECT pgp.permission_id
+    FROM user_group_members ugm
+    JOIN user_group_permission_groups ugpg ON ugpg.user_group_id = ugm.user_group_id
+    JOIN permission_group_permissions pgp ON pgp.permission_group_id = ugpg.permission_group_id
+    WHERE ugm.user_id = $1
+    UNION
     SELECT up.permission_id
     FROM user_permissions up
     WHERE up.user_id = $1
@@ -1679,8 +1793,15 @@ WHERE p.id IN (
 ORDER BY p.code
 `
 
-// Resolved permission set (AD-12): additive union of permission-group
-// memberships plus direct grants. Deduplicated via DISTINCT.
+// Resolved permission set (AD-12): additive union of
+//  1. individual permission-group (role) memberships,
+//  2. roles INHERITED via organisational user-groups (a team holding a role
+//     grants its members that role's permissions, Spec 2.9), and
+//  3. direct one-off grants.
+//
+// Deduplicated via DISTINCT; no precedence, no subtraction. Resolved live per
+// request (FR-21/FR-22) — removing a role from a group revokes it from all
+// members on the next request.
 func (q *Queries) ListPermissionsByUser(ctx context.Context, userID pgtype.UUID) ([]string, error) {
 	rows, err := q.db.Query(ctx, listPermissionsByUser, userID)
 	if err != nil {
@@ -1771,6 +1892,62 @@ func (q *Queries) ListQualifications(ctx context.Context) ([]ListQualificationsR
 			&i.ExpiryKind,
 			&i.ExpiresAt,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listResolvedPermissionSources = `-- name: ListResolvedPermissionSources :many
+SELECT p.code, 'role' AS source_kind, pg.name AS source_name
+FROM user_permission_groups upg
+JOIN permission_groups pg ON pg.id = upg.permission_group_id
+JOIN permission_group_permissions pgp ON pgp.permission_group_id = pg.id
+JOIN permissions p ON p.id = pgp.permission_id
+WHERE upg.user_id = $1
+UNION ALL
+SELECT p.code, 'group' AS source_kind, ug.name AS source_name
+FROM user_group_members ugm
+JOIN user_groups ug ON ug.id = ugm.user_group_id
+JOIN user_group_permission_groups ugpg ON ugpg.user_group_id = ug.id
+JOIN permission_group_permissions pgp ON pgp.permission_group_id = ugpg.permission_group_id
+JOIN permissions p ON p.id = pgp.permission_id
+WHERE ugm.user_id = $1
+UNION ALL
+SELECT p.code, 'direct', 'direct'
+FROM user_permissions up
+JOIN permissions p ON p.id = up.permission_id
+WHERE up.user_id = $1
+ORDER BY 1
+`
+
+type ListResolvedPermissionSourcesRow struct {
+	Code       string `json:"code"`
+	SourceKind string `json:"source_kind"`
+	SourceName string `json:"source_name"`
+}
+
+// Every resolved permission code of a user ANNOTATED with its source (Spec 2.9
+// provenance): source_kind is 'role' (individual permission-group membership),
+// 'group' (inherited via an organisational user-group), or 'direct' (direct
+// one-off grant); source_name is the role name, the user-group name, or
+// 'direct' respectively. A code may appear multiple times (multi-source); the
+// core groups by code to list all sources. Powers Effort 2's "Alle
+// Berechtigungen" view; computed server-side here (Effort 1).
+func (q *Queries) ListResolvedPermissionSources(ctx context.Context, userID pgtype.UUID) ([]ListResolvedPermissionSourcesRow, error) {
+	rows, err := q.db.Query(ctx, listResolvedPermissionSources, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListResolvedPermissionSourcesRow
+	for rows.Next() {
+		var i ListResolvedPermissionSourcesRow
+		if err := rows.Scan(&i.Code, &i.SourceKind, &i.SourceName); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -1883,6 +2060,43 @@ func (q *Queries) ListUserGroupMemberships(ctx context.Context, userID pgtype.UU
 	return items, nil
 }
 
+const listUserGroupRoles = `-- name: ListUserGroupRoles :many
+SELECT pg.id, pg.name, pg.is_base_role
+FROM permission_groups pg
+JOIN user_group_permission_groups ugpg ON ugpg.permission_group_id = pg.id
+WHERE ugpg.user_group_id = $1
+ORDER BY pg.name
+`
+
+type ListUserGroupRolesRow struct {
+	ID         pgtype.UUID `json:"id"`
+	Name       string      `json:"name"`
+	IsBaseRole bool        `json:"is_base_role"`
+}
+
+// The permission groups (roles) an organisational user group grants its members
+// (Spec 2.9, AD-12): id + name + is_base_role, ordered by name. A member of the
+// team inherits every role here via the resolution query.
+func (q *Queries) ListUserGroupRoles(ctx context.Context, userGroupID pgtype.UUID) ([]ListUserGroupRolesRow, error) {
+	rows, err := q.db.Query(ctx, listUserGroupRoles, userGroupID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUserGroupRolesRow
+	for rows.Next() {
+		var i ListUserGroupRolesRow
+		if err := rows.Scan(&i.ID, &i.Name, &i.IsBaseRole); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listUserGroups = `-- name: ListUserGroups :many
 SELECT id, name, description, created_at
 FROM user_groups
@@ -1924,7 +2138,7 @@ func (q *Queries) ListUserGroups(ctx context.Context) ([]ListUserGroupsRow, erro
 }
 
 const listUserQualifications = `-- name: ListUserQualifications :many
-SELECT q.id, q.name, q.description, q.expiry_kind, q.expires_at, uq.assigned_at
+SELECT q.id, q.name, q.description, q.expiry_kind, q.expires_at AS vocab_expires_at, uq.expires_at AS assigned_expires_at, uq.assigned_at
 FROM user_qualifications uq
 JOIN qualifications q ON q.id = uq.qualification_id
 WHERE uq.user_id = $1
@@ -1932,19 +2146,21 @@ ORDER BY q.name
 `
 
 type ListUserQualificationsRow struct {
-	ID          pgtype.UUID        `json:"id"`
-	Name        string             `json:"name"`
-	Description string             `json:"description"`
-	ExpiryKind  string             `json:"expiry_kind"`
-	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
-	AssignedAt  pgtype.Timestamptz `json:"assigned_at"`
+	ID                pgtype.UUID        `json:"id"`
+	Name              string             `json:"name"`
+	Description       string             `json:"description"`
+	ExpiryKind        string             `json:"expiry_kind"`
+	VocabExpiresAt    pgtype.Timestamptz `json:"vocab_expires_at"`
+	AssignedExpiresAt pgtype.Timestamptz `json:"assigned_expires_at"`
+	AssignedAt        pgtype.Timestamptz `json:"assigned_at"`
 }
 
 // The qualification assignments of a user (Story 2.6, AD-7/FR-22): the
-// vocabulary row plus the assignment timestamp. The expiry model lives on the
-// qualification (expiry_kind + optional expires_at); the core derives the
-// per-assignment display status (Gültig / Bald ablaufend / Abgelaufen /
-// Unbegrenzt). Ordered by qualification name.
+// vocabulary row, the assignment timestamp and the PER-ASSIGNMENT expires_at
+// (Spec 2.9, nullable — overrides the vocabulary expiry when set). The core
+// derives the per-assignment display status (Gültig / Bald ablaufend /
+// Abgelaufen / Unbegrenzt) from the per-assignment expires_at first, then the
+// vocabulary expires_at. Ordered by qualification name.
 func (q *Queries) ListUserQualifications(ctx context.Context, userID pgtype.UUID) ([]ListUserQualificationsRow, error) {
 	rows, err := q.db.Query(ctx, listUserQualifications, userID)
 	if err != nil {
@@ -1959,7 +2175,8 @@ func (q *Queries) ListUserQualifications(ctx context.Context, userID pgtype.UUID
 			&i.Name,
 			&i.Description,
 			&i.ExpiryKind,
-			&i.ExpiresAt,
+			&i.VocabExpiresAt,
+			&i.AssignedExpiresAt,
 			&i.AssignedAt,
 		); err != nil {
 			return nil, err
@@ -2012,6 +2229,7 @@ const listUsers = `-- name: ListUsers :many
 
 SELECT id, email, first_name, last_name, state
 FROM users
+WHERE ($1::text IS NULL OR state = $1::text)
 ORDER BY last_name, first_name, email
 `
 
@@ -2027,11 +2245,12 @@ type ListUsersRow struct {
 // User & Group Administration (Story 2.6, AD-2/AD-6/FR-19/FR-21/FR-22, AD-12)
 // ============================================================================
 // Every user for the admin "Benutzer" list surface (Story 2.6): id, names,
-// email and state, ordered by last name then first name. No secret material
-// (password hash, tokens) is selected — the listing never exposes credentials
-// (NFR-O1).
-func (q *Queries) ListUsers(ctx context.Context) ([]ListUsersRow, error) {
-	rows, err := q.db.Query(ctx, listUsers)
+// email and state, ordered by last name then first name. An optional `status`
+// filter (active/pending_approval/deactivated) narrows the set; a NULL status
+// returns all users (Spec 2.9 status filter). No secret material (password
+// hash, tokens) is selected — the listing never exposes credentials (NFR-O1).
+func (q *Queries) ListUsers(ctx context.Context, status pgtype.Text) ([]ListUsersRow, error) {
+	rows, err := q.db.Query(ctx, listUsers, status)
 	if err != nil {
 		return nil, err
 	}
@@ -2205,7 +2424,7 @@ func (q *Queries) QualificationNameExistsExcept(ctx context.Context, arg Qualifi
 	return exists, err
 }
 
-const removeQualificationFromUser = `-- name: RemoveQualificationFromUser :exec
+const removeQualificationFromUser = `-- name: RemoveQualificationFromUser :execrows
 DELETE FROM user_qualifications
 WHERE user_id = $1 AND qualification_id = $2
 `
@@ -2217,10 +2436,15 @@ type RemoveQualificationFromUserParams struct {
 
 // Revoke a qualification from a user (Story 2.6 persistence seam; the
 // assignment EDITING surface ships with Story 2.7). Revocation is immediate
-// (FR-22/AD-2) because qualification resolution is live per request.
-func (q *Queries) RemoveQualificationFromUser(ctx context.Context, arg RemoveQualificationFromUserParams) error {
-	_, err := q.db.Exec(ctx, removeQualificationFromUser, arg.UserID, arg.QualificationID)
-	return err
+// (FR-22/AD-2) because qualification resolution is live per request. A
+// zero-row delete (unassigned pair) reports 0 rows the caller maps to the
+// uniform not-found — consistent with UpdateUserQualificationExpiry.
+func (q *Queries) RemoveQualificationFromUser(ctx context.Context, arg RemoveQualificationFromUserParams) (int64, error) {
+	result, err := q.db.Exec(ctx, removeQualificationFromUser, arg.UserID, arg.QualificationID)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const setUserMustChangePassword = `-- name: SetUserMustChangePassword :exec
@@ -2712,6 +2936,30 @@ func (q *Queries) UpdateUserProfileAdmin(ctx context.Context, arg UpdateUserProf
 		&i.MustChangePassword,
 	)
 	return i, err
+}
+
+const updateUserQualificationExpiry = `-- name: UpdateUserQualificationExpiry :execrows
+UPDATE user_qualifications
+SET expires_at = $3
+WHERE user_id = $1 AND qualification_id = $2
+`
+
+type UpdateUserQualificationExpiryParams struct {
+	UserID          pgtype.UUID        `json:"user_id"`
+	QualificationID pgtype.UUID        `json:"qualification_id"`
+	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
+}
+
+// Update a user's per-assignment valid-until (Spec 2.9): a NULL clears the
+// override (reverting the status to the vocabulary expiry); a value overrides
+// it. A zero-row update (unknown user/qualification pair) reports 0 rows the
+// caller maps to the uniform not-found.
+func (q *Queries) UpdateUserQualificationExpiry(ctx context.Context, arg UpdateUserQualificationExpiryParams) (int64, error) {
+	result, err := q.db.Exec(ctx, updateUserQualificationExpiry, arg.UserID, arg.QualificationID, arg.ExpiresAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const userEmailExists = `-- name: UserEmailExists :one

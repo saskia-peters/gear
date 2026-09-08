@@ -60,6 +60,7 @@ development_status:
   2-6-user-group-administration: review
   2-7-qualification-management: review
   2-8-admin-one-time-password-otp-issuance: backlog
+  2-9-admin-rework-effort1-model-and-backend: review
   epic-2-retrospective: optional
 
   epic-3: backlog

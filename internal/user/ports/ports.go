@@ -106,7 +106,7 @@ type Service interface {
 	// route mount; the core re-verifies the exact code per action
 	// (list/detail = any users.*, create/edit/deactivate = users.manage) and
 	// the user-group surface by `user_groups.manage`, defense-in-depth.
-	ListUsers(ctx context.Context, actor *core.User) ([]*core.AdminUserSummary, error)
+	ListUsers(ctx context.Context, actor *core.User, status *string) ([]*core.AdminUserSummary, error)
 	GetUserDetail(ctx context.Context, actor *core.User, userID string) (*core.AdminUserDetail, error)
 	CreateAdminUser(ctx context.Context, actor *core.User, input core.CreateAdminUserInput) (*core.AdminUserWriteResult, error)
 	UpdateAdminUser(ctx context.Context, actor *core.User, userID string, input core.UpdateAdminUserInput) (*core.AdminUserWriteResult, error)
@@ -116,6 +116,13 @@ type Service interface {
 	AssignUserGroupMembers(ctx context.Context, actor *core.User, groupID string, userIDs []string) (*core.UserGroup, error)
 	ListUserGroupMembers(ctx context.Context, actor *core.User, groupID string) ([]string, error)
 	DeleteUserGroup(ctx context.Context, actor *core.User, groupID string) error
+	// User-group ROLE assignment (Spec 2.9, AD-12): an organisational user group
+	// can hold permission groups (roles), so a member inherits those roles'
+	// permissions. ListUserGroupRoles returns the group's current roles;
+	// AssignUserGroupRoles REPLACES the role set atomically. Both are gated by
+	// `user_groups.manage` (defense-in-depth) and audited.
+	ListUserGroupRoles(ctx context.Context, actor *core.User, groupID string) ([]*core.RoleGroupRef, error)
+	AssignUserGroupRoles(ctx context.Context, actor *core.User, groupID string, roleIDs []string) ([]*core.RoleGroupRef, error)
 	// Qualification Management (Story 2.7, AD-7/FR-22): ListQualifications
 	// returns the full qualification vocabulary with server-derived status
 	// indicators plus the user roster for the assignment editor;
@@ -130,6 +137,15 @@ type Service interface {
 	UpdateQualification(ctx context.Context, actor *core.User, id string, input core.UpdateQualificationInput) (*core.QualificationWriteResult, error)
 	ListQualificationAssignees(ctx context.Context, actor *core.User, id string) ([]*core.QualificationAssignee, error)
 	AssignQualificationUsers(ctx context.Context, actor *core.User, id string, userIDs []string) (*core.QualificationAssignResult, error)
+	// Per-user qualification assignment (Spec 2.9, `users.qualifications.manage`):
+	// AssignUserQualification assigns a qualification to a user (a `fixed`
+	// qualification REQUIRES a per-user expires_at); RevokeUserQualification
+	// revokes it; UpdateUserQualificationExpiry edits the per-user valid-until.
+	// All three are gated by `users.qualifications.manage` (defense-in-depth)
+	// and audited; resolution is live per request.
+	AssignUserQualification(ctx context.Context, actor *core.User, userID, qualificationID string, expiresAt *time.Time) (*core.UserQualificationAssignResult, error)
+	RevokeUserQualification(ctx context.Context, actor *core.User, userID, qualificationID string) (*core.UserQualificationAssignResult, error)
+	UpdateUserQualificationExpiry(ctx context.Context, actor *core.User, userID, qualificationID string, expiresAt *time.Time) (*core.UserQualificationAssignResult, error)
 }
 
 // Repository is the outbound persistence port for User data.
@@ -173,7 +189,7 @@ type Repository interface {
 	UpdateGroup(ctx context.Context, id, name, description string, permissionCodes []string) (*core.RoleGroup, error)
 	ListAllPermissions(ctx context.Context) ([]*core.PermissionCatalogEntry, error)
 	// User & Group Administration persistence (Story 2.6, AD-12).
-	ListUsers(ctx context.Context) ([]*core.AdminUserSummary, error)
+	ListUsers(ctx context.Context, status *string) ([]*core.AdminUserSummary, error)
 	GetUserDetail(ctx context.Context, userID string) (*core.AdminUserDetail, error)
 	CreateAdminUser(ctx context.Context, email, firstName, lastName, state string, roleIDs, userGroupIDs, grantCodes []string) (*core.User, error)
 	UpdateAdminUser(ctx context.Context, userID, email, firstName, lastName, state string, roleIDs, userGroupIDs, grantCodes []string) (*core.User, error)
@@ -183,12 +199,25 @@ type Repository interface {
 	AssignUserGroupMembers(ctx context.Context, groupID string, userIDs []string) (*core.UserGroup, error)
 	ListUserGroupMembers(ctx context.Context, groupID string) ([]string, error)
 	DeleteUserGroup(ctx context.Context, groupID string) error
+	// User-group ROLE persistence (Spec 2.9): ListUserGroupRoles returns the
+	// roles a group grants its members; ReplaceUserGroupRoles replaces the role
+	// set atomically (delete-then-insert in one transaction).
+	ListUserGroupRoles(ctx context.Context, groupID string) ([]*core.RoleGroupRef, error)
+	ReplaceUserGroupRoles(ctx context.Context, groupID string, roleIDs []string) ([]*core.RoleGroupRef, error)
 	// Qualification Management persistence (Story 2.7, AD-7/FR-22).
 	ListQualificationVocabulary(ctx context.Context) ([]*core.Qualification, error)
 	CreateQualification(ctx context.Context, name, description, expiryKind string, expiresAt *time.Time) (*core.Qualification, error)
 	UpdateQualification(ctx context.Context, id, name, description, expiryKind string, expiresAt *time.Time) (*core.Qualification, error)
 	ListQualificationAssignees(ctx context.Context, id string) ([]*core.QualificationAssignee, error)
 	ReplaceQualificationAssignees(ctx context.Context, id string, userIDs []string) ([]*core.QualificationAssignee, error)
+	// Per-user qualification persistence (Spec 2.9): AssignQualificationToUser
+	// assigns a qualification to a user with an optional per-assignment
+	// expires_at (enforcing the fixed-vs-unlimited rule);
+	// RevokeQualificationFromUser revokes it; UpdateUserQualificationExpiry
+	// edits the per-user valid-until.
+	AssignQualificationToUser(ctx context.Context, userID, qualificationID string, expiresAt *time.Time) error
+	RevokeQualificationFromUser(ctx context.Context, userID, qualificationID string) error
+	UpdateUserQualificationExpiry(ctx context.Context, userID, qualificationID string, expiresAt *time.Time) error
 }
 
 // PasswordHasher is the outbound password hashing port (AD-13).

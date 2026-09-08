@@ -36,6 +36,10 @@ const (
 	UserManagePermission = "users.manage"
 	// UserGroupsManagePermission gates the organisational user-group endpoints.
 	UserGroupsManagePermission = "user_groups.manage"
+	// UsersQualificationsManagePermission gates assigning/revoking a
+	// qualification on a user AND editing a user's per-qualification
+	// valid-until (Spec 2.9). Granted to fuehrende, schirrmeister and admin.
+	UsersQualificationsManagePermission = "users.qualifications.manage"
 )
 
 // User-administration audit operation codes (NFR-O1/NFR-O2). Distinct from the
@@ -48,6 +52,7 @@ const (
 	AuditOperationUserGroupCreate   = "user_group.create"
 	AuditOperationUserGroupAssign   = "user_group.assign"
 	AuditOperationUserGroupDelete   = "user_group.delete"
+	AuditOperationUserGroupRolesSet = "user_group.roles.assign"
 )
 
 // AdminUserSummary is one row of the admin "Benutzer" list (Story 2.6): id,
@@ -122,19 +127,36 @@ type QualificationAssignment struct {
 	Status      string     `json:"status"`
 }
 
-// AdminUserDetail is the full user-detail payload (Story 2.6): the profile
-// plus roles (permission groups), user groups (teams), direct permission
-// grants and qualification assignments. No secret material.
+// AdminUserDetail is the full user-detail payload (Story 2.6, Spec 2.9): the
+// profile plus roles (permission groups), user groups (teams), direct
+// permission grants, qualification assignments AND the resolved-permission
+// provenance (each resolved code annotated with its source(s)). No secret
+// material.
 type AdminUserDetail struct {
-	ID             string                    `json:"id"`
-	Vorname        string                    `json:"vorname"`
-	Nachname       string                    `json:"nachname"`
-	Email          string                    `json:"email"`
-	Status         string                    `json:"status"`
-	Roles          []RoleGroupRef            `json:"roles"`
-	UserGroups     []UserGroupRef            `json:"user_groups"`
-	DirectGrants   []DirectGrantRef          `json:"direct_grants"`
-	Qualifications []QualificationAssignment `json:"qualifications"`
+	ID                  string                    `json:"id"`
+	Vorname             string                    `json:"vorname"`
+	Nachname            string                    `json:"nachname"`
+	Email               string                    `json:"email"`
+	Status              string                    `json:"status"`
+	Roles               []RoleGroupRef            `json:"roles"`
+	UserGroups          []UserGroupRef            `json:"user_groups"`
+	DirectGrants        []DirectGrantRef          `json:"direct_grants"`
+	Qualifications      []QualificationAssignment `json:"qualifications"`
+	ResolvedPermissions []*PermissionProvenance   `json:"resolved_permissions"`
+}
+
+// PermissionProvenance annotates one resolved permission of a user with its
+// source (Spec 2.9): SourceKind is "role" (individual permission-group
+// membership), "group" (inherited via an organisational user-group) or
+// "direct" (direct one-off grant); SourceName is the role name, the user-group
+// name, or "direct" respectively. A permission may have MANY provenance rows
+// (multi-source, e.g. `tools.manage` from both a role and a team); the core
+// groups by code. Computed server-side so Effort 2's "Alle Berechtigungen"
+// view is a pure render.
+type PermissionProvenance struct {
+	Code       string `json:"code"`
+	SourceKind string `json:"source_kind"`
+	SourceName string `json:"source_name"`
 }
 
 // AdminUserWriteResult is the payload returned by create/update (Story 2.6):
@@ -311,11 +333,13 @@ const UserNameMaxLength = 100
 // UserGroupNameMaxLength caps a user-group name at 120 runes (Story 2.6).
 const UserGroupNameMaxLength = 120
 
-// ListUsers returns every user (id, names, email, state) ordered by name, for
-// the admin "Benutzer" list surface (Story 2.6). The caller is gated by ANY of
+// ListUsers returns the users (id, names, email, state) ordered by name, for
+// the admin "Benutzer" list surface (Story 2.6, Spec 2.9). An optional status
+// filter (active/pending_approval/deactivated) narrows the set; an invalid
+// status maps to ErrAdminUserInvalidStatus → 400. The caller is gated by ANY of
 // the `users.*` codes at the sub-mount; here it is re-verified
 // defense-in-depth (AD-2/AD-6).
-func (s *Service) ListUsers(ctx context.Context, actor *User) ([]*AdminUserSummary, error) {
+func (s *Service) ListUsers(ctx context.Context, actor *User, status *string) ([]*AdminUserSummary, error) {
 	if actor == nil {
 		return nil, ErrInvalidCredentials
 	}
@@ -325,7 +349,17 @@ func (s *Service) ListUsers(ctx context.Context, actor *User) ([]*AdminUserSumma
 	if err := s.requireAnyUserPermission(ctx, actor); err != nil {
 		return nil, err
 	}
-	users, err := s.repo.ListUsers(ctx)
+	var normalized *string
+	if status != nil {
+		st := strings.TrimSpace(*status)
+		switch st {
+		case string(StateActive), string(StatePendingApproval), string(StateDeactivated):
+			normalized = &st
+		default:
+			return nil, ErrAdminUserInvalidStatus
+		}
+	}
+	users, err := s.repo.ListUsers(ctx, normalized)
 	if err != nil {
 		return nil, fmt.Errorf("user core: failed to list users: %w", err)
 	}
@@ -361,7 +395,53 @@ func (s *Service) GetUserDetail(ctx context.Context, actor *User, userID string)
 	for i := range detail.Qualifications {
 		detail.Qualifications[i].Status = qualificationStatus(detail.Qualifications[i], now)
 	}
+	// Assemble the resolved-permission provenance (Spec 2.9): the repository
+	// returns one row per source; group by code so each resolved permission
+	// lists ALL of its sources (role names, user-group names, 'direct'),
+	// preserving first-seen order and deduplicating duplicate source rows.
+	detail.ResolvedPermissions = assembleProvenance(detail.ResolvedPermissions)
 	return detail, nil
+}
+
+// assembleProvenance groups a flat provenance list (one row per source) by
+// code, deduplicating duplicate source rows and preserving first-seen order.
+// Each code maps to all its sources (multi-source supported, e.g.
+// `tools.manage` from both a role and a team).
+func assembleProvenance(rows []*PermissionProvenance) []*PermissionProvenance {
+	type source struct {
+		kind string
+		name string
+	}
+	ordered := make([]string, 0, len(rows))
+	byCode := make(map[string][]source, len(rows))
+	seen := make(map[string]map[string]bool, len(rows))
+	for _, r := range rows {
+		if r == nil {
+			continue
+		}
+		key := r.Code + "\x00" + r.SourceKind + "\x00" + r.SourceName
+		if seen[r.Code] == nil {
+			seen[r.Code] = map[string]bool{}
+		}
+		if seen[r.Code][key] {
+			continue
+		}
+		seen[r.Code][key] = true
+		if _, ok := byCode[r.Code]; !ok {
+			ordered = append(ordered, r.Code)
+		}
+		byCode[r.Code] = append(byCode[r.Code], source{kind: r.SourceKind, name: r.SourceName})
+	}
+	out := make([]*PermissionProvenance, 0, len(ordered))
+	for _, code := range ordered {
+		for _, s := range byCode[code] {
+			out = append(out, &PermissionProvenance{Code: code, SourceKind: s.kind, SourceName: s.name})
+		}
+	}
+	if out == nil {
+		out = []*PermissionProvenance{}
+	}
+	return out
 }
 
 // CreateAdminUser creates a user from the admin surface (Story 2.6): the

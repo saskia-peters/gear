@@ -163,7 +163,15 @@ func (h *Handler) ListAdminUsers(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	users, err := h.service.ListUsers(r.Context(), user)
+	// Optional ?status= filter (Spec 2.9): active | pending_approval |
+	// deactivated. Absent or empty = all users. An unknown value is passed
+	// through; the core maps it to the uniform 400.
+	var status *string
+	if raw := r.URL.Query().Get("status"); raw != "" {
+		status = &raw
+	}
+
+	users, err := h.service.ListUsers(r.Context(), user, status)
 	if err != nil {
 		switch {
 		case errors.Is(err, core.ErrForbidden):
@@ -171,6 +179,8 @@ func (h *Handler) ListAdminUsers(w http.ResponseWriter, r *http.Request) {
 			httpapi.WriteError(w, http.StatusForbidden, "forbidden", "Keine Berechtigung.")
 		case errors.Is(err, core.ErrInvalidCredentials):
 			httpapi.WriteError(w, http.StatusUnauthorized, "unauthorized", "Authentifizierung erforderlich.")
+		case errors.Is(err, core.ErrAdminUserInvalidStatus):
+			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", core.MsgAdminUserInvalidStatus)
 		default:
 			h.logger.Error("admin users list failed unexpectedly", "error", err)
 			httpapi.WriteError(w, http.StatusInternalServerError, "internal_error", "Ein interner Fehler ist aufgetreten.")

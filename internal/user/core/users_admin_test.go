@@ -52,7 +52,7 @@ func TestListUsersValid(t *testing.T) {
 	repo := usersAdminRepo()
 	svc := usersAdminService(t, repo)
 
-	users, err := svc.ListUsers(context.Background(), adminActor(repo))
+	users, err := svc.ListUsers(context.Background(), adminActor(repo), nil)
 	if err != nil {
 		t.Fatalf("ListUsers failed: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestListUsersViewOnly(t *testing.T) {
 	repo.perms["u-view"] = []string{UserViewPermission}
 	svc := usersAdminService(t, repo)
 
-	if _, err := svc.ListUsers(context.Background(), repo.users["viewonly@gear.local"]); err != nil {
+	if _, err := svc.ListUsers(context.Background(), repo.users["viewonly@gear.local"], nil); err != nil {
 		t.Errorf("ListUsers with users.view failed: %v", err)
 	}
 }
@@ -95,7 +95,7 @@ func TestListUsersForbidden(t *testing.T) {
 	repo.perms["u-schirr"] = []string{"tools.manage", "tool_types.manage"}
 	svc := usersAdminService(t, repo)
 
-	_, err := svc.ListUsers(context.Background(), repo.users["schirr@gear.local"])
+	_, err := svc.ListUsers(context.Background(), repo.users["schirr@gear.local"], nil)
 	if !errors.Is(err, ErrForbidden) {
 		t.Fatalf("ListUsers err = %v, want ErrForbidden", err)
 	}

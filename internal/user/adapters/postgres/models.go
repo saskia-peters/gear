@@ -109,6 +109,12 @@ type UserGroupMember struct {
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 }
 
+type UserGroupPermissionGroup struct {
+	UserGroupID       pgtype.UUID        `json:"user_group_id"`
+	PermissionGroupID pgtype.UUID        `json:"permission_group_id"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+}
+
 type UserPermission struct {
 	UserID       pgtype.UUID        `json:"user_id"`
 	PermissionID pgtype.UUID        `json:"permission_id"`
@@ -125,4 +131,5 @@ type UserQualification struct {
 	UserID          pgtype.UUID        `json:"user_id"`
 	QualificationID pgtype.UUID        `json:"qualification_id"`
 	AssignedAt      pgtype.Timestamptz `json:"assigned_at"`
+	ExpiresAt       pgtype.Timestamptz `json:"expires_at"`
 }

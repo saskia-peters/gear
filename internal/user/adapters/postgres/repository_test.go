@@ -1360,6 +1360,7 @@ func basePermissionCodes() []string {
 		"user_groups.manage",
 		"users.approve",
 		"users.manage",
+		"users.qualifications.manage",
 		"users.view",
 	}
 }
@@ -1522,22 +1523,25 @@ func TestPostgresBasePermissionSeedResolution(t *testing.T) {
 	}
 
 	schirrmeister := newGroupUser("schirrmeister")
-	if got := resolve(schirrmeister); !sameCodeSet(got, []string{"dashboard.view", "inspection.submit", "tools.manage", "tool_types.manage"}) {
-		t.Errorf("schirrmeister permissions = %v, want [dashboard.view inspection.submit tools.manage tool_types.manage]", got)
+	// 9 codes after migrations 000011 + 000013 (user decision + Spec 2.9):
+	// schirrmeister now also carries users.view + users.qualifications.manage.
+	if got := resolve(schirrmeister); !sameCodeSet(got, []string{"dashboard.view", "inspection.submit", "tools.manage", "tool_types.manage", "users.qualifications.manage", "users.view"}) {
+		t.Errorf("schirrmeister permissions = %v, want [dashboard.view inspection.submit tools.manage tool_types.manage users.qualifications.manage users.view]", got)
 	}
 
 	fuehrende := newGroupUser("fuehrende")
-	// 7 codes after migration 000011 (Story 2.3, user decision): fuehrende now
-	// also carries tools.manage + tool_types.manage like schirrmeister.
-	if got := resolve(fuehrende); !sameCodeSet(got, []string{"dashboard.view", "inspection.submit", "inspection.history.view", "report.export", "tool.reinstate", "tools.manage", "tool_types.manage"}) {
-		t.Errorf("fuehrende permissions = %v, want [dashboard.view inspection.submit inspection.history.view report.export tool.reinstate tools.manage tool_types.manage]", got)
+	// 9 codes after migrations 000011 + 000013 (Story 2.3 user decision + Spec
+	// 2.9): fuehrende carries tools.manage + tool_types.manage like
+	// schirrmeister, plus users.view + users.qualifications.manage.
+	if got := resolve(fuehrende); !sameCodeSet(got, []string{"dashboard.view", "inspection.submit", "inspection.history.view", "report.export", "tool.reinstate", "tools.manage", "tool_types.manage", "users.qualifications.manage", "users.view"}) {
+		t.Errorf("fuehrende permissions = %v, want [dashboard.view inspection.submit inspection.history.view report.export tool.reinstate tools.manage tool_types.manage users.qualifications.manage users.view]", got)
 	}
 
 	// 4. UNION/DISTINCT: a user in helfende + schirrmeister (BOTH grant
 	// dashboard.view + inspection.submit) resolves a DEDUPLICATED set — no
 	// repeated codes.
 	multi := newGroupUser("helfende", "schirrmeister")
-	if got := resolve(multi); !sameCodeSet(got, []string{"dashboard.view", "inspection.submit", "tools.manage", "tool_types.manage"}) {
+	if got := resolve(multi); !sameCodeSet(got, []string{"dashboard.view", "inspection.submit", "tools.manage", "tool_types.manage", "users.qualifications.manage", "users.view"}) {
 		t.Errorf("multi-role permissions = %v, want the deduplicated union (no repeated codes)", got)
 	}
 
