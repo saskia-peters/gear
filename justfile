@@ -15,6 +15,10 @@ docs-install:
 docs-start:
     cd docs && npm start
 
+# Regenerate the code-derived implementation docs + OpenAPI spec (no build)
+docs-generate:
+    cd docs && npm run generate && npm run gen-api-docs
+
 # Build the static docs site into docs/build
 docs-build:
     cd docs && npm run build

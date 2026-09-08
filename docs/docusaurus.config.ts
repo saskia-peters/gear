@@ -50,7 +50,26 @@ const config: Config = {
     ],
   ],
 
-  themes: ['@docusaurus/theme-mermaid'],
+  plugins: [
+    [
+      'docusaurus-plugin-openapi-docs',
+      {
+        id: 'api',
+        docsPluginId: 'classic',
+        config: {
+          gear: {
+            specPath: 'openapi/openapi.yaml',
+            outputDir: 'docs/api',
+            sidebarOptions: {
+              groupPathsBy: 'tag',
+            },
+          } satisfies any,
+        },
+      },
+    ],
+  ],
+
+  themes: ['docusaurus-theme-openapi-docs', '@docusaurus/theme-mermaid'],
   markdown: {
     mermaid: true,
     hooks: {
@@ -75,6 +94,12 @@ const config: Config = {
           sidebarId: 'docsSidebar',
           position: 'left',
           label: 'Docs',
+        },
+        {
+          type: 'docSidebar',
+          sidebarId: 'apiSidebar',
+          position: 'left',
+          label: 'API',
         },
         {
           href: `https://github.com/${organizationName}/${projectName}`,

@@ -19,6 +19,16 @@ A plain-language overview of the app for decision-makers and new team members.
 - [Architecture Spine](/docs/planning/architecture-spine) — technical invariants, ADs, database artifacts, diagrams
 - [Architecture Addendum](/docs/planning/addendum) — technology stack decisions and deferred options
 
+## Implementation (auto-generated from code)
+
+These pages are regenerated on every docs build from the Go source — no manual
+maintenance:
+
+- [Hexagon Modules](/docs/implementation/modules) — module inventory with mermaid diagrams (🪪 user, 🛠️ admin, 🧰 tools, 🧱 platform)
+- [API Endpoints](/docs/implementation/api) — the route catalog as a mermaid map + table
+- [Flows](/docs/implementation/flows) — sequence diagrams (registration, login, OTP, qualifications)
+- [API Reference](/docs/api/g-e-a-r-api) — interactive OpenAPI/Swagger reference from the generated spec
+
 ## Stack
 
 | Layer | Technology |

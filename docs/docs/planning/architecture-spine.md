@@ -409,7 +409,7 @@ flowchart TD
     E --> Q{"Does the set contain<br/>this action's permission?<br/>(AD-12)"}
     Q -- No --> X["Action blocked — HTTP 403<br/>(AD-6)"]
     Q -- Yes --> A["Action allowed<br/>e.g. inspection still needs qualification (AD-7)"]
-    G -. organisational; grants access only via assigned roles (Spec 2.9) .-> X
+    G -. "organisational; grants access only via assigned roles (Spec 2.9)" .-> X
 
     classDef user fill:#e3f2fd,stroke:#1565c0,color:#0d47a1,stroke-width:2px;
     classDef teams fill:#eeeeee,stroke:#757575,color:#424242,stroke-width:1px;
