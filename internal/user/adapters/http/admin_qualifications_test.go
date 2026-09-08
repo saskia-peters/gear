@@ -17,9 +17,11 @@ import (
 
 // newAdminQualificationsSurface mounts the REAL AdminRoutes() WITHOUT the outer
 // composition-root gateway — the qualifications sub-mount carries its OWN
-// `qualifications.manage` RequireAdminPermission gate (AD-6/FR-19), which is
-// exactly what this suite exercises. The mock service resolves permissions via
-// the resolver adapter the same way the real service would.
+// any-of gate `[qualifications.manage, users.qualifications.manage]`
+// (AD-6/FR-19, Effort 2: fuehrende/schirrmeister need the vocabulary to ADD a
+// qualification on the user detail), which is exactly what this suite
+// exercises. The mock service resolves permissions via the resolver adapter the
+// same way the real service would.
 func newAdminQualificationsSurface(t *testing.T, svc ports.Service, validator auth.SessionValidator) http.Handler {
 	t.Helper()
 	h := newTestHandler(svc, validator)
@@ -124,8 +126,9 @@ func TestListAdminQualificationsOK(t *testing.T) {
 }
 
 func TestListAdminQualificationsForbidden(t *testing.T) {
-	// LIST_FORBIDDEN: a caller without qualifications.manage is denied by the
-	// sub-mount's own gate with the uniform hidden-existence 403 (FR-19).
+	// LIST_FORBIDDEN: a caller holding NEITHER qualifications.manage NOR
+	// users.qualifications.manage is denied by the sub-mount's own any-of gate
+	// with the uniform hidden-existence 403 (FR-19).
 	svc := &mockService{}
 	svc.resolvePermissionFunc = func(_ context.Context, _ *core.User) ([]string, error) {
 		return []string{"tools.manage", "tool_types.manage"}, nil
@@ -143,6 +146,60 @@ func TestListAdminQualificationsForbidden(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(rec.Body.String()), "admin") {
 		t.Errorf("403 body hints at the admin module: %s", rec.Body.String())
+	}
+}
+
+// TestListAdminQualificationsUsersQualsManageAllowed pins the Effort 2 gate
+// widening at the HTTP layer: a fuehrende/schirrmeister holding ONLY users.view
+// + users.qualifications.manage passes the qualifications sub-mount's any-of
+// gate and reaches GET /qualifications → 200 (the vocabulary they need to ADD a
+// qualification on the user detail).
+func TestListAdminQualificationsUsersQualsManageAllowed(t *testing.T) {
+	svc := qualificationsSvc(&core.QualificationListResult{
+		Qualifications: []*core.QualificationWithStatus{
+			{ID: "q-1", Name: "Kettensäge", ExpiryKind: "fixed", Status: core.QualificationStatusValid},
+		},
+		Users: []*core.QualificationRosterUser{},
+	}, nil, nil, nil, nil)
+	svc.resolvePermissionFunc = func(_ context.Context, _ *core.User) ([]string, error) {
+		return []string{"users.view", "users.qualifications.manage"}, nil
+	}
+	h := newAdminQualificationsSurface(t, svc, &stubValidator{})
+
+	rec := doAdminQualifications(http.MethodGet, "/qualifications", "token", nil, h)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestQualificationWritesUsersQualsManageForbidden pins the defense-in-depth
+// contract behind the over-widened qualifications sub-mount (Effort 2): the
+// any-of gate ADMITS a users.qualifications.manage holder, but vocabulary
+// WRITES (create/update) are still denied — the core re-check requires
+// `qualifications.manage` and maps ErrForbidden → 403. So a
+// fuehrende/schirrmeister can read the vocabulary but never create/edit it.
+func TestQualificationWritesUsersQualsManageForbidden(t *testing.T) {
+	svc := &mockService{}
+	svc.resolvePermissionFunc = func(_ context.Context, _ *core.User) ([]string, error) {
+		return []string{"users.view", "users.qualifications.manage"}, nil
+	}
+	svc.createQualificationFunc = func(_ context.Context, _ *core.User, _ core.CreateQualificationInput) (*core.QualificationWriteResult, error) {
+		return nil, core.ErrForbidden
+	}
+	svc.updateQualificationFunc = func(_ context.Context, _ *core.User, _ string, _ core.UpdateQualificationInput) (*core.QualificationWriteResult, error) {
+		return nil, core.ErrForbidden
+	}
+	h := newAdminQualificationsSurface(t, svc, &stubValidator{})
+
+	post := doAdminQualifications(http.MethodPost, "/qualifications", "token",
+		[]byte(`{"name":"Neue Quali","expiry_kind":"unlimited"}`), h)
+	if post.Code != http.StatusForbidden {
+		t.Fatalf("POST status = %d, want 403 (body %s)", post.Code, post.Body.String())
+	}
+	put := doAdminQualifications(http.MethodPut, "/qualifications/q-1", "token",
+		[]byte(`{"name":"Umbenannt","expiry_kind":"unlimited"}`), h)
+	if put.Code != http.StatusForbidden {
+		t.Fatalf("PUT status = %d, want 403 (body %s)", put.Code, put.Body.String())
 	}
 }
 

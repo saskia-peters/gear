@@ -1869,6 +1869,9 @@ func (r *changePasswordRepo) ListAllPermissions(_ context.Context) ([]*core.Perm
 }
 
 func (r *changePasswordRepo) ListUsers(_ context.Context, _ *string) ([]*core.AdminUserSummary, error) { return nil, nil }
+func (r *changePasswordRepo) ListUserGroupNamesByUsers(_ context.Context, _ []string) (map[string][]string, error) {
+	return map[string][]string{}, nil
+}
 func (r *changePasswordRepo) GetUserDetail(_ context.Context, _ string) (*core.AdminUserDetail, error) {
 	return nil, nil
 }

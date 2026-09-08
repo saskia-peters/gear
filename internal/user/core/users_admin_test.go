@@ -46,6 +46,40 @@ func adminActor(repo *mockRepo) *User {
 	return repo.users["admin@gear.local"]
 }
 
+// TestAdminModuleAccessCodesCoversSubMountGates pins the outer-gate invariant
+// (Effort 2): AdminModuleAccessCodes is a SUPERSET of every admin sub-mount's
+// gating code, so a caller admitted by any sub-surface can always pass the
+// outer gate (the sub-mounts then apply their own tighter per-action gates).
+func TestAdminModuleAccessCodesCoversSubMountGates(t *testing.T) {
+	required := []string{
+		// users sub-mount (any-of): users.view / users.approve / users.manage /
+		// users.qualifications.manage
+		UserViewPermission, UserApprovePermission, UserManagePermission, UsersQualificationsManagePermission,
+		// user-groups sub-mount: user_groups.manage
+		UserGroupsManagePermission,
+		// qualifications sub-mount (any-of): qualifications.manage /
+		// users.qualifications.manage
+		QualificationsManagePermission,
+		// roles sub-mount (any-of): roles.create / roles.edit / roles.assign
+		RoleCreatePermission, RoleEditPermission, RoleAssignPermission,
+		// recovery + admin sub-surfaces
+		"admin.recovery.approve",
+		// tool + settings + dsgvo surfaces
+		"tools.manage", "tool_types.manage",
+		"admin.settings.email", "admin.settings.backup",
+		"dsgvo.access_report", "dsgvo.delete",
+	}
+	got := make(map[string]bool)
+	for _, c := range AdminModuleAccessCodes() {
+		got[c] = true
+	}
+	for _, want := range required {
+		if !got[want] {
+			t.Errorf("AdminModuleAccessCodes missing %q — every sub-mount gate code must be reachable through the outer gate", want)
+		}
+	}
+}
+
 func TestListUsersValid(t *testing.T) {
 	// LIST_USERS: an admin holding a users.* code gets every user with
 	// id/names/email/status, server-authoritative.
@@ -65,6 +99,15 @@ func TestListUsersValid(t *testing.T) {
 	}
 	if users[1].Email != "helfende@gear.local" || users[1].Status != string(StateActive) {
 		t.Errorf("users[1] = %+v, want the helfende volunteer", users[1])
+	}
+	// GROUP_TAGS (Effort 2): the summary carries the organisational team names
+	// so the SPA table renders inline group tags. The helfende volunteer is a
+	// member of "Gruppe Ost"; the admin is in no team (empty, never null).
+	if len(users[1].UserGroups) != 1 || users[1].UserGroups[0] != "Gruppe Ost" {
+		t.Errorf("users[1].UserGroups = %v, want [Gruppe Ost]", users[1].UserGroups)
+	}
+	if users[0].UserGroups == nil || len(users[0].UserGroups) != 0 {
+		t.Errorf("users[0].UserGroups = %v, want an empty non-nil list", users[0].UserGroups)
 	}
 }
 

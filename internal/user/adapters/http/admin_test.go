@@ -93,29 +93,36 @@ func TestAdminRoutesMethodNotAllowedEnvelope(t *testing.T) {
 }
 
 // TestAdminRoutesGatedBehindRequireAdminPermission pins the composition-root
-// seam (review finding 2.1-4): the REAL AdminRoutes() mounted behind
-// RequireAdminPermission with an admin-only permission answers 401 (unauth),
-// 403 (non-admin, hidden existence) and 200 (admin). This package can import
-// both the real handler and the auth gateway without an import cycle, so it is
-// the natural home for the "real handler behind the gateway" seam test.
+// seam (review finding 2.1-4): the REAL AdminRoutes() mounted behind the ANY-OF
+// admin-module gate (usercore.AdminModuleAccessCodes(), exactly as
+// cmd/server/main.go does) answers 401 (unauth), 403 (no admin-module code,
+// hidden existence), 200 (admin) and 200 for a fuehrende/schirrmeister holding
+// ONLY users.view + users.qualifications.manage (the Effort 2 widening). This
+// package can import both the real handler and the auth gateway without an
+// import cycle, so it is the natural home for the "real handler behind the
+// gateway" seam test.
 func TestAdminRoutesGatedBehindRequireAdminPermission(t *testing.T) {
 	h := newTestHandler(nil, &stubValidator{})
+	gate := func(perms []string, session *core.Session) http.Handler {
+		return auth.RequireAnyPermission(
+			&adminValidator{session: session},
+			&adminResolver{perms: perms},
+			core.AdminModuleAccessCodes(), "admin access denied", discardLogger(),
+		)(h.AdminRoutes())
+	}
+	activeUser := func(id, email string) *core.Session {
+		return &core.Session{User: &core.User{ID: id, Email: email, State: core.StateActive}}
+	}
 
 	// 401: no token.
-	surface := auth.RequireAdminPermission(
-		&adminValidator{}, &adminResolver{perms: []string{adminModulePermission}},
-		adminModulePermission, discardLogger(),
-	)(h.AdminRoutes())
+	surface := gate([]string{}, nil)
 	if rec := doAdminStatusRequest(surface, ""); rec.Code != http.StatusUnauthorized {
 		t.Errorf("no token: status = %d, want 401", rec.Code)
 	}
 
-	// 403: authenticated non-admin — hidden existence, no admin hint.
-	nonAdmin := auth.RequireAdminPermission(
-		&adminValidator{session: &core.Session{User: &core.User{ID: "u-vol", Email: "vol@gear.local", State: core.StateActive}}},
-		&adminResolver{perms: []string{"some.other.perm"}},
-		adminModulePermission, discardLogger(),
-	)(h.AdminRoutes())
+	// 403: authenticated caller holding NO admin-module code — hidden
+	// existence, no admin hint.
+	nonAdmin := gate([]string{"some.other.perm"}, activeUser("u-vol", "vol@gear.local"))
 	rec := doAdminStatusRequest(nonAdmin, "valid-token")
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("non-admin: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
@@ -124,15 +131,20 @@ func TestAdminRoutesGatedBehindRequireAdminPermission(t *testing.T) {
 		t.Errorf("403 body hints at the admin module: %s", rec.Body.String())
 	}
 
-	// 200: authenticated admin reaches the real status surface.
-	admin := auth.RequireAdminPermission(
-		&adminValidator{session: &core.Session{User: &core.User{ID: "u-admin", Email: "admin@gear.local", State: core.StateActive}}},
-		&adminResolver{perms: []string{adminModulePermission}},
-		adminModulePermission, discardLogger(),
-	)(h.AdminRoutes())
+	// 200: authenticated admin (admin.recovery.approve) reaches the surface.
+	admin := gate([]string{adminModulePermission}, activeUser("u-admin", "admin@gear.local"))
 	rec = doAdminStatusRequest(admin, "valid-token")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("admin: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// 200 (Effort 2 widening): a fuehrende/schirrmeister holding ONLY
+	// users.view + users.qualifications.manage enters the module — the whole
+	// point of the any-of outer gate.
+	fuehrende := gate([]string{"users.view", "users.qualifications.manage"}, activeUser("u-schirr", "schirr@gear.local"))
+	rec = doAdminStatusRequest(fuehrende, "valid-token")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("fuehrende: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
 }
 

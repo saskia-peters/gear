@@ -42,6 +42,38 @@ const (
 	UsersQualificationsManagePermission = "users.qualifications.manage"
 )
 
+// AdminModuleAccessCodes returns the server-authoritative set of permission
+// codes that open the ADMIN module (Spec 2.9 / Effort 2): the union of every
+// admin sub-surface's gating codes — the same set the SPA nav model uses for
+// `hasAnyAdminCode`. A caller holding ANY of these may enter the module (the
+// per-surface sub-mounts then apply their own tighter gates). This replaces
+// the old `admin.recovery.approve`-only outer gate so fuehrende/schirrmeister
+// (who hold `users.view` + `users.qualifications.manage`) can reach the user
+// directory and qualification assignment, while recovery stays admin-only.
+// It returns a FRESH slice on every call so the value handed to the auth
+// gateway can never be mutated by a caller (the slice is used directly as the
+// authorization gate input).
+func AdminModuleAccessCodes() []string {
+	return []string{
+		"users.view",
+		"users.approve",
+		"users.manage",
+		"users.qualifications.manage",
+		"user_groups.manage",
+		"roles.create",
+		"roles.edit",
+		"roles.assign",
+		"qualifications.manage",
+		"tools.manage",
+		"tool_types.manage",
+		"admin.settings.email",
+		"admin.settings.backup",
+		"dsgvo.access_report",
+		"dsgvo.delete",
+		"admin.recovery.approve",
+	}
+}
+
 // User-administration audit operation codes (NFR-O1/NFR-O2). Distinct from the
 // approval/recovery/role codes so user-management actions are separately
 // auditable (they are at least as sensitive as user approvals).
@@ -58,13 +90,19 @@ const (
 // AdminUserSummary is one row of the admin "Benutzer" list (Story 2.6): id,
 // names, email and state, server-authoritative. Status carries the raw
 // account state (active / pending_approval / deactivated) — the client maps it
-// to the German badges (aktiv / pending / deaktiviert). No secret material.
+// to the German badges (aktiv / pending / deaktiviert). UserGroups lists the
+// organisational team names the user belongs to (Effort 2): the SPA renders
+// them as inline tags on the list row. No secret material.
 type AdminUserSummary struct {
 	ID       string `json:"id"`
 	Vorname  string `json:"vorname"`
 	Nachname string `json:"nachname"`
 	Email    string `json:"email"`
 	Status   string `json:"status"`
+	// UserGroups holds the user-group (team) names the user belongs to, ordered
+	// by name. Membership grants NO permission (AD-12); the resolution query
+	// never joins user_groups. Empty when the user is in no team.
+	UserGroups []string `json:"user_groups"`
 }
 
 // RoleGroupRef is a permission-group membership of a user, for the user detail
@@ -336,8 +374,10 @@ const UserGroupNameMaxLength = 120
 // ListUsers returns the users (id, names, email, state) ordered by name, for
 // the admin "Benutzer" list surface (Story 2.6, Spec 2.9). An optional status
 // filter (active/pending_approval/deactivated) narrows the set; an invalid
-// status maps to ErrAdminUserInvalidStatus → 400. The caller is gated by ANY of
-// the `users.*` codes at the sub-mount; here it is re-verified
+// status maps to ErrAdminUserInvalidStatus → 400. Each summary also carries
+// the user-group (team) names the user belongs to (Effort 2) so the SPA table
+// can render inline group tags without a per-row lookup. The caller is gated by
+// ANY of the `users.*` codes at the sub-mount; here it is re-verified
 // defense-in-depth (AD-2/AD-6).
 func (s *Service) ListUsers(ctx context.Context, actor *User, status *string) ([]*AdminUserSummary, error) {
 	if actor == nil {
@@ -362,6 +402,33 @@ func (s *Service) ListUsers(ctx context.Context, actor *User, status *string) ([
 	users, err := s.repo.ListUsers(ctx, normalized)
 	if err != nil {
 		return nil, fmt.Errorf("user core: failed to list users: %w", err)
+	}
+	// Attach the organisational user-group names (Effort 2): one lightweight
+	// lookup for the whole page, not a query per row. Membership grants no
+	// permission (AD-12) — this only feeds the inline tags.
+	if len(users) > 0 {
+		ids := make([]string, 0, len(users))
+		for _, u := range users {
+			if u != nil {
+				ids = append(ids, u.ID)
+			}
+		}
+		groupNames, err := s.repo.ListUserGroupNamesByUsers(ctx, ids)
+		if err != nil {
+			return nil, fmt.Errorf("user core: failed to load user group names: %w", err)
+		}
+		for _, u := range users {
+			if u == nil {
+				continue
+			}
+			names := groupNames[u.ID]
+			if names == nil {
+				// Never leave UserGroups nil: an ungrouped user serializes as an
+				// empty array (not JSON null) so the SPA table can rely on it.
+				names = []string{}
+			}
+			u.UserGroups = names
+		}
 	}
 	return users, nil
 }

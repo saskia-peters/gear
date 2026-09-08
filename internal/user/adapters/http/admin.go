@@ -95,7 +95,9 @@ func (h *Handler) AdminRoutes() http.Handler {
 	qualifications := chi.NewRouter()
 	qualifications.NotFound(httpapi.NotFoundHandler())
 	qualifications.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
-	qualifications.Use(auth.RequireAdminPermission(h.validator, userApprovalResolver{h.service}, core.QualificationsManagePermission, h.logger))
+	qualifications.Use(auth.RequireAnyPermission(h.validator, userApprovalResolver{h.service},
+		[]string{core.QualificationsManagePermission, core.UsersQualificationsManagePermission},
+		"qualifications access denied", h.logger))
 	qualifications.Get("/", h.ListAdminQualifications)
 	qualifications.Post("/", h.CreateAdminQualification)
 	qualifications.Put("/{id}", h.UpdateAdminQualification)

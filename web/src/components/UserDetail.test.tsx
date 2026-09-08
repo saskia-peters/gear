@@ -28,19 +28,25 @@ function activeUser(): AdminUserDetail {
 function renderDetail(opts?: {
   user?: AdminUserDetail
   canManage?: boolean
+  canManageQualifications?: boolean
   onEdit?: () => void
   onBack?: () => void
+  onRefreshDetail?: () => void
   onDeactivated?: (message: string) => void
   onForbidden?: () => void
+  onUnauthorized?: () => void
 }) {
   return render(
     <UserDetail
       user={opts?.user ?? activeUser()}
       canManage={opts?.canManage ?? true}
+      canManageQualifications={opts?.canManageQualifications ?? false}
       onEdit={opts?.onEdit ?? (() => {})}
       onBack={opts?.onBack ?? (() => {})}
+      onRefreshDetail={opts?.onRefreshDetail ?? (() => {})}
       onDeactivated={opts?.onDeactivated ?? (() => {})}
       onForbidden={opts?.onForbidden ?? (() => {})}
+      onUnauthorized={opts?.onUnauthorized ?? (() => {})}
     />,
   )
 }
@@ -177,5 +183,105 @@ describe('UserDetail', () => {
 
     expect(screen.getByText('mystery_state')).toBeInTheDocument()
     expect(screen.queryByText('undefined')).not.toBeInTheDocument()
+  })
+
+  it('PROVENANCE: the collapsed "Alle Berechtigungen" view shows each permission with its source', async () => {
+    const user = activeUser()
+    user.resolved_permissions = [
+      { code: 'report.export', source_kind: 'direct', source_name: 'direct' },
+      { code: 'tools.manage', source_kind: 'group', source_name: 'Gruppe Ost' },
+      { code: 'report.export', source_kind: 'role', source_name: 'helfende' },
+    ]
+    renderDetail({ user, canManageQualifications: false })
+
+    expect(screen.getByText('Alle Berechtigungen')).toBeInTheDocument()
+    await userEvent.click(screen.getByText('Alle Berechtigungen'))
+    expect(screen.getByText('(Direkt)')).toBeInTheDocument()
+    expect(screen.getByText('(Benutzergruppe: Gruppe Ost)')).toBeInTheDocument()
+    expect(screen.getByText('(Rolle: helfende)')).toBeInTheDocument()
+  })
+
+  it('QUAL_READONLY: without users.qualifications.manage the section is read-only (no add/revoke UI)', () => {
+    renderDetail({ canManageQualifications: false })
+    expect(screen.queryByRole('button', { name: 'Zuweisen' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Entziehen' })).not.toBeInTheDocument()
+    expect(screen.getByText('Gültig')).toBeInTheDocument()
+  })
+
+  it('QUAL_ASSIGN: a users.qualifications.manage holder can assign a qualification with valid-until', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ qualifications: [{ id: 'q-3', name: 'Generator', description: '', expiry_kind: 'fixed', expires_at: '2099-01-01T00:00:00Z', status: 'valid' }] }),
+    }))
+    const user = userEvent.setup()
+    const onRefreshDetail = vi.fn()
+    renderDetail({ canManageQualifications: true, onRefreshDetail })
+
+    await screen.findByText('Qualifikation zuweisen')
+    await user.selectOptions(screen.getByLabelText('Qualifikation'), 'q-3')
+    await user.type(screen.getByLabelText('Gültig bis'), '2099-01-01')
+    await user.click(screen.getByRole('button', { name: 'Zuweisen' }))
+
+    await waitFor(() => expect(onRefreshDetail).toHaveBeenCalled())
+    const fetchMock = vi.mocked(fetch)
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/admin/users/u-tim/qualifications/q-3', expect.objectContaining({
+      method: 'POST',
+    }))
+  })
+
+  it('QUAL_REVOKE: a holder can revoke an assigned qualification', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ qualifications: [] }),
+    }))
+    const user = userEvent.setup()
+    const onRefreshDetail = vi.fn()
+    renderDetail({ canManageQualifications: true, onRefreshDetail })
+
+    await waitFor(() => expect(screen.getAllByRole('button', { name: 'Entziehen' }).length).toBeGreaterThan(0))
+    await user.click(screen.getAllByRole('button', { name: 'Entziehen' })[0])
+
+    await waitFor(() => expect(onRefreshDetail).toHaveBeenCalled())
+    const fetchMock = vi.mocked(fetch)
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/admin/users/u-tim/qualifications/q-1', expect.objectContaining({
+      method: 'DELETE',
+    }))
+  })
+
+  it('QUAL_ASSIGN_FIXED_NO_EXPIRY: a fixed qualification requires a valid-until (client-side guard)', async () => {
+    // Fix 2: selecting a fixed qualification with an empty Gültig-bis disables
+    // "Zuweisen" and shows a German error — the server would 400 a null expiry.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ qualifications: [{ id: 'q-3', name: 'Generator', description: '', expiry_kind: 'fixed', expires_at: '2099-01-01T00:00:00Z', status: 'valid' }] }),
+    }))
+    const user = userEvent.setup()
+    const onRefreshDetail = vi.fn()
+    renderDetail({ canManageQualifications: true, onRefreshDetail })
+
+    await screen.findByText('Qualifikation zuweisen')
+    await user.selectOptions(screen.getByLabelText('Qualifikation'), 'q-3')
+
+    expect(screen.getByText('Gültig bis ist erforderlich.')).toBeInTheDocument()
+    const assignButton = screen.getByRole('button', { name: 'Zuweisen' }) as HTMLButtonElement
+    expect(assignButton.disabled).toBe(true)
+    expect(onRefreshDetail).not.toHaveBeenCalled()
+    const fetchMock = vi.mocked(fetch)
+    const postCalls = fetchMock.mock.calls.filter(([u, init]) => u === '/api/v1/admin/users/u-tim/qualifications/q-3' && init?.method === 'POST')
+    expect(postCalls).toHaveLength(0)
+  })
+
+  it('QUAL_VOCAB_FAILURE: a genuine vocabulary fetch failure shows the fallback note (no crash)', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: false,
+      status: 500,
+      json: async () => ({ error: { code: 'internal_error', message: 'Ein interner Fehler ist aufgetreten.' } }),
+    }))
+    renderDetail({ canManageQualifications: true })
+
+    expect(await screen.findByText(/Die Auswahlliste ist nicht verfügbar/)).toBeInTheDocument()
   })
 })

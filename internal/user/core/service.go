@@ -114,6 +114,11 @@ type Repository interface {
 	// member → ErrUserGroupMemberUnknown); ListUserGroupMembers returns the
 	// current member ids of a group.
 	ListUsers(ctx context.Context, status *string) ([]*AdminUserSummary, error)
+	// ListUserGroupNamesByUsers returns the organisational team names each
+	// listed user belongs to, keyed by user id (Effort 2): one lookup for the
+	// whole admin user list so the SPA table renders inline group tags. Display
+	// data only — membership grants no permission (AD-12).
+	ListUserGroupNamesByUsers(ctx context.Context, userIDs []string) (map[string][]string, error)
 	GetUserDetail(ctx context.Context, userID string) (*AdminUserDetail, error)
 	CreateAdminUser(ctx context.Context, email, firstName, lastName, state string, roleIDs, userGroupIDs, grantCodes []string) (*User, error)
 	UpdateAdminUser(ctx context.Context, userID, email, firstName, lastName, state string, roleIDs, userGroupIDs, grantCodes []string) (*User, error)

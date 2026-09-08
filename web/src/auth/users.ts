@@ -10,6 +10,21 @@ import type { PermissionCatalogEntry } from './roles.ts'
 
 export type UserStatus = 'active' | 'pending_approval' | 'deactivated'
 
+// UserStatusFilter drives the status filter chips and the ?status= query on
+// ListUsers (Effort 2): 'all' sends no status so every user is returned.
+export type UserStatusFilter = UserStatus | 'all'
+
+// USER_STATUS_FILTERS is the ordered chip list (label + value) of the user list
+// spreadsheet. DEFAULT_USER_STATUS_FILTER is the default (aktiv), per the spec.
+export const USER_STATUS_FILTERS: Array<{ value: UserStatusFilter; label: string }> = [
+  { value: 'active', label: 'Aktiv' },
+  { value: 'pending_approval', label: 'Pending' },
+  { value: 'deactivated', label: 'Deaktiviert' },
+  { value: 'all', label: 'Alle' },
+]
+
+export const DEFAULT_USER_STATUS_FILTER: UserStatusFilter = 'active'
+
 // AdminUserSummary is one row of the user list.
 export interface AdminUserSummary {
   id: string
@@ -17,6 +32,10 @@ export interface AdminUserSummary {
   nachname: string
   email: string
   status: UserStatus
+  // user_groups holds the organisational team names the user belongs to
+  // (Effort 2): rendered as inline tags under/beside the name. Membership
+  // grants no permission (AD-12) — display data only.
+  user_groups?: string[]
 }
 
 export interface RoleGroupRef {
@@ -177,8 +196,12 @@ function authTokenHeaders(): HeadersInit {
 }
 
 // listUsers fetches every user (id, names, email, status), ordered by name.
-export async function listUsers(): Promise<AdminUserSummary[]> {
-  const data = (await request(USERS_URL, { headers: authTokenHeaders() })) as { users?: AdminUserSummary[] }
+// An optional status filter (active | pending_approval | deactivated) is passed
+// as ?status= and narrows the set server-side (Spec 2.9) — the SPA's default
+// "aktiv" chip drives it.
+export async function listUsers(status?: UserStatus): Promise<AdminUserSummary[]> {
+  const qs = status ? `?status=${encodeURIComponent(status)}` : ''
+  const data = (await request(`${USERS_URL}${qs}`, { headers: authTokenHeaders() })) as { users?: AdminUserSummary[] }
   return Array.isArray(data.users) ? data.users : []
 }
 
@@ -245,6 +268,73 @@ export async function assignUserGroupMembers(groupId: string, userIds: string[])
 export async function listUserGroupMembers(groupId: string): Promise<string[]> {
   const data = (await request(`${USER_GROUPS_URL}/${groupId}/members`, { headers: authTokenHeaders() })) as { user_ids?: string[] }
   return Array.isArray(data.user_ids) ? data.user_ids : []
+}
+
+// listUserGroupRoles fetches the permission groups (roles) an organisational
+// user group grants its members (Spec 2.9). Gated by user_groups.manage.
+export async function listUserGroupRoles(groupId: string): Promise<RoleGroupRef[]> {
+  const data = (await request(`${USER_GROUPS_URL}/${groupId}/roles`, { headers: authTokenHeaders() })) as { roles?: RoleGroupRef[] }
+  return Array.isArray(data.roles) ? data.roles : []
+}
+
+// assignUserGroupRoles REPLACES an organisational user group's role set
+// atomically (Spec 2.9). Members inherit the new roles on the next request.
+export async function assignUserGroupRoles(groupId: string, roleIds: string[]): Promise<RoleGroupRef[]> {
+  const data = (await request(`${USER_GROUPS_URL}/${groupId}/roles`, {
+    method: 'POST',
+    headers: authTokenHeaders(),
+    body: JSON.stringify({ role_ids: roleIds }),
+  })) as { roles?: RoleGroupRef[] }
+  return Array.isArray(data.roles) ? data.roles : []
+}
+
+// UserQualificationAssignResult is the per-user qualification assignment
+// response (Spec 2.9): the server-authoritative German message plus the
+// target ids so the client can scope feedback.
+export interface UserQualificationAssignResult {
+  message: string
+  user_id: string
+  qualification_id: string
+}
+
+// assignUserQualification assigns a qualification to a user with an optional
+// per-user valid-until (Spec 2.9). A `fixed` qualification REQUIRES expires_at;
+// an `unlimited` one must not carry it (send null). Gated by
+// users.qualifications.manage.
+export async function assignUserQualification(
+  userId: string,
+  qualificationId: string,
+  expiresAt?: string | null,
+): Promise<UserQualificationAssignResult> {
+  return (await request(`${USERS_URL}/${userId}/qualifications/${qualificationId}`, {
+    method: 'POST',
+    headers: authTokenHeaders(),
+    body: JSON.stringify({ expires_at: expiresAt ?? null }),
+  })) as UserQualificationAssignResult
+}
+
+// revokeUserQualification revokes a qualification from a user immediately
+// (Spec 2.9). Gated by users.qualifications.manage.
+export async function revokeUserQualification(userId: string, qualificationId: string): Promise<UserQualificationAssignResult> {
+  return (await request(`${USERS_URL}/${userId}/qualifications/${qualificationId}`, {
+    method: 'DELETE',
+    headers: authTokenHeaders(),
+  })) as UserQualificationAssignResult
+}
+
+// updateUserQualificationExpiry edits a user's per-assignment valid-until
+// (Spec 2.9): a null clears the override (reverting to the vocabulary expiry).
+// Gated by users.qualifications.manage.
+export async function updateUserQualificationExpiry(
+  userId: string,
+  qualificationId: string,
+  expiresAt?: string | null,
+): Promise<UserQualificationAssignResult> {
+  return (await request(`${USERS_URL}/${userId}/qualifications/${qualificationId}/expiry`, {
+    method: 'PUT',
+    headers: authTokenHeaders(),
+    body: JSON.stringify({ expires_at: expiresAt ?? null }),
+  })) as UserQualificationAssignResult
 }
 
 // deleteUserGroup removes an organisational user group (finding 5).

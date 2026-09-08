@@ -190,6 +190,12 @@ type Repository interface {
 	ListAllPermissions(ctx context.Context) ([]*core.PermissionCatalogEntry, error)
 	// User & Group Administration persistence (Story 2.6, AD-12).
 	ListUsers(ctx context.Context, status *string) ([]*core.AdminUserSummary, error)
+	// ListUserGroupNamesByUsers returns the organisational user-group (team)
+	// names each listed user belongs to (Effort 2), keyed by user id — one
+	// lookup for the whole admin user list so the SPA table can render inline
+	// group tags without a per-row query. Membership grants NO permission
+	// (AD-12); this is display data only.
+	ListUserGroupNamesByUsers(ctx context.Context, userIDs []string) (map[string][]string, error)
 	GetUserDetail(ctx context.Context, userID string) (*core.AdminUserDetail, error)
 	CreateAdminUser(ctx context.Context, email, firstName, lastName, state string, roleIDs, userGroupIDs, grantCodes []string) (*core.User, error)
 	UpdateAdminUser(ctx context.Context, userID, email, firstName, lastName, state string, roleIDs, userGroupIDs, grantCodes []string) (*core.User, error)

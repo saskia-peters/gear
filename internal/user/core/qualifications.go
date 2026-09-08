@@ -219,7 +219,12 @@ func (s *Service) ListQualifications(ctx context.Context, actor *User) (*Qualifi
 	if actor.State != StateActive {
 		return nil, ErrForbidden
 	}
-	if err := s.requireQualificationsManagePermission(ctx, actor); err != nil {
+	// The vocabulary LIST opens to any caller who can assign qualifications
+	// (users.qualifications.manage) as well as vocabulary managers
+	// (qualifications.manage) — Effort 2: fuehrende/schirrmeister need the
+	// vocabulary to ADD a qualification on the user detail. Create/update/
+	// assignees still require `qualifications.manage` (admin-only).
+	if err := s.requireAnyPermission(ctx, actor, []string{QualificationsManagePermission, UsersQualificationsManagePermission}); err != nil {
 		return nil, err
 	}
 

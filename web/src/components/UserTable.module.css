@@ -1,0 +1,177 @@
+.wrapper {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-3);
+}
+
+.chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gear-space-2);
+}
+
+.chip {
+  min-height: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--gear-space-2) var(--gear-space-4);
+  border: 1px solid var(--gear-color-border-hairline);
+  border-radius: var(--gear-radius-md);
+  background-color: transparent;
+  color: var(--gear-color-ink-secondary);
+  font-family: var(--gear-font-family);
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease, color 0.15s ease;
+}
+
+.chip:hover {
+  border-color: var(--gear-color-brand);
+  color: var(--gear-color-brand);
+}
+
+.chipActive {
+  background-color: var(--gear-color-brand);
+  border-color: var(--gear-color-brand);
+  color: var(--gear-color-ink-on-brand);
+}
+
+.chip:focus-visible {
+  outline: 2px solid var(--gear-focus-ring-color);
+  outline-offset: 2px;
+}
+
+.table {
+  width: 100%;
+  border-collapse: collapse;
+  background-color: var(--gear-color-surface-raised);
+  border: 1px solid var(--gear-color-border-hairline);
+  border-radius: var(--gear-radius-md);
+}
+
+.table th {
+  text-align: left;
+  padding: var(--gear-space-1) var(--gear-space-3);
+  border-bottom: 1px solid var(--gear-color-border-hairline);
+}
+
+.table td {
+  padding: var(--gear-space-2) var(--gear-space-3);
+  border-bottom: 1px solid var(--gear-color-border-hairline);
+  font-size: var(--gear-font-body-size);
+  color: var(--gear-color-ink-primary);
+  line-height: var(--gear-font-body-line-height);
+  vertical-align: top;
+}
+
+.table tbody tr:last-child td {
+  border-bottom: none;
+}
+
+.table tbody tr:hover {
+  background-color: var(--gear-color-surface-base);
+}
+
+.sortButton {
+  min-height: 48px;
+  display: inline-flex;
+  align-items: center;
+  gap: var(--gear-space-2);
+  padding: 0;
+  border: none;
+  background: none;
+  font-family: var(--gear-font-family);
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  color: var(--gear-color-ink-primary);
+  cursor: pointer;
+}
+
+.sortButton:focus-visible {
+  outline: 2px solid var(--gear-focus-ring-color);
+  outline-offset: 2px;
+  border-radius: var(--gear-radius-sm, 4px);
+}
+
+.sortIndicator {
+  font-size: var(--gear-font-meta-size);
+  color: var(--gear-color-ink-secondary);
+}
+
+.nameCell {
+  vertical-align: top;
+}
+
+/* The whole row is the activation target (Effort 2 finding 8): one interactive
+   surface per user instead of three per-cell buttons. Keyboard-operable via
+   tabindex + Enter/Space. */
+.row {
+  cursor: pointer;
+  outline: none;
+}
+
+.row:focus-visible {
+  outline: 2px solid var(--gear-focus-ring-color);
+  outline-offset: -2px;
+}
+
+.groupTags {
+  list-style: none;
+  margin: var(--gear-space-1) 0 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gear-space-1);
+}
+
+.groupTag {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--gear-space-1) var(--gear-space-2);
+  border: 1px solid var(--gear-color-border-hairline);
+  border-radius: var(--gear-radius-sm, 4px);
+  background-color: var(--gear-color-surface-base);
+  font-size: var(--gear-font-meta-size);
+  color: var(--gear-color-ink-secondary);
+  line-height: var(--gear-font-meta-line-height);
+  white-space: nowrap;
+}
+
+.statusBadge {
+  display: inline-flex;
+  align-items: center;
+  padding: var(--gear-space-1) var(--gear-space-2);
+  border-radius: var(--gear-radius-sm, 4px);
+  font-size: var(--gear-font-meta-size);
+  font-weight: var(--gear-font-label-weight);
+  white-space: nowrap;
+}
+
+.status-active {
+  background-color: var(--gear-color-status-green-soft);
+  border: 1px solid var(--gear-color-status-green);
+  color: var(--gear-color-ink-primary);
+}
+
+.status-pending_approval {
+  background-color: var(--gear-color-status-orange-soft);
+  border: 1px solid var(--gear-color-status-orange);
+  color: var(--gear-color-status-orange);
+}
+
+.status-deactivated {
+  background-color: var(--gear-color-surface-base);
+  border: 1px solid var(--gear-color-border-hairline);
+  color: var(--gear-color-ink-secondary);
+}
+
+.empty {
+  margin: 0;
+  padding: var(--gear-space-6) var(--gear-space-4);
+  background-color: var(--gear-color-surface-raised);
+  border: 1px solid var(--gear-color-border-hairline);
+  border-radius: var(--gear-radius-md);
+  color: var(--gear-color-ink-secondary);
+}

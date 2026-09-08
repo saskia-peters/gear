@@ -2060,6 +2060,44 @@ func (q *Queries) ListUserGroupMemberships(ctx context.Context, userID pgtype.UU
 	return items, nil
 }
 
+const listUserGroupNamesByUsers = `-- name: ListUserGroupNamesByUsers :many
+SELECT ugm.user_id, ug.name
+FROM user_group_members ugm
+JOIN user_groups ug ON ug.id = ugm.user_group_id
+WHERE ugm.user_id = ANY($1::uuid[])
+ORDER BY ugm.user_id, ug.name
+`
+
+type ListUserGroupNamesByUsersRow struct {
+	UserID pgtype.UUID `json:"user_id"`
+	Name   string      `json:"name"`
+}
+
+// The organisational user-group names each listed user belongs to (Effort 2):
+// one row per (user_id, group name), ordered by user id then group name, so
+// the admin "Benutzer" list can render inline group tags in a single query
+// instead of one lookup per row (no N+1). Membership grants NO permission
+// (AD-12); the resolution query never joins user_groups.
+func (q *Queries) ListUserGroupNamesByUsers(ctx context.Context, dollar_1 []pgtype.UUID) ([]ListUserGroupNamesByUsersRow, error) {
+	rows, err := q.db.Query(ctx, listUserGroupNamesByUsers, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUserGroupNamesByUsersRow
+	for rows.Next() {
+		var i ListUserGroupNamesByUsersRow
+		if err := rows.Scan(&i.UserID, &i.Name); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listUserGroupRoles = `-- name: ListUserGroupRoles :many
 SELECT pg.id, pg.name, pg.is_base_role
 FROM permission_groups pg

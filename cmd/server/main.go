@@ -91,20 +91,19 @@ func main() {
 	userHandler := userhttp.NewHandler(userService, log, sessionManager)
 
 	// The auth gateway resolves sessions and the live permission set (AD-6).
-	const protectedPermission = "admin.recovery.approve"
-	protectedRoute := auth.Route(sessionManager, userRepo, protectedPermission)
-	// Admin-module route group (Story 2.1, review finding 2.1-1): the admin
-	// module lives in ONE gated URL space (/api/v1/admin). The admin-recovery
-	// surface (FR-27) is a member of this group — request/approve/deny/pending
-	// are served at /api/v1/admin/recovery/... alongside the admin-status root.
-	// The whole group is gated by RequireAdminPermission on an ADMIN-ONLY
-	// permission code: `admin.recovery.approve` (the admin role resolves it,
-	// AD-12, and no non-admin group grants it). The gateway re-resolves the
-	// caller's live permission set per request, so revoking the admin role
-	// denies immediately (AD-2); the 403 is the uniform envelope with no
-	// admin-existence hint (FR-19) and is emitted to the denial-specific
-	// structured log (NFR-O1, review finding 2.1-5).
-	adminSurface := auth.RequireAdminPermission(sessionManager, userRepo, protectedPermission, log)(userHandler.AdminRoutes())
+	// The ADMIN module's outer gate is ANY admin-module code (Spec 2.9 /
+	// Effort 2): fuehrende/schirrmeister hold `users.view` +
+	// `users.qualifications.manage` and must reach the user directory + the
+	// qualification assignment on the user detail, so the outer gate can no
+	// longer be `admin.recovery.approve`-only. Holding ANY of
+	// usercore.AdminModuleAccessCodes opens the module; each sub-surface then
+	// applies its own tighter gate (e.g. recovery still requires
+	// `admin.recovery.approve`, user create/edit requires `users.manage`).
+	adminSurface := auth.RequireAnyPermission(sessionManager, userRepo, usercore.AdminModuleAccessCodes(), "admin access denied", log)(userHandler.AdminRoutes())
+
+	// Demo route for the gateway composition tests: any active user holding
+	// `dashboard.view` (all base roles) can reach /api/v1/protected/me.
+	protectedRoute := auth.Route(sessionManager, userRepo, "dashboard.view")
 
 	log.Info("wired user repository, sessions and registration/auth service", "store", fmt.Sprintf("%T", userStore))
 

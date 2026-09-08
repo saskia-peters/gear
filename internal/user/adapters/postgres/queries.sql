@@ -642,6 +642,18 @@ JOIN user_group_members ugm ON ugm.user_group_id = ug.id
 WHERE ugm.user_id = $1
 ORDER BY ug.name;
 
+-- name: ListUserGroupNamesByUsers :many
+-- The organisational user-group names each listed user belongs to (Effort 2):
+-- one row per (user_id, group name), ordered by user id then group name, so
+-- the admin "Benutzer" list can render inline group tags in a single query
+-- instead of one lookup per row (no N+1). Membership grants NO permission
+-- (AD-12); the resolution query never joins user_groups.
+SELECT ugm.user_id, ug.name
+FROM user_group_members ugm
+JOIN user_groups ug ON ug.id = ugm.user_group_id
+WHERE ugm.user_id = ANY($1::uuid[])
+ORDER BY ugm.user_id, ug.name;
+
 -- name: ListUserDirectGrants :many
 -- The direct one-off permission grants a user holds (additive, AD-12), for the
 -- user detail surface (Story 2.6). Codes ordered by code.

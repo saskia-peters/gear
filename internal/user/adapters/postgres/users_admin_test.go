@@ -106,6 +106,17 @@ func TestPostgresUserGroupAdministration(t *testing.T) {
 		t.Fatal("created user missing from ListUsers")
 	}
 
+	// GROUP_TAGS (Effort 2): ListUserGroupNamesByUsers returns the team name the
+	// user belongs to, keyed by user id — the data the service attaches to each
+	// summary so the SPA table can render inline group tags (one query, no N+1).
+	names, err := repo.ListUserGroupNamesByUsers(ctx, []string{created.ID})
+	if err != nil {
+		t.Fatalf("ListUserGroupNamesByUsers failed: %v", err)
+	}
+	if len(names[created.ID]) != 1 || names[created.ID][0] != groupName {
+		t.Errorf("user group names = %v, want [%s]", names[created.ID], groupName)
+	}
+
 	// DETAIL_VALID: the detail composes roles + user groups + direct grants.
 	detail, err := repo.GetUserDetail(ctx, created.ID)
 	if err != nil {

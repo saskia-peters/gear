@@ -27,10 +27,12 @@ const argon2DummyHash = "$argon2id$v=19$m=65536,t=3,p=4$c2FsdHNhbHRzYWx0$8U3f5yO
 
 // newComposedAdminRouter builds the REAL composition-root wiring for the admin
 // module (AD-1, review finding 2.1-4): postgres Repository + SessionManager +
-// Service + the real AdminRoutes() mounted at /api/v1/admin behind
-// RequireAdminPermission (admin-only permission), exactly as cmd/server/main.go
-// does. A generic protected demo route is mounted too so hidden-existence tests
-// can compare admin 403s byte-for-byte against a generic forbidden response.
+// Service + the real AdminRoutes() mounted at /api/v1/admin behind the ANY-OF
+// admin-module gate (usercore.AdminModuleAccessCodes(), exactly as
+// cmd/server/main.go does — fuehrende/schirrmeister holding users.view +
+// users.qualifications.manage can enter, recovery stays admin-only). A generic
+// protected demo route is mounted too so hidden-existence tests can compare
+// admin 403s byte-for-byte against a generic forbidden response.
 func newComposedAdminRouter(t *testing.T, log *slog.Logger) (http.Handler, *userpostgres.Repository, *usercore.SessionManager, *pgxpool.Pool) {
 	t.Helper()
 
@@ -56,7 +58,7 @@ func newComposedAdminRouter(t *testing.T, log *slog.Logger) (http.Handler, *user
 	sm := usercore.NewSessionManager(repo, time.Hour)
 	svc := usercore.NewService(repo, crypto.NewHasher(), sm, crypto.NewSecretCipher(make([]byte, 32)), log)
 	h := NewHandler(svc, log, sm)
-	adminSurface := auth.RequireAdminPermission(sm, repo, adminModulePermission, log)(h.AdminRoutes())
+	adminSurface := auth.RequireAnyPermission(sm, repo, usercore.AdminModuleAccessCodes(), "admin access denied", log)(h.AdminRoutes())
 	r := router.New(pool, log,
 		router.WithProtected(auth.Route(sm, repo, adminModulePermission)),
 		router.WithMount("/api/v1/admin", adminSurface),
@@ -192,6 +194,61 @@ func TestComposedAdminRouteGroup(t *testing.T) {
 	}
 }
 
+// TestComposedAdminFuehrendeEntersModule pins the Effort 2 outer-gate widening
+// through the REAL wiring: a fuehrende/schirrmeister holding ONLY users.view +
+// users.qualifications.manage (the 'fuehrende' base role, migration 000013)
+// reaches GET /api/v1/admin → 200, while a caller with NO admin-module code
+// stays denied 403 with the uniform hidden-existence envelope (FR-19).
+func TestComposedAdminFuehrendeEntersModule(t *testing.T) {
+	r, repo, sm, pool := newComposedAdminRouter(t, discardLogger())
+	stamp := time.Now().Format("20060102150405.000000")
+
+	fuehrendeEmail := fmt.Sprintf("admcomp.fuehr.%s@gear.local", stamp)
+	user, token := createActiveUser(t, pool, repo, sm, fuehrendeEmail, "Fuehrend", "Fue", "Ehrende", false)
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO user_permission_groups (user_id, permission_group_id) SELECT $1, g.id FROM permission_groups g WHERE g.name = 'fuehrende'`, user.ID); err != nil {
+		t.Fatalf("granting fuehrende role failed: %v", err)
+	}
+
+	// Sanity: the fuehrende base role carries users.view + users.qualifications.manage.
+	perms, err := repo.ListPermissionsByUser(context.Background(), user.ID)
+	if err != nil {
+		t.Fatalf("resolving fuehrende permissions failed: %v", err)
+	}
+	has := func(code string) bool {
+		for _, p := range perms {
+			if p == code {
+				return true
+			}
+		}
+		return false
+	}
+	if !has("users.view") || !has("users.qualifications.manage") {
+		t.Fatalf("fuehrende permissions = %v, want users.view + users.qualifications.manage", perms)
+	}
+
+	rec := doComposedAdminGET(r, token, "/api/v1/admin")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("fuehrende: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var wire map[string]string
+	_ = json.Unmarshal(rec.Body.Bytes(), &wire)
+	if wire["module"] != "admin" || wire["status"] != "ok" {
+		t.Errorf("admin status payload = %v, want module=admin status=ok", wire)
+	}
+
+	// No admin-module code → uniform hidden-existence 403.
+	noAdminEmail := fmt.Sprintf("admcomp.none.%s@gear.local", stamp)
+	_, noAdminToken := createActiveUser(t, pool, repo, sm, noAdminEmail, "No Access", "No", "Access", false)
+	rec = doComposedAdminGET(r, noAdminToken, "/api/v1/admin")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("no admin code: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(strings.ToLower(rec.Body.String()), "admin") {
+		t.Errorf("403 body hints at the admin module: %s", rec.Body.String())
+	}
+}
+
 func TestComposedAdminForbiddenStructuredLogged(t *testing.T) {
 	// NFR-O1 (review finding 2.1-5): an admin-route denial emits BOTH the
 	// router-level request log line AND a denial-specific structured line
@@ -218,8 +275,10 @@ func TestComposedAdminForbiddenStructuredLogged(t *testing.T) {
 	if !strings.Contains(out, "path=/api/v1/admin") {
 		t.Errorf("denial log missing the admin path: %s", out)
 	}
-	if !strings.Contains(out, "permission_required=admin.recovery.approve") {
-		t.Errorf("denial log missing the required permission: %s", out)
+	// The any-of gate logs the FULL joined code list, not a single code.
+	wantRequired := strings.Join(usercore.AdminModuleAccessCodes(), ",")
+	if !strings.Contains(out, "permission_required="+wantRequired) {
+		t.Errorf("denial log missing the required permission list %q: %s", wantRequired, out)
 	}
 	if !strings.Contains(out, volunteerEmail) {
 		t.Errorf("denial log missing the caller email: %s", out)

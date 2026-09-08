@@ -100,6 +100,56 @@ func TestListQualificationsForbidden(t *testing.T) {
 	}
 }
 
+func TestListQualificationsUsersQualsManageAllowed(t *testing.T) {
+	// Effort 2: a fuehrende/schirrmeister holding `users.qualifications.manage`
+	// (but NOT `qualifications.manage`) can LIST the vocabulary so the user
+	// detail can ADD a qualification. Create/update/assignees stay admin-only.
+	repo := qualificationsRepo()
+	repo.users["schirr@gear.local"] = &User{
+		ID: "u-schirr", Email: "schirr@gear.local", DisplayName: "Schirr Meister",
+		FirstName: "Schirr", LastName: "Meister", State: StateActive,
+	}
+	repo.perms["u-schirr"] = []string{"users.view", "users.qualifications.manage"}
+	svc := usersAdminService(t, repo)
+
+	res, err := svc.ListQualifications(context.Background(), repo.users["schirr@gear.local"])
+	if err != nil {
+		t.Fatalf("ListQualifications (users.qualifications.manage holder) failed: %v", err)
+	}
+	if res == nil || len(res.Qualifications) == 0 {
+		t.Fatalf("ListQualifications returned no vocabulary for a users.qualifications.manage holder")
+	}
+}
+
+// TestQualificationWritesUsersQualsManageForbidden pins the defense-in-depth
+// split behind the over-widened qualifications sub-mount (Effort 2): the any-of
+// mount ADMITS a fuehrende/schirrmeister holding users.qualifications.manage
+// (so they can read the vocabulary), but the core re-check DENIES vocabulary
+// WRITES to anyone without `qualifications.manage` — create/update stay
+// admin-only.
+func TestQualificationWritesUsersQualsManageForbidden(t *testing.T) {
+	repo := qualificationsRepo()
+	repo.users["schirr@gear.local"] = &User{
+		ID: "u-schirr", Email: "schirr@gear.local", DisplayName: "Schirr Meister",
+		FirstName: "Schirr", LastName: "Meister", State: StateActive,
+	}
+	repo.perms["u-schirr"] = []string{"users.view", "users.qualifications.manage"}
+	svc := usersAdminService(t, repo)
+	actor := repo.users["schirr@gear.local"]
+	future := time.Now().UTC().Add(90 * 24 * time.Hour)
+
+	if _, err := svc.CreateQualification(context.Background(), actor, CreateQualificationInput{
+		Name: "Neue Quali", ExpiryKind: QualificationExpiryUnlimited,
+	}); !errors.Is(err, ErrForbidden) {
+		t.Errorf("CreateQualification (users.qualifications.manage holder) err = %v, want ErrForbidden", err)
+	}
+	if _, err := svc.UpdateQualification(context.Background(), actor, "q-ketten", UpdateQualificationInput{
+		Name: "Kettensäge umbenannt", ExpiryKind: QualificationExpiryFixed, ExpiresAt: &future,
+	}); !errors.Is(err, ErrForbidden) {
+		t.Errorf("UpdateQualification (users.qualifications.manage holder) err = %v, want ErrForbidden", err)
+	}
+}
+
 func TestCreateQualificationUnlimited(t *testing.T) {
 	// CREATE_UNLIMITED: {name, expiry_kind:unlimited, no expires_at} creates a
 	// qualification that is Unbegrenzt forever (FR-22).

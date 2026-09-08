@@ -54,6 +54,32 @@ func (r *Repository) ListUsers(ctx context.Context, status *string) ([]*core.Adm
 	return out, nil
 }
 
+// ListUserGroupNamesByUsers returns the organisational user-group (team) names
+// each listed user belongs to, keyed by user id (Effort 2): one query for the
+// whole admin "Benutzer" list, so the SPA table renders inline group tags
+// without a per-row lookup (no N+1). Names are ordered by name within each
+// user. An empty input yields an empty map. Membership grants NO permission
+// (AD-12) — this is display data only.
+func (r *Repository) ListUserGroupNamesByUsers(ctx context.Context, userIDs []string) (map[string][]string, error) {
+	if len(userIDs) == 0 {
+		return map[string][]string{}, nil
+	}
+	uuids, err := uuidSlice(userIDs)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := r.queries.ListUserGroupNamesByUsers(ctx, uuids)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string][]string, len(userIDs))
+	for _, row := range rows {
+		uid := uuidToString(row.UserID.Bytes)
+		out[uid] = append(out[uid], row.Name)
+	}
+	return out, nil
+}
+
 // GetUserDetail composes a user's full admin detail — profile, roles
 // (permission groups), user groups (teams), direct grants and qualification
 // assignments (Story 2.6). An unknown id maps to core.ErrAdminUserNotFound.

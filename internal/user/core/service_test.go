@@ -832,6 +832,31 @@ func (m *mockRepo) ListUsers(_ context.Context, status *string) ([]*AdminUserSum
 	return out, nil
 }
 
+// ListUserGroupNamesByUsers returns the organisational team names each listed
+// user belongs to, keyed by user id (Effort 2): the mock-side counterpart of
+// the repository's one-query-for-the-page lookup. Names are sorted by name.
+func (m *mockRepo) ListUserGroupNamesByUsers(_ context.Context, userIDs []string) (map[string][]string, error) {
+	want := make(map[string]bool, len(userIDs))
+	for _, uid := range userIDs {
+		want[uid] = true
+	}
+	out := make(map[string][]string, len(userIDs))
+	for uid, groupIDs := range m.userGroupMembers {
+		if !want[uid] {
+			continue
+		}
+		names := make([]string, 0, len(groupIDs))
+		for _, gid := range groupIDs {
+			if g := m.userGroups[gid]; g != nil {
+				names = append(names, g.Name)
+			}
+		}
+		sort.Strings(names)
+		out[uid] = names
+	}
+	return out, nil
+}
+
 // GetUserDetail composes a user's detail from the in-memory state (Story 2.6).
 // An unknown id maps to ErrAdminUserNotFound.
 func (m *mockRepo) GetUserDetail(_ context.Context, userID string) (*AdminUserDetail, error) {

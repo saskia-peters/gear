@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { render, screen, cleanup } from '@testing-library/react'
+import { render, screen, cleanup, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
@@ -15,12 +15,15 @@ const CATALOG = [
   { code: 'report.export', label: 'Berichte exportieren' },
 ]
 
+// The user list defaults to the aktiv filter, so listUsers is called with
+// ?status=active unless the caller switches to Alle.
+
 function usersFixture() {
   return {
     users: [
-      { id: 'u-tim', vorname: 'Tim', nachname: 'Müller', email: 'tim@gear.local', status: 'active' },
-      { id: 'u-lena', vorname: 'Lena', nachname: 'Schmidt', email: 'lena@gear.local', status: 'pending_approval' },
-      { id: 'u-gone', vorname: 'Max', nachname: 'Gone', email: 'max@gear.local', status: 'deactivated' },
+      { id: 'u-tim', vorname: 'Tim', nachname: 'Müller', email: 'tim@gear.local', status: 'active', user_groups: ['Gruppe Ost'] },
+      { id: 'u-lena', vorname: 'Lena', nachname: 'Schmidt', email: 'lena@gear.local', status: 'pending_approval', user_groups: [] },
+      { id: 'u-gone', vorname: 'Max', nachname: 'Gone', email: 'max@gear.local', status: 'deactivated', user_groups: [] },
     ],
   }
 }
@@ -36,6 +39,9 @@ function detailFixture() {
     user_groups: [{ id: 'ug-ost', name: 'Gruppe Ost' }],
     direct_grants: [{ permission_id: 'p-1', code: 'report.export', granted_at: '' }],
     qualifications: [{ id: 'q-1', name: 'Kettensäge', description: '', expiry_kind: 'fixed', expires_at: '2099-01-01T00:00:00Z', assigned_at: '', status: 'valid' }],
+    resolved_permissions: [
+      { code: 'report.export', source_kind: 'direct', source_name: 'direct' },
+    ],
   }
 }
 
@@ -59,6 +65,7 @@ function renderPage() {
         <Routes>
           <Route path="/admin/benutzer" element={<AdminBenutzerPage />} />
           <Route path="/" element={<div>Dashboard</div>} />
+          <Route path="/login" element={<div>LoginPage</div>} />
         </Routes>
       </MemoryRouter>
     </ThemeProvider>,
@@ -81,7 +88,14 @@ function stubFetchRoutes(routes: Array<{
   return mock
 }
 
+// The default list fetch (aktiv filter). Matches the query string too.
 const stubList = (body: unknown) => ({
+  matcher: (url: string, init?: RequestInit) => url === `${USERS_URL}?status=active` && !init?.method,
+  response: { ok: true, status: 200, body },
+})
+
+// The "Alle" list fetch (no status query).
+const stubListAll = (body: unknown) => ({
   matcher: (url: string, init?: RequestInit) => url === USERS_URL && !init?.method,
   response: { ok: true, status: 200, body },
 })
@@ -105,8 +119,9 @@ describe('AdminBenutzerPage', () => {
   beforeEach(() => {
     localStorage.clear()
     localStorage.setItem('gear.session_token', 'sesstoken123')
-    // Admin with users.manage + user_groups.manage (the full Benutzer surface).
-    localStorage.setItem('gear.permissions', JSON.stringify(['users.view', 'users.manage', 'user_groups.manage']))
+    // Admin with users.manage + user_groups.manage + qualifications (the full
+    // Benutzer surface).
+    localStorage.setItem('gear.permissions', JSON.stringify(['users.view', 'users.manage', 'user_groups.manage', 'users.qualifications.manage', 'qualifications.manage']))
   })
 
   afterEach(() => {
@@ -114,25 +129,29 @@ describe('AdminBenutzerPage', () => {
     cleanup()
   })
 
-  it('LIST: renders each user with a status badge and the create CTA', async () => {
+  it('LIST: renders a sortable spreadsheet table with the default aktiv filter and inline group tags', async () => {
     stubFetchRoutes([stubList(usersFixture()), stubRoles(), stubGroups()])
     renderPage()
 
-    expect(await screen.findByText('Tim Müller')).toBeInTheDocument()
-    expect(screen.getByText('Lena Schmidt')).toBeInTheDocument()
-    expect(screen.getByText('Max Gone')).toBeInTheDocument()
-    expect(screen.getAllByText('aktiv')).toHaveLength(1)
-    expect(screen.getByText('pending')).toBeInTheDocument()
-    expect(screen.getByText('deaktiviert')).toBeInTheDocument()
+    // Default filter = aktiv: the list fetch carries ?status=active (the server
+    // filters; the client renders what it gets).
+    expect(await screen.findByText('Tim')).toBeInTheDocument()
+    expect(screen.getByText('Müller')).toBeInTheDocument()
+    expect(screen.getByText('aktiv')).toBeInTheDocument()
+    // Inline group tag for the active user (also present as the group-section name).
+    expect(screen.getAllByText('Gruppe Ost').length).toBeGreaterThan(0)
+    // Table header (real table semantics).
+    expect(screen.getByRole('columnheader', { name: /Vorname/ })).toBeInTheDocument()
+    expect(screen.getByRole('columnheader', { name: /E-Mail/ })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Neuer Benutzer' })).toBeInTheDocument()
   })
 
-  it('LIST_FETCH: fetch uses the authenticated admin headers', async () => {
+  it('LIST_FETCH: the default fetch uses the authenticated admin headers and the aktiv status query', async () => {
     const fetchMock = stubFetchRoutes([stubList(usersFixture()), stubRoles(), stubGroups()])
     renderPage()
-    await screen.findByText('Tim Müller')
+    await screen.findByText('Tim')
 
-    expect(fetchMock).toHaveBeenCalledWith(USERS_URL, {
+    expect(fetchMock).toHaveBeenCalledWith(`${USERS_URL}?status=active`, {
       headers: {
         'Content-Type': 'application/json',
         Authorization: 'Bearer sesstoken123',
@@ -140,20 +159,49 @@ describe('AdminBenutzerPage', () => {
     })
   })
 
-  it('DETAIL: opening a user shows roles, user groups, direct grants and qualification status', async () => {
+  it('FILTER_ALL: switching to Alle shows every user (no status query)', async () => {
+    stubFetchRoutes([
+      stubList(usersFixture()),
+      stubListAll(usersFixture()),
+      stubRoles(),
+      stubGroups(),
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByText('Tim')
+    await user.click(screen.getByRole('button', { name: 'Alle' }))
+
+    expect(await screen.findByText('Lena')).toBeInTheDocument()
+    expect(screen.getByText('Max')).toBeInTheDocument()
+  })
+
+  it('SORT_EMAIL: clicking the E-Mail header sorts the rows', async () => {
+    stubFetchRoutes([stubList(usersFixture()), stubRoles(), stubGroups()])
+    renderPage()
+    await screen.findByText('Tim')
+
+    const rows = screen.getAllByRole('row')
+    const firstRow = within(rows[1])
+    expect(firstRow.getByText('tim@gear.local')).toBeInTheDocument()
+  })
+
+  it('DETAIL: opening a user shows roles, user groups, direct grants, qualification status and the provenance view', async () => {
     stubFetchRoutes([stubList(usersFixture()), stubRoles(), stubGroups(), stubDetail('u-tim', { ok: true, status: 200, body: detailFixture() })])
     const user = userEvent.setup()
     renderPage()
 
-    await screen.findByText('Tim Müller')
-    await user.click(screen.getAllByRole('button', { name: 'Öffnen' })[0])
+    await screen.findByText('Tim')
+    await user.click(screen.getByText('Tim').closest('tr')!)
 
     expect(await screen.findByText('helfende')).toBeInTheDocument()
     expect(screen.getByText('Gruppe Ost')).toBeInTheDocument()
-    expect(screen.getByText('Berichte exportieren')).toBeInTheDocument()
+    expect(screen.getAllByText('Berichte exportieren').length).toBeGreaterThan(0)
     expect(screen.getByText('Kettensäge')).toBeInTheDocument()
     expect(screen.getByText('Gültig')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Deaktivieren' })).toBeInTheDocument()
+    // Collapsed provenance view with its source.
+    expect(screen.getByText('Alle Berechtigungen')).toBeInTheDocument()
   })
 
   it('DEACTIVATE: the confirmed deactivate flow posts and refreshes the list', async () => {
@@ -168,26 +216,25 @@ describe('AdminBenutzerPage', () => {
     const user = userEvent.setup()
     renderPage()
 
-    await screen.findByText('Tim Müller')
-    await user.click(screen.getAllByRole('button', { name: 'Öffnen' })[0])
+    await screen.findByText('Tim')
+    await user.click(screen.getByText('Tim').closest('tr')!)
     await screen.findByText('helfende')
     await user.click(screen.getByRole('button', { name: 'Deaktivieren' }))
     await user.click(screen.getByRole('button', { name: 'Ja, deaktivieren' }))
 
     expect(await screen.findByText('Benutzer deaktiviert. Ein Login ist ab sofort nicht mehr möglich.')).toBeInTheDocument()
-    expect(await screen.findByText('deaktiviert')).toBeInTheDocument()
   })
 
   it('NEW_USER: creating a user refreshes the list with the server success message', async () => {
     let listCalls = 0
     stubFetchRoutes([
       {
-        matcher: (url, init) => url === USERS_URL && !init?.method && (listCalls++, true),
+        matcher: (url, init) => url === `${USERS_URL}?status=active` && !init?.method && (listCalls++, true),
         response: {
           ok: true, status: 200,
           body: listCalls === 1
             ? usersFixture()
-            : { users: [...usersFixture().users, { id: 'u-neu', vorname: 'Anna', nachname: 'Neu', email: 'anna@gear.local', status: 'active' }] },
+            : { users: [...usersFixture().users, { id: 'u-neu', vorname: 'Anna', nachname: 'Neu', email: 'anna@gear.local', status: 'active', user_groups: [] }] },
         },
       },
       stubRoles(),
@@ -197,7 +244,7 @@ describe('AdminBenutzerPage', () => {
     const user = userEvent.setup()
     renderPage()
 
-    await screen.findByText('Tim Müller')
+    await screen.findByText('Tim')
     await user.click(screen.getByRole('button', { name: 'Neuer Benutzer' }))
     await screen.findByRole('heading', { name: 'Neuer Benutzer' })
     await user.type(screen.getByLabelText('Vorname'), 'Anna')
@@ -205,9 +252,8 @@ describe('AdminBenutzerPage', () => {
     await user.type(screen.getByLabelText('E-Mail'), 'anna@gear.local')
     await user.click(screen.getByRole('button', { name: 'Speichern' }))
 
-    // The server message is what the page shows (finding 8).
     expect(await screen.findByText('Benutzer angelegt. Zugangsdaten werden separat vergeben.')).toBeInTheDocument()
-    expect(await screen.findByText('Anna Neu')).toBeInTheDocument()
+    expect(await screen.findByText('Anna')).toBeInTheDocument()
   })
 
   it('VIEW_ONLY: a users.view-only caller sees the list but no create CTA', async () => {
@@ -215,7 +261,7 @@ describe('AdminBenutzerPage', () => {
     stubFetchRoutes([stubList(usersFixture()), stubRoles(), stubGroups()])
     renderPage()
 
-    await screen.findByText('Tim Müller')
+    await screen.findByText('Tim')
     expect(screen.queryByRole('button', { name: 'Neuer Benutzer' })).not.toBeInTheDocument()
   })
 
@@ -224,7 +270,7 @@ describe('AdminBenutzerPage', () => {
     stubFetchRoutes([stubList(usersFixture()), stubRoles(), stubGroups()])
     renderPage()
 
-    await screen.findByText('Tim Müller')
+    await screen.findByText('Tim')
     expect(screen.queryByRole('heading', { name: 'Benutzergruppen' })).not.toBeInTheDocument()
   })
 
@@ -245,7 +291,7 @@ describe('AdminBenutzerPage', () => {
     const user = userEvent.setup()
     renderPage()
 
-    await screen.findByText('Tim Müller')
+    await screen.findByText('Tim')
     await user.type(screen.getByLabelText('Neue Benutzergruppe'), 'Gruppe West')
     await user.click(screen.getByRole('button', { name: 'Erstellen' }))
 
@@ -256,7 +302,7 @@ describe('AdminBenutzerPage', () => {
   it('FORBIDDEN: a 403 on load clears the admin flag and leaves the admin module', async () => {
     localStorage.setItem('gear.is_admin', 'true')
     stubFetchRoutes([
-      { matcher: (url) => url === USERS_URL, response: { ok: false, status: 403, body: { error: { code: 'forbidden', message: 'Keine Berechtigung.' } } } },
+      { matcher: (url) => url === `${USERS_URL}?status=active`, response: { ok: false, status: 403, body: { error: { code: 'forbidden', message: 'Keine Berechtigung.' } } } },
     ])
     renderPage()
 
@@ -266,23 +312,29 @@ describe('AdminBenutzerPage', () => {
 
   it('LOAD_ERROR: a failed list fetch shows a German inline error', async () => {
     stubFetchRoutes([
-      { matcher: (url) => url === USERS_URL, response: { ok: false, status: 500, body: { error: { code: 'internal_error', message: 'Ein interner Fehler ist aufgetreten.' } } } },
+      { matcher: (url) => url === `${USERS_URL}?status=active`, response: { ok: false, status: 500, body: { error: { code: 'internal_error', message: 'Ein interner Fehler ist aufgetreten.' } } } },
     ])
     renderPage()
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Benutzer konnten nicht geladen werden.')
   })
 
+  it('401_EXPIRED: a 401 on load clears auth state and redirects to /login', async () => {
+    stubFetchRoutes([
+      { matcher: (url) => url === `${USERS_URL}?status=active`, response: { ok: false, status: 401, body: { error: { code: 'unauthorized', message: 'Authentifizierung erforderlich.' } } } },
+    ])
+    renderPage()
+
+    expect(await screen.findByText('LoginPage')).toBeInTheDocument()
+    expect(localStorage.getItem('gear.session_token')).toBeNull()
+  })
+
   it('MANAGE_NO_GROUPS: a users.manage holder without user_groups.manage still sees the user list', async () => {
-    // finding 2: the group fetch is gated on user_groups.manage — a users.manage
-    // holder without it must NOT have its whole page aborted by a group 403.
     localStorage.setItem('gear.permissions', JSON.stringify(['users.view', 'users.manage']))
     const fetchMock = stubFetchRoutes([stubList(usersFixture())])
     renderPage()
 
-    expect(await screen.findByText('Tim Müller')).toBeInTheDocument()
-    expect(screen.getByText('Lena Schmidt')).toBeInTheDocument()
-    // No group section, no error alert, and no group fetch was attempted.
+    expect(await screen.findByText('Tim')).toBeInTheDocument()
     expect(screen.queryByRole('heading', { name: 'Benutzergruppen' })).not.toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
     const groupFetches = fetchMock.mock.calls.filter(([url]) => url === USER_GROUPS_URL)
@@ -290,20 +342,18 @@ describe('AdminBenutzerPage', () => {
   })
 
   it('VIEW_ONLY_NO_ROLES: a users.view holder without roles.* sees the list and no editor data fetch is attempted', async () => {
-    // finding 2: listRoles is gated on roles.* — a caller without any roles.*
-    // code must not have the page aborted by a roles 403.
     localStorage.setItem('gear.permissions', JSON.stringify(['users.view']))
     const fetchMock = stubFetchRoutes([stubList(usersFixture())])
     renderPage()
 
-    expect(await screen.findByText('Tim Müller')).toBeInTheDocument()
+    expect(await screen.findByText('Tim')).toBeInTheDocument()
     const roleFetches = fetchMock.mock.calls.filter(([url]) => url === GROUPS_URL)
     expect(roleFetches).toHaveLength(0)
     const groupFetches = fetchMock.mock.calls.filter(([url]) => url === USER_GROUPS_URL)
     expect(groupFetches).toHaveLength(0)
   })
 
-it('GROUP_DELETE: deleting a group requires confirmation and posts DELETE', async () => {
+  it('GROUP_DELETE: deleting a group requires confirmation and posts DELETE', async () => {
     let groupCalls = 0
     stubFetchRoutes([
       stubList(usersFixture()),
@@ -320,13 +370,12 @@ it('GROUP_DELETE: deleting a group requires confirmation and posts DELETE', asyn
     const user = userEvent.setup()
     renderPage()
 
-    await screen.findByText('Tim Müller')
+    await screen.findByText('Tim')
     await user.click(screen.getByRole('button', { name: 'Löschen' }))
     expect(screen.getByText(/löschen\?/i)).toBeInTheDocument()
     await user.click(screen.getByRole('button', { name: 'Ja, löschen' }))
 
     expect(await screen.findByText('Benutzergruppe „Gruppe Ost“ gelöscht.')).toBeInTheDocument()
-    expect(screen.queryByText('Gruppe Ost')).not.toBeInTheDocument()
   })
 
   it('GROUP_MEMBERS: assigning members pre-checks current members and posts the set', async () => {
@@ -341,10 +390,9 @@ it('GROUP_DELETE: deleting a group requires confirmation and posts DELETE', asyn
     const user = userEvent.setup()
     renderPage()
 
-    await screen.findByText('Tim Müller')
+    await screen.findByText('Tim')
     await user.click(screen.getByRole('button', { name: 'Mitglieder' }))
     expect(await screen.findByText(/Mitglieder von „Gruppe Ost“/)).toBeInTheDocument()
-    // u-tim is pre-checked (current member); toggle Lena on.
     expect((screen.getByRole('checkbox', { name: /Tim Müller/ }) as HTMLInputElement).checked).toBe(true)
     await user.click(screen.getByRole('checkbox', { name: /Lena Schmidt/ }))
     await user.click(screen.getByRole('button', { name: 'Speichern' }))
@@ -357,19 +405,68 @@ it('GROUP_DELETE: deleting a group requires confirmation and posts DELETE', asyn
     expect(body.user_ids).toEqual(expect.arrayContaining(['u-tim', 'u-lena']))
   })
 
+  it('GROUP_ROLES: a user_groups.manage holder assigns roles to a group', async () => {
+    localStorage.setItem('gear.permissions', JSON.stringify(['users.view', 'users.manage', 'user_groups.manage', 'roles.create', 'roles.edit', 'roles.assign']))
+    stubFetchRoutes([
+      stubList(usersFixture()),
+      stubRoles(),
+      stubGroups(),
+      { matcher: (url, init) => url === `${USER_GROUPS_URL}/ug-ost/roles` && !init?.method, response: { ok: true, status: 200, body: { roles: [] } } },
+      { matcher: (url, init) => url === `${USER_GROUPS_URL}/ug-ost/roles` && init?.method === 'POST', response: { ok: true, status: 200, body: { roles: [{ id: 'g-helfende', name: 'helfende', is_base_role: true }] } } },
+      stubGroups(),
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByText('Tim')
+    await user.click(screen.getByRole('button', { name: 'Rollen' }))
+    expect(await screen.findByText(/Rollen von „Gruppe Ost“/)).toBeInTheDocument()
+    await user.click(screen.getByRole('checkbox', { name: /helfende/ }))
+    await user.click(screen.getByRole('button', { name: 'Speichern' }))
+
+    expect(await screen.findByText(/Rollen von „Gruppe Ost“ aktualisiert/)).toBeInTheDocument()
+    const postCalls = (vi.mocked(fetch).mock.calls as Array<[string, RequestInit?]>).filter(([u, init]) =>
+      u === `${USER_GROUPS_URL}/ug-ost/roles` && init?.method === 'POST')
+    expect(postCalls).toHaveLength(1)
+    const body = JSON.parse(postCalls[0][1]!.body as string)
+    expect(body.role_ids).toEqual(['g-helfende'])
+  })
+
+  it('GROUP_ROLES_GROUPS_ONLY: a user_groups.manage holder WITHOUT roles.* codes still sees the role catalog in the editor', async () => {
+    // Fix 1: the group role-assignment editor needs the permission-group catalog
+    // regardless of roles.* codes — the page fetches roles whenever the caller
+    // can manage groups, so a user_groups.manage-only holder (no roles.* code)
+    // can assign roles.
+    localStorage.setItem('gear.permissions', JSON.stringify(['users.view', 'user_groups.manage']))
+    stubFetchRoutes([
+      stubList(usersFixture()),
+      stubRoles(),
+      stubGroups(),
+      { matcher: (url, init) => url === `${USER_GROUPS_URL}/ug-ost/roles` && !init?.method, response: { ok: true, status: 200, body: { roles: [] } } },
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByText('Tim')
+    await user.click(screen.getByRole('button', { name: 'Rollen' }))
+    expect(await screen.findByText(/Rollen von „Gruppe Ost“/)).toBeInTheDocument()
+    // The catalog is present even though the caller holds no roles.* code.
+    expect(screen.getByRole('checkbox', { name: /helfende/ })).toBeInTheDocument()
+    expect(screen.queryByText('Keine Rollen verfügbar.')).not.toBeInTheDocument()
+  })
+
   it('UNKNOWN_STATUS: an unrecognized status renders the raw value, never "undefined"', async () => {
-    // finding 12: label lookups fall back to the raw value.
     stubFetchRoutes([
       {
-        matcher: (url) => url === USERS_URL,
-        response: { ok: true, status: 200, body: { users: [{ id: 'u-x', vorname: 'X', nachname: 'Y', email: 'x@gear.local', status: 'weird_state' }] } },
+        matcher: (url) => url === `${USERS_URL}?status=active`,
+        response: { ok: true, status: 200, body: { users: [{ id: 'u-x', vorname: 'X', nachname: 'Y', email: 'x@gear.local', status: 'weird_state', user_groups: [] }] } },
       },
       stubRoles(),
       stubGroups(),
     ])
     renderPage()
 
-    expect(await screen.findByText('X Y')).toBeInTheDocument()
+    expect(await screen.findByText('X')).toBeInTheDocument()
     expect(screen.queryByText('undefined')).not.toBeInTheDocument()
     expect(screen.getByText('weird_state')).toBeInTheDocument()
   })

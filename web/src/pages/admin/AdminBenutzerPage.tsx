@@ -4,12 +4,15 @@ import { Header } from '../../components/Header.tsx'
 import { AdminNav } from '../../components/AdminNav.tsx'
 import { UserEditor } from '../../components/UserEditor.tsx'
 import { UserDetail } from '../../components/UserDetail.tsx'
-import { adminForbiddenHandled, getPermissions, hasPermission } from '../../auth/authState.ts'
+import { UserTable } from '../../components/UserTable.tsx'
+import { GroupRolesEditor } from '../../components/GroupRolesEditor.tsx'
+import { adminForbiddenHandled, clearAuthState, getPermissions, hasPermission } from '../../auth/authState.ts'
 import { filteredAdminNav } from '../../auth/permissions.ts'
 import { listRoles } from '../../auth/roles.ts'
 import type { PermissionCatalogEntry, RoleGroup } from '../../auth/roles.ts'
 import { ApiError } from '../../auth/users.ts'
 import {
+  DEFAULT_USER_STATUS_FILTER,
   listUsers,
   listUserGroups,
   createUserGroup,
@@ -17,30 +20,31 @@ import {
   listUserGroupMembers,
   assignUserGroupMembers,
   deleteUserGroup,
-  userStatusLabel,
 } from '../../auth/users.ts'
-import type { AdminUserDetail, AdminUserSummary, UserGroup } from '../../auth/users.ts'
+import type { AdminUserDetail, AdminUserSummary, UserGroup, UserStatusFilter } from '../../auth/users.ts'
 import styles from './AdminBenutzerPage.module.css'
 
 type View = { kind: 'list' } | { kind: 'detail'; user: AdminUserDetail } | { kind: 'edit'; user: AdminUserDetail | null }
 
-// AdminBenutzerPage is the real "Benutzer" surface (Story 2.6, UX-DR6/UX-DR8/
-// UX-DR9): a user list with status badges (aktiv/pending/deaktiviert), a user
-// detail (roles + user groups + direct grants + qualification view), a
+// AdminBenutzerPage is the real "Benutzer" surface (Story 2.6 + Effort 2,
+// UX-DR6/UX-DR8/UX-DR9): a compact SORTABLE spreadsheet table (Vorname ·
+// Nachname · E-Mail · Status) with status filter chips (default aktiv, driving
+// ?status= on ListUsers) and inline user-group tags; a user detail (three
+// source sections + a collapsed "Alle Berechtigungen" provenance view) with an
+// editable Qualifikationen section for users.qualifications.manage holders; a
 // create/edit form and a deactivate flow with confirmation ("→ Sofort kein
-// Login"). It also manages the organisational user groups (teams, AD-12) that
-// the editor assigns — create, delete (with confirmation) and member
-// assignment.
+// Login"). It also manages the organisational user groups (teams, AD-12): a
+// member editor AND a per-group role-assignment editor (Effort 2).
 //
 // The "Neuer Benutzer"/"Bearbeiten"/"Deaktivieren" actions are gated
-// client-side on `users.manage` and the user-group actions on
-// `user_groups.manage`, matching the server's per-action codes (AD-6); the
-// server remains the source of truth. Each list fetch is gated on the caller's
-// permissions and isolated so one 403 cannot abort the user list (finding 2):
-// listUsers always runs (the page is already gated on users.*), listRoles only
-// when the caller holds any roles.* code, listUserGroups only with
-// user_groups.manage. A 403 on listUsers (revoked role) clears the cached admin
-// flag and leaves the admin module (review finding 2.1-6).
+// client-side on `users.manage`, the user-group actions on
+// `user_groups.manage`, and qualification editing on
+// `users.qualifications.manage` — matching the server's per-action codes
+// (AD-6); the server remains the source of truth. Each list fetch is gated on
+// the caller's permissions and isolated so one 403 cannot abort the user list
+// (finding 2). A 403 (revoked role) clears the cached admin flag and leaves
+// the admin module; a 401 (expired session) clears auth and redirects to
+// /login (Effort 2 I/O 401_EXPIRED).
 export function AdminBenutzerPage() {
   const navigate = useNavigate()
   const [users, setUsers] = useState<AdminUserSummary[]>([])
@@ -51,6 +55,7 @@ export function AdminBenutzerPage() {
   const [loading, setLoading] = useState(true)
   const [loadError, setLoadError] = useState('')
   const [feedback, setFeedback] = useState('')
+  const [statusFilter, setStatusFilter] = useState<UserStatusFilter>(DEFAULT_USER_STATUS_FILTER)
   const [groupName, setGroupName] = useState('')
   const [groupFeedback, setGroupFeedback] = useState('')
   const [groupBusy, setGroupBusy] = useState(false)
@@ -58,9 +63,13 @@ export function AdminBenutzerPage() {
   const [memberEditor, setMemberEditor] = useState<{ group: UserGroup; members: Set<string> } | null>(null)
   const [memberBusy, setMemberBusy] = useState(false)
   const [confirmDeleteGroup, setConfirmDeleteGroup] = useState<UserGroup | null>(null)
+  // Group role-assignment editor (Effort 2): the group being edited + its
+  // current role ids.
+  const [rolesEditor, setRolesEditor] = useState<{ group: UserGroup } | null>(null)
 
   const canManage = hasPermission('users.manage')
   const canManageGroups = hasPermission('user_groups.manage')
+  const canManageQualifications = hasPermission('users.qualifications.manage')
   const canViewRoles =
     hasPermission('roles.create') || hasPermission('roles.edit') || hasPermission('roles.assign')
 
@@ -70,7 +79,7 @@ export function AdminBenutzerPage() {
     setLoading(true)
     setLoadError('')
     try {
-      setUsers(await listUsers())
+      setUsers(await listUsers(statusFilter === 'all' ? undefined : statusFilter))
     } catch (err) {
       if (err instanceof ApiError && err.status === 403) {
         // Revocation downgrade (review finding 2.1-6): drop the admin flag and
@@ -79,22 +88,42 @@ export function AdminBenutzerPage() {
         navigate('/')
         return
       }
+      if (err instanceof ApiError && err.status === 401) {
+        // 401_EXPIRED (Effort 2): clear auth state and redirect to login.
+        clearAuthState()
+        navigate('/login', { replace: true })
+        return
+      }
       setLoadError('Benutzer konnten nicht geladen werden.')
     }
-    // Roles/catalog are only needed by the editor and require a roles.* code
-    // (finding 2): skip the fetch entirely when the caller holds none, and
-    // treat a 403 as "no roles" rather than aborting the page.
-    if (canViewRoles) {
+    // Roles/catalog are needed by BOTH the user editor (requires a roles.*
+    // code) AND the group role-assignment editor (requires only
+    // user_groups.manage — the GroupRolesEditor's checkbox list needs the
+    // catalog regardless of roles.*). So fetch roles whenever the caller can
+    // view roles OR manage groups; skip only when neither applies. A 403 is
+    // treated as "no roles" rather than aborting the page.
+    const needsRoles = canViewRoles || canManageGroups
+    if (needsRoles) {
       try {
         const roleData = await listRoles()
         setRoles(roleData.groups)
         setCatalog(roleData.available_permissions)
       } catch (err) {
-        if (err instanceof ApiError && err.status === 403) {
+        if (err instanceof ApiError && err.status === 403 && canViewRoles) {
+          // Genuine revocation: the caller legitimately held a roles.* code but
+          // the server now denies — clear the admin flag and leave the module.
           adminForbiddenHandled({ status: 403 })
           navigate('/')
           return
         }
+        if (err instanceof ApiError && err.status === 401) {
+          clearAuthState()
+          navigate('/login', { replace: true })
+          return
+        }
+        // No roles.* code (user_groups.manage-only holder): GET /groups is
+        // server-denied, which is expected — the group editor simply has no
+        // catalog to offer. Never log the caller out for an expected 403.
         setRoles([])
         setCatalog([])
       }
@@ -113,16 +142,20 @@ export function AdminBenutzerPage() {
           navigate('/')
           return
         }
+        if (err instanceof ApiError && err.status === 401) {
+          clearAuthState()
+          navigate('/login', { replace: true })
+          return
+        }
         setUserGroups([])
       }
     } else {
       setUserGroups([])
     }
     setLoading(false)
-  }, [canViewRoles, canManageGroups, navigate])
+  }, [canViewRoles, canManageGroups, navigate, statusFilter])
 
-  // finding 9: one load() used by both mount and the action handlers. The
-// initial call is deferred so the effect's synchronous scope performs no
+  // finding 9: one load() used by both mount and the action handlers. The// initial call is deferred so the effect's synchronous scope performs no
 // setState (react-hooks/set-state-in-effect); loading defaults to true and
 // load() resets the states on every subsequent invocation.
   useEffect(() => {
@@ -152,8 +185,46 @@ export function AdminBenutzerPage() {
         navigate('/')
         return
       }
+      if (err instanceof ApiError && err.status === 401) {
+        clearAuthState()
+        navigate('/login', { replace: true })
+        return
+      }
       setLoadError('Der Benutzer konnte nicht geladen werden.')
     }
+  }
+
+  // refreshDetail re-fetches the currently open user detail (Effort 2): after a
+  // qualification assign/revoke/expiry write, so the view stays open and the
+  // assignment/status is refreshed in place.
+  async function refreshDetail() {
+    if (view.kind !== 'detail') return
+    try {
+      const detail = await getUserDetail(view.user.id)
+      setView({ kind: 'detail', user: detail })
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 403) {
+        adminForbiddenHandled({ status: 403 })
+        navigate('/')
+        return
+      }
+      if (err instanceof ApiError && err.status === 401) {
+        clearAuthState()
+        navigate('/login', { replace: true })
+        return
+      }
+      setLoadError('Der Benutzer konnte nicht neu geladen werden.')
+    }
+  }
+
+  function handleUnauthorized() {
+    clearAuthState()
+    navigate('/login', { replace: true })
+  }
+
+  function handleFilterChange(filter: UserStatusFilter) {
+    setStatusFilter(filter)
+    setFeedback('')
   }
 
   function backToList() {
@@ -204,7 +275,10 @@ export function AdminBenutzerPage() {
   }
 
   // finding 6: open the member editor for a group, pre-checking current members.
+  // Opening one overlay closes the others (they are mutually exclusive).
   async function openMemberEditor(group: UserGroup) {
+    setRolesEditor(null)
+    setConfirmDeleteGroup(null)
     setMemberBusy(true)
     setGroupFeedback('')
     try {
@@ -270,10 +344,29 @@ export function AdminBenutzerPage() {
         handleForbidden()
         return
       }
+      if (err instanceof ApiError && err.status === 401) {
+        handleUnauthorized()
+        return
+      }
       setGroupFeedback(err instanceof ApiError && err.message ? err.message : 'Die Benutzergruppe konnte nicht gelöscht werden.')
     } finally {
       setGroupBusy(false)
     }
+  }
+
+  // Effort 2: open the role-assignment editor for a group. Opening one overlay
+  // closes the others (they are mutually exclusive).
+  function openRolesEditor(group: UserGroup) {
+    setMemberEditor(null)
+    setConfirmDeleteGroup(null)
+    setRolesEditor({ group })
+    setGroupFeedback('')
+  }
+
+  function handleGroupRolesSaved(message: string) {
+    setGroupFeedback(message)
+    setRolesEditor(null)
+    void load()
   }
 
   return (
@@ -313,10 +406,13 @@ export function AdminBenutzerPage() {
             <UserDetail
               user={view.user}
               canManage={canManage}
+              canManageQualifications={canManageQualifications}
               onEdit={() => openEdit(view.user)}
               onBack={backToList}
+              onRefreshDetail={() => void refreshDetail()}
               onDeactivated={handleDeactivated}
               onForbidden={handleForbidden}
+              onUnauthorized={handleUnauthorized}
             />
           ) : loading ? (
             <div className={styles.skeleton} aria-busy="true" aria-label="Benutzer werden geladen">
@@ -333,36 +429,12 @@ export function AdminBenutzerPage() {
                 )}
               </div>
 
-              {users.length === 0 ? (
-                <div className={styles.empty}>
-                  <p>Noch keine Benutzer vorhanden.</p>
-                </div>
-              ) : (
-                <ul className={styles.list}>
-                  {users.map((user) => (
-                    <li key={user.id} className={styles.row}>
-                      <button type="button" className={styles.rowMain} onClick={() => void openDetail(user)}>
-                        <span className={styles.userName}>
-                          {user.vorname} {user.nachname}
-                        </span>
-                        <span className={styles.userEmail}>{user.email}</span>
-                      </button>
-                      <div className={styles.rowActions}>
-                        <span className={`${styles.statusBadge} ${styles[`status-${user.status}`]}`}>
-                          {userStatusLabel(user.status)}
-                        </span>
-                        <button
-                          type="button"
-                          className={styles.editButton}
-                          onClick={() => void openDetail(user)}
-                        >
-                          Öffnen
-                        </button>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-              )}
+              <UserTable
+                users={users}
+                selectedFilter={statusFilter}
+                onSelectFilter={handleFilterChange}
+                onOpenUser={(user) => void openDetail(user)}
+              />
 
               {canManageGroups && (
                 <section aria-label="Benutzergruppen" className={styles.groupsSection}>
@@ -393,8 +465,19 @@ export function AdminBenutzerPage() {
                           </button>
                           <button
                             type="button"
+                            className={styles.groupActionButton}
+                            onClick={() => openRolesEditor(group)}
+                          >
+                            Rollen
+                          </button>
+                          <button
+                            type="button"
                             className={styles.groupDeleteButton}
-                            onClick={() => setConfirmDeleteGroup(group)}
+                            onClick={() => {
+                              setMemberEditor(null)
+                              setRolesEditor(null)
+                              setConfirmDeleteGroup(group)
+                            }}
                           >
                             Löschen
                           </button>
@@ -402,6 +485,9 @@ export function AdminBenutzerPage() {
                       </li>
                     ))}
                   </ul>
+                  {userGroups.length === 0 && (
+                    <p className={styles.emptyNote}>Noch keine Benutzergruppen.</p>
+                  )}
 
                   {confirmDeleteGroup && (
                     <div className={styles.confirmBox} role="alert">
@@ -464,6 +550,18 @@ export function AdminBenutzerPage() {
                         </button>
                       </div>
                     </div>
+                  )}
+
+                  {rolesEditor && (
+                    <GroupRolesEditor
+                      groupId={rolesEditor.group.id}
+                      groupName={rolesEditor.group.name}
+                      roles={roles}
+                      onSaved={handleGroupRolesSaved}
+                      onForbidden={handleForbidden}
+                      onUnauthorized={handleUnauthorized}
+                      onCancel={() => setRolesEditor(null)}
+                    />
                   )}
 
                   <div className={styles.groupForm}>
