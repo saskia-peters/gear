@@ -1120,6 +1120,23 @@ func (m *mockRepo) DeleteUserGroup(_ context.Context, groupID string) error {
 	return nil
 }
 
+// ReplaceUserGroupMemberships replaces the organisational user-group set of a
+// user (Effort 2, user-detail assignment). Unknown user → ErrAdminUserNotFound;
+// unknown group → ErrAdminUserUnknownUserGroup.
+func (m *mockRepo) ReplaceUserGroupMemberships(_ context.Context, userID string, groupIDs []string) (*User, error) {
+	u := m.userByID(userID)
+	if u == nil {
+		return nil, ErrAdminUserNotFound
+	}
+	for _, gid := range groupIDs {
+		if m.userGroups[gid] == nil {
+			return nil, ErrAdminUserUnknownUserGroup
+		}
+	}
+	m.userGroupMembers[userID] = append([]string(nil), groupIDs...)
+	return u, nil
+}
+
 // ListQualificationVocabulary returns every qualification, ordered by name
 // (Story 2.7). The status indicator is derived by the core.
 func (m *mockRepo) ListQualificationVocabulary(_ context.Context) ([]*Qualification, error) {

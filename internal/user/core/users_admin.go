@@ -359,6 +359,9 @@ const (
 	MsgUserGroupMembersUpdated = "Mitglieder der Benutzergruppe aktualisiert."
 	// MsgUserGroupDeleted confirms a successful user-group deletion.
 	MsgUserGroupDeleted = "Benutzergruppe gelöscht."
+	// MsgUserGroupsUpdated confirms a successful user↔user-group membership
+	// change on the user detail (Effort 2).
+	MsgUserGroupsUpdated = "Benutzergruppen aktualisiert. Änderungen gelten ab sofort."
 	// MsgUserGroupMemberUnknown is the uniform 400 message for an unknown
 	// assigned member.
 	MsgUserGroupMemberUnknown = "Eine ausgewählte Person ist ungültig."
@@ -774,6 +777,55 @@ func (s *Service) AssignUserGroupMembers(ctx context.Context, actor *User, group
 	s.log().Info("user group members assigned", "actor", actor.Email, "group", group.Name, "members", len(userIDs))
 
 	return group, nil
+}
+
+// ListUserGroupMembers returns the current member user ids of an organisational
+// user group, ordered by id (Story 2.6). Drives the group-member editor's
+// pre-checked set; the assignment endpoint replaces this set atomically. An
+// unknown group maps to ErrUserGroupNotFound → 404. Gated by
+// `user_groups.manage` (defense-in-depth).
+// AssignUserGroups replaces the organisational user-group set of a user from
+// the USER detail (Effort 2): delete-then-insert, atomic, so the user's group
+// memberships match the checkboxes exactly. An unknown user maps to
+// ErrAdminUserNotFound → 404; an unknown group id maps to
+// ErrAdminUserUnknownUserGroup → 400. Gated by `user_groups.manage`
+// (defense-in-depth). Audited (NFR-O1). Membership grants no permission by
+// itself (AD-12), but a team may hold roles (Spec 2.9) whose permissions the
+// user then inherits — so the change can affect access on the next request.
+func (s *Service) AssignUserGroups(ctx context.Context, actor *User, userID string, groupIDs []string) (*AdminUserWriteResult, error) {
+	if actor == nil {
+		return nil, ErrInvalidCredentials
+	}
+	if actor.State != StateActive {
+		return nil, ErrForbidden
+	}
+	if err := s.requireUserGroupsManagePermission(ctx, actor); err != nil {
+		return nil, err
+	}
+
+	groupIDs = dedupeStrings(groupIDs)
+
+	user, err := s.repo.ReplaceUserGroupMemberships(ctx, userID, groupIDs)
+	if err != nil {
+		if errors.Is(err, ErrAdminUserNotFound) {
+			return nil, ErrAdminUserNotFound
+		}
+		if errors.Is(err, ErrAdminUserUnknownUserGroup) {
+			return nil, ErrAdminUserUnknownUserGroup
+		}
+		return nil, fmt.Errorf("user core: failed to replace user group memberships: %w", err)
+	}
+
+	if err := s.repo.InsertAuditEvent(ctx, actor.ID, AuditOperationUserGroupAssign, fmt.Sprintf("target=%s groups=%d", user.Email, len(groupIDs)), AuditSeverityNormal); err != nil {
+		s.log().Warn("user group memberships assign audit write failed", "error", err)
+	}
+	s.log().Info("user group memberships assigned", "actor", actor.Email, "target", user.Email, "groups", len(groupIDs))
+
+	detail, err := s.GetUserDetail(ctx, actor, user.ID)
+	if err != nil {
+		return nil, fmt.Errorf("user core: failed to reload user detail after group change: %w", err)
+	}
+	return &AdminUserWriteResult{Message: MsgUserGroupsUpdated, User: detail}, nil
 }
 
 // ListUserGroupMembers returns the current member user ids of an organisational

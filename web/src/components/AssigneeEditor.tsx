@@ -97,6 +97,16 @@ export function AssigneeEditor({ qualification, users, assignees, onSaved, onCan
         Wähle die Personen, die diese Qualifikation besitzen. Gespeicherte Änderungen gelten sofort.
       </p>
 
+      {/* Sticky action bar (Effort 2): always visible at the top. */}
+      <div className={styles.stickyActions}>
+        <button type="submit" className={styles.saveButton} disabled={busy}>
+          {busy ? 'Wird gespeichert...' : 'Speichern'}
+        </button>
+        <button type="button" className={styles.cancelButton} onClick={onCancel} disabled={busy}>
+          Abbrechen
+        </button>
+      </div>
+
       {feedback && (
         <p
           role={feedback.kind === 'error' ? 'alert' : 'status'}
@@ -130,15 +140,6 @@ export function AssigneeEditor({ qualification, users, assignees, onSaved, onCan
           </ul>
         </fieldset>
       )}
-
-      <div className={styles.actions}>
-        <button type="submit" className={styles.saveButton} disabled={busy}>
-          {busy ? 'Wird gespeichert...' : 'Speichern'}
-        </button>
-        <button type="button" className={styles.cancelButton} onClick={onCancel} disabled={busy}>
-          Abbrechen
-        </button>
-      </div>
     </form>
   )
 }

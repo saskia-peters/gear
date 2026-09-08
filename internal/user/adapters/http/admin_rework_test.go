@@ -345,6 +345,45 @@ func TestAssignUserQualificationHandlerDateOnly(t *testing.T) {
 	}
 }
 
+func TestAssignUserGroupsHandlerOK(t *testing.T) {
+	// Effort 2: PUT /users/{id}/groups replaces a user's group set → 200 with
+	// the refreshed detail + German message.
+	svc := &mockService{
+		assignUserGroupsFunc: func(_ context.Context, _ *core.User, userID string, groupIDs []string) (*core.AdminUserWriteResult, error) {
+			return &core.AdminUserWriteResult{Message: core.MsgUserGroupsUpdated, User: &core.AdminUserDetail{ID: userID, UserGroups: []core.UserGroupRef{{ID: groupIDs[0], Name: "Gruppe Ost"}}}}, nil
+		},
+	}
+	svc.resolvePermissionFunc = func(_ context.Context, _ *core.User) ([]string, error) {
+		return adminReworkPerms(), nil
+	}
+	h := newAdminReworkSurface(t, svc, &stubValidator{})
+
+	rec := doAdminUsers(http.MethodPut, "/users/u-helfende/groups", "token", []byte(`{"user_group_ids":["ug-ost"]}`), h)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestAssignUserGroupsHandlerForbidden(t *testing.T) {
+	// Effort 2: a caller without user_groups.manage (but with users.view +
+	// users.qualifications.manage — the mount admits them) is denied by the
+	// core defense-in-depth → 403.
+	svc := &mockService{
+		assignUserGroupsFunc: func(_ context.Context, _ *core.User, _ string, _ []string) (*core.AdminUserWriteResult, error) {
+			return nil, core.ErrForbidden
+		},
+	}
+	svc.resolvePermissionFunc = func(_ context.Context, _ *core.User) ([]string, error) {
+		return []string{"users.view", "users.qualifications.manage"}, nil
+	}
+	h := newAdminReworkSurface(t, svc, &stubValidator{})
+
+	rec := doAdminUsers(http.MethodPut, "/users/u-helfende/groups", "token", []byte(`{"user_group_ids":["ug-ost"]}`), h)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+}
+
 func TestListUsersStatusFilterUnauthorizedMount(t *testing.T) {
 	// The users sub-mount also opens to `users.qualifications.manage` holders
 	// (Spec 2.9): a fuehrende/schirrmeister (users.view + the new code, no

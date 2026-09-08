@@ -55,6 +55,7 @@ type mockService struct {
 	listUserGroupsFunc       func(ctx context.Context, actor *core.User) ([]*core.UserGroup, error)
 	createUserGroupFunc      func(ctx context.Context, actor *core.User, input core.CreateUserGroupInput) (*core.UserGroup, error)
 	assignUserGroupFunc      func(ctx context.Context, actor *core.User, groupID string, userIDs []string) (*core.UserGroup, error)
+	assignUserGroupsFunc     func(ctx context.Context, actor *core.User, userID string, groupIDs []string) (*core.AdminUserWriteResult, error)
 	listUserGroupMembersFunc func(ctx context.Context, actor *core.User, groupID string) ([]string, error)
 	deleteUserGroupFunc      func(ctx context.Context, actor *core.User, groupID string) error
 	listQualificationsFunc   func(ctx context.Context, actor *core.User) (*core.QualificationListResult, error)
@@ -327,6 +328,13 @@ func (m *mockService) AssignUserGroupMembers(ctx context.Context, actor *core.Us
 		return m.assignUserGroupFunc(ctx, actor, groupID, userIDs)
 	}
 	return &core.UserGroup{ID: groupID}, nil
+}
+
+func (m *mockService) AssignUserGroups(ctx context.Context, actor *core.User, userID string, groupIDs []string) (*core.AdminUserWriteResult, error) {
+	if m.assignUserGroupsFunc != nil {
+		return m.assignUserGroupsFunc(ctx, actor, userID, groupIDs)
+	}
+	return &core.AdminUserWriteResult{Message: core.MsgUserGroupsUpdated, User: &core.AdminUserDetail{ID: userID, UserGroups: []core.UserGroupRef{}}}, nil
 }
 
 func (m *mockService) ListUserGroupMembers(ctx context.Context, actor *core.User, groupID string) ([]string, error) {
@@ -1891,6 +1899,9 @@ func (r *changePasswordRepo) AssignUserGroupMembers(_ context.Context, _ string,
 }
 func (r *changePasswordRepo) ListUserGroupMembers(_ context.Context, _ string) ([]string, error) { return nil, nil }
 func (r *changePasswordRepo) DeleteUserGroup(_ context.Context, _ string) error                { return nil }
+func (r *changePasswordRepo) ReplaceUserGroupMemberships(_ context.Context, _ string, _ []string) (*core.User, error) {
+	return &core.User{ID: "u-1", Email: "a@gear.local", State: core.StateActive}, nil
+}
 func (r *changePasswordRepo) ListQualificationVocabulary(_ context.Context) ([]*core.Qualification, error) {
 	return nil, nil
 }

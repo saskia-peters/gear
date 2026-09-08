@@ -60,6 +60,9 @@ func (h *Handler) AdminRoutes() http.Handler {
 	users.Get("/{userID}", h.GetAdminUserDetail)
 	users.Put("/{userID}", h.UpdateAdminUser)
 	users.Post("/{userID}/deactivate", h.DeactivateAdminUser)
+	// User↔user-group membership from the user detail (Effort 2): replace a
+	// user's organisational group set, gated by `user_groups.manage`.
+	users.Put("/{userID}/groups", h.AssignUserGroupsHandler)
 	// Per-user qualification assignment (Spec 2.9): gated by
 	// `users.qualifications.manage` — fuehrende/schirrmeister/admin assign,
 	// revoke, and edit a user's per-qualification valid-until here.

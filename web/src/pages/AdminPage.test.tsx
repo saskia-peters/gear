@@ -188,4 +188,29 @@ describe('AdminPage', () => {
       screen.getByRole('link', { name: 'Dual-Admin-Wiederherstellung' }),
     ).toHaveAttribute('href', '/admin/recovery')
   })
+
+  it('GROUPS_CARD: a "Benutzergruppen" card is shown to user_groups.manage holders and links to the Benutzer surface', () => {
+    localStorage.clear()
+    seedPermissions(['users.view', 'user_groups.manage'])
+    render(
+      <ThemeProvider>
+        <MemoryRouter>
+          <AdminPage />
+        </MemoryRouter>
+      </ThemeProvider>,
+    )
+    const card = screen.getByRole('link', { name: /Benutzergruppen/ })
+    expect(card).toHaveAttribute('href', '/admin/benutzer')
+    cleanup()
+    localStorage.clear()
+    seedPermissions(['users.view'])
+    render(
+      <ThemeProvider>
+        <MemoryRouter>
+          <AdminPage />
+        </MemoryRouter>
+      </ThemeProvider>,
+    )
+    expect(screen.queryByRole('link', { name: /Benutzergruppen/ })).not.toBeInTheDocument()
+  })
 })

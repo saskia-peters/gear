@@ -7,7 +7,8 @@ import {
   revokeUserQualification,
   updateUserQualificationExpiry,
 } from '../auth/users.ts'
-import type { AdminUserDetail, QualificationAssignment } from '../auth/users.ts'
+import type { AdminUserDetail, QualificationAssignment, UserGroup } from '../auth/users.ts'
+import { assignUserGroups } from '../auth/users.ts'
 import { permissionLabel } from '../auth/roles.ts'
 import { listQualifications } from '../auth/qualifications.ts'
 import type { Qualification } from '../auth/qualifications.ts'
@@ -18,9 +19,13 @@ interface UserDetailProps {
   canManage: boolean
   /** The caller holds users.qualifications.manage (fuehrende/schirrmeister/admin). */
   canManageQualifications: boolean
+  /** The caller holds user_groups.manage (admin) — the Benutzergruppen section becomes editable. */
+  canManageGroups: boolean
+  /** Every organisational user group, for the editable membership checkboxes. */
+  userGroups: UserGroup[]
   onEdit: () => void
   onBack: () => void
-  /** Re-fetches the current user detail after a qualification write so the view stays open and refreshed. */
+  /** Re-fetches the current user detail after a write so the view stays open and refreshed. */
   onRefreshDetail: () => void
   /** Invoked after a successful deactivation so the parent can refresh. */
   onDeactivated: (message: string) => void
@@ -65,6 +70,8 @@ export function UserDetail({
   user,
   canManage,
   canManageQualifications,
+  canManageGroups,
+  userGroups,
   onEdit,
   onBack,
   onRefreshDetail,
@@ -87,8 +94,51 @@ export function UserDetail({
   const [editExpiryFor, setEditExpiryFor] = useState<string | null>(null)
   const [editExpiryValue, setEditExpiryValue] = useState('')
 
+  // Editable user-group membership (Effort 2): the checkbox set mirrors the
+  // user's current groups, saved via PUT /users/{id}/groups. Gated by
+  // `user_groups.manage`.
+  const [groupIDs, setGroupIDs] = useState<Set<string>>(() => new Set(user.user_groups.map((g) => g.id)))
+  const [groupsBusy, setGroupsBusy] = useState(false)
+
   const isActive = user.status === 'active'
   const canEditQualifications = canManageQualifications && isActive
+  const canEditGroups = canManageGroups && isActive
+
+  function toggleGroup(groupID: string) {
+    setGroupIDs((prev) => {
+      const next = new Set(prev)
+      if (next.has(groupID)) {
+        next.delete(groupID)
+      } else {
+        next.add(groupID)
+      }
+      return next
+    })
+    setFeedback(null)
+  }
+
+  async function handleSaveGroups() {
+    setGroupsBusy(true)
+    setFeedback(null)
+    try {
+      const res = await assignUserGroups(user.id, [...groupIDs])
+      setFeedback({ kind: 'success', message: res.message || 'Benutzergruppen aktualisiert.' })
+      onRefreshDetail()
+    } catch (err) {
+      const status = err instanceof Error && 'status' in err ? (err as { status: number }).status : 0
+      if (status === 403) {
+        onForbidden()
+        return
+      }
+      if (status === 401) {
+        onUnauthorized()
+        return
+      }
+      setFeedback({ kind: 'error', message: err instanceof Error && err.message ? err.message : 'Die Benutzergruppen konnten nicht gespeichert werden.' })
+    } finally {
+      setGroupsBusy(false)
+    }
+  }
 
   // Load the qualification vocabulary when the section is editable. The server
   // opens GET /qualifications to any caller who can assign qualifications
@@ -281,8 +331,41 @@ export function UserDetail({
 
       <div className={styles.section}>
         <h4 className={styles.sectionTitle}>Benutzergruppen</h4>
-        <span className={styles.hint}>Organisatorische Teams (vergeben keine Rechte).</span>
-        {user.user_groups.length === 0 ? (
+        <span className={styles.hint}>
+          {canEditGroups ? 'Zugehörigkeit zu Teams bearbeiten.' : 'Organisatorische Teams (vergeben keine Rechte).'}
+        </span>
+        {canEditGroups ? (
+          <>
+            {userGroups.length === 0 ? (
+              <p className={styles.emptyNote}>Keine Benutzergruppen verfügbar.</p>
+            ) : (
+              <ul className={styles.checkList}>
+                {userGroups.map((group) => (
+                  <li key={group.id} className={styles.checkRow}>
+                    <label className={styles.checkLabel}>
+                      <input
+                        type="checkbox"
+                        className={styles.checkbox}
+                        checked={groupIDs.has(group.id)}
+                        onChange={() => toggleGroup(group.id)}
+                        disabled={groupsBusy}
+                      />
+                      <span className={styles.checkLabelText}>{group.name}</span>
+                    </label>
+                  </li>
+                ))}
+              </ul>
+            )}
+            <button
+              type="button"
+              className={styles.saveButton}
+              onClick={() => void handleSaveGroups()}
+              disabled={groupsBusy}
+            >
+              {groupsBusy ? 'Wird gespeichert...' : 'Benutzergruppen speichern'}
+            </button>
+          </>
+        ) : user.user_groups.length === 0 ? (
           <p className={styles.emptyNote}>Keinen Benutzergruppen zugeordnet.</p>
         ) : (
           <ul className={styles.badgeList}>

@@ -3,7 +3,7 @@ import { render, screen, waitFor, cleanup } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { UserDetail } from './UserDetail.tsx'
-import type { AdminUserDetail, QualificationAssignment } from '../auth/users.ts'
+import type { AdminUserDetail, QualificationAssignment, UserGroup } from '../auth/users.ts'
 
 function activeUser(): AdminUserDetail {
   return {
@@ -29,6 +29,8 @@ function renderDetail(opts?: {
   user?: AdminUserDetail
   canManage?: boolean
   canManageQualifications?: boolean
+  canManageGroups?: boolean
+  userGroups?: UserGroup[]
   onEdit?: () => void
   onBack?: () => void
   onRefreshDetail?: () => void
@@ -41,6 +43,8 @@ function renderDetail(opts?: {
       user={opts?.user ?? activeUser()}
       canManage={opts?.canManage ?? true}
       canManageQualifications={opts?.canManageQualifications ?? false}
+      canManageGroups={opts?.canManageGroups ?? false}
+      userGroups={opts?.userGroups ?? []}
       onEdit={opts?.onEdit ?? (() => {})}
       onBack={opts?.onBack ?? (() => {})}
       onRefreshDetail={opts?.onRefreshDetail ?? (() => {})}
@@ -283,5 +287,28 @@ describe('UserDetail', () => {
     renderDetail({ canManageQualifications: true })
 
     expect(await screen.findByText(/Die Auswahlliste ist nicht verfügbar/)).toBeInTheDocument()
+  })
+
+  it('GROUPS_EDIT: a user_groups.manage holder can change the user\'s group memberships and save', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ message: 'Benutzergruppen aktualisiert. Änderungen gelten ab sofort.', user: { id: 'u-tim', user_groups: [{ id: 'ug-ost', name: 'Gruppe Ost' }] } }),
+    }))
+    const user = userEvent.setup()
+    const onRefreshDetail = vi.fn()
+    renderDetail({ canManageGroups: true, userGroups: [{ id: 'ug-ost', name: 'Gruppe Ost' }, { id: 'ug-west', name: 'Gruppe West' }], onRefreshDetail })
+
+    // The editable checkbox list appears (not just badges).
+    await user.click(screen.getByRole('button', { name: 'Benutzergruppen speichern' }))
+    await waitFor(() => expect(onRefreshDetail).toHaveBeenCalled())
+    const fetchMock = vi.mocked(fetch)
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/admin/users/u-tim/groups', expect.objectContaining({ method: 'PUT' }))
+  })
+
+  it('GROUPS_READONLY: without user_groups.manage the section is read-only badges', () => {
+    renderDetail({ canManageGroups: false, userGroups: [{ id: 'ug-ost', name: 'Gruppe Ost' }] })
+    expect(screen.queryByRole('button', { name: 'Benutzergruppen speichern' })).not.toBeInTheDocument()
+    expect(screen.getByText('Gruppe Ost')).toBeInTheDocument()
   })
 })

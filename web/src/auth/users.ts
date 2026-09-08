@@ -263,6 +263,16 @@ export async function assignUserGroupMembers(groupId: string, userIds: string[])
   })) as UserGroup
 }
 
+// assignUserGroups replaces a USER's organisational user-group set from the
+// user detail (Effort 2). Returns the refreshed user detail + server message.
+export async function assignUserGroups(userId: string, groupIds: string[]): Promise<AdminUserWriteResult> {
+  return (await request(`${USERS_URL}/${userId}/groups`, {
+    method: 'PUT',
+    headers: authTokenHeaders(),
+    body: JSON.stringify({ user_group_ids: groupIds }),
+  })) as AdminUserWriteResult
+}
+
 // listUserGroupMembers fetches the current member user ids of a group (finding
 // 6: drives the member editor's pre-checked set).
 export async function listUserGroupMembers(groupId: string): Promise<string[]> {

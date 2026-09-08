@@ -52,6 +52,47 @@ func (n *nullableTime) UnmarshalJSON(b []byte) error {
 // fuehrende/schirrmeister holding `users.view` + `users.qualifications.manage`
 // can assign/revoke/edit qualifications but cannot edit users or deactivate.
 
+// AssignUserGroupsHandler handles PUT /api/v1/admin/users/{userID}/groups
+// (Effort 2): it REPLACES the user's organisational user-group set atomically
+// (delete-then-insert, user-detail assignment). Gated by `user_groups.manage`
+// (defense-in-depth). Returns the refreshed user detail + German confirmation.
+func (h *Handler) AssignUserGroupsHandler(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFrom(r.Context())
+	if user == nil {
+		httpapi.WriteError(w, http.StatusUnauthorized, "unauthorized", "Authentifizierung erforderlich.")
+		return
+	}
+	userID := chi.URLParam(r, "userID")
+
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	var input struct {
+		UserGroupIDs []string `json:"user_group_ids"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&input); err != nil {
+		httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", "Ungültiges JSON-Format.")
+		return
+	}
+
+	res, err := h.service.AssignUserGroups(r.Context(), user, userID, input.UserGroupIDs)
+	if err != nil {
+		switch {
+		case errors.Is(err, core.ErrForbidden):
+			httpapi.WriteError(w, http.StatusForbidden, "forbidden", "Keine Berechtigung.")
+		case errors.Is(err, core.ErrAdminUserNotFound):
+			httpapi.WriteError(w, http.StatusNotFound, "not_found", core.MsgAdminUserNotFound)
+		case errors.Is(err, core.ErrAdminUserUnknownUserGroup):
+			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", core.MsgAdminUserUnknownUserGroup)
+		case errors.Is(err, core.ErrInvalidCredentials):
+			httpapi.WriteError(w, http.StatusUnauthorized, "unauthorized", "Authentifizierung erforderlich.")
+		default:
+			h.logger.Error("user group memberships assign failed unexpectedly", "error", err)
+			httpapi.WriteError(w, http.StatusInternalServerError, "internal_error", "Ein interner Fehler ist aufgetreten.")
+		}
+		return
+	}
+	httpapi.WriteJSON(w, http.StatusOK, res)
+}
+
 // ListUserGroupRolesHandler handles GET /api/v1/admin/user-groups/{groupID}/roles
 // (Spec 2.9): the permission groups (roles) an organisational user group grants
 // its members. Gated by `user_groups.manage` (sub-mount) + defense-in-depth.

@@ -103,6 +103,17 @@ export function UserEditor({ user, roles, userGroups, availablePermissions, onSa
     >
       <h3 className={styles.title}>{isEdit ? `Benutzer „${user!.vorname} ${user!.nachname}“ bearbeiten` : 'Neuer Benutzer'}</h3>
 
+      {/* Sticky action bar (Effort 2): always visible at the top so the user
+          never scrolls to reach Speichern/Abbrechen in a long editor. */}
+      <div className={styles.stickyActions}>
+        <button type="submit" className={styles.saveButton} disabled={busy}>
+          {busy ? 'Wird gespeichert...' : 'Speichern'}
+        </button>
+        <button type="button" className={styles.cancelButton} onClick={onCancel} disabled={busy}>
+          Abbrechen
+        </button>
+      </div>
+
       {feedback && (
         <p
           role={feedback.kind === 'error' ? 'alert' : 'status'}
@@ -247,15 +258,6 @@ export function UserEditor({ user, roles, userGroups, availablePermissions, onSa
           ))}
         </div>
       </fieldset>
-
-      <div className={styles.actions}>
-        <button type="submit" className={styles.saveButton} disabled={busy}>
-          {busy ? 'Wird gespeichert...' : 'Speichern'}
-        </button>
-        <button type="button" className={styles.cancelButton} onClick={onCancel} disabled={busy}>
-          Abbrechen
-        </button>
-      </div>
     </form>
   )
 }

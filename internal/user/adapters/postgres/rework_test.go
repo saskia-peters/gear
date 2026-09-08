@@ -188,6 +188,31 @@ func TestPostgresAdminRework(t *testing.T) {
 		t.Errorf("ReplaceUserGroupRoles(unknown group) err = %v, want ErrUserGroupNotFound", err)
 	}
 
+	// Effort 2 USER-detail group assignment: ReplaceUserGroupMemberships sets
+	// the user's group set (delete-then-insert) and the user detail reflects it.
+	replaced, err := repo.ReplaceUserGroupMemberships(ctx, member.ID, []string{group.ID})
+	if err != nil {
+		t.Fatalf("ReplaceUserGroupMemberships failed: %v", err)
+	}
+	if replaced.ID != member.ID {
+		t.Errorf("replaced user = %s, want %s", replaced.ID, member.ID)
+	}
+	detailAfter, err := repo.GetUserDetail(ctx, member.ID)
+	if err != nil {
+		t.Fatalf("GetUserDetail failed: %v", err)
+	}
+	if len(detailAfter.UserGroups) != 1 || detailAfter.UserGroups[0].ID != group.ID {
+		t.Errorf("user groups after replace = %+v, want [%s]", detailAfter.UserGroups, group.ID)
+	}
+
+	// Effort 2: an unknown user maps to 404, an unknown group to 400.
+	if _, err := repo.ReplaceUserGroupMemberships(ctx, "00000000-0000-0000-0000-000000000000", []string{group.ID}); !errors.Is(err, core.ErrAdminUserNotFound) {
+		t.Errorf("ReplaceUserGroupMemberships(unknown user) err = %v, want ErrAdminUserNotFound", err)
+	}
+	if _, err := repo.ReplaceUserGroupMemberships(ctx, member.ID, []string{"00000000-0000-0000-0000-000000000000"}); !errors.Is(err, core.ErrAdminUserUnknownUserGroup) {
+		t.Errorf("ReplaceUserGroupMemberships(unknown group) err = %v, want ErrAdminUserUnknownUserGroup", err)
+	}
+
 	// QUAL_ASSIGN_FIXED_MISSING: assigning a fixed qual without expires_at is
 	// rejected.
 	if err := repo.AssignQualificationToUser(ctx, member.ID, qual.ID, nil); !errors.Is(err, core.ErrQualificationExpiryRequired) {

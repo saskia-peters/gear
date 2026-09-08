@@ -532,6 +532,63 @@ func (r *Repository) AssignUserGroupMembers(ctx context.Context, groupID string,
 	return nil, core.ErrUserGroupNotFound
 }
 
+// ReplaceUserGroupMemberships replaces the organisational user-group set of a
+// user (Effort 2, user-detail assignment): delete-then-insert in one
+// transaction (Story 2.5 lesson — separate statements, never a data-modifying
+// CTE). An unknown user maps to core.ErrAdminUserNotFound → 404; an unknown
+// group id maps to core.ErrAdminUserUnknownUserGroup → 400. An empty set
+// removes every membership.
+func (r *Repository) ReplaceUserGroupMemberships(ctx context.Context, userID string, groupIDs []string) (*core.User, error) {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return nil, core.ErrAdminUserNotFound
+	}
+	tx, err := r.beginTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op after Commit
+
+	q := r.queries.WithTx(tx)
+
+	exists, err := q.UserExists(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+	if !exists {
+		return nil, core.ErrAdminUserNotFound
+	}
+
+	groupUUIDs, err := resolveExistingUserGroupIDs(ctx, q, groupIDs)
+	if err != nil {
+		return nil, err
+	}
+
+	if err := q.DeleteUserGroupMemberships(ctx, uid); err != nil {
+		return nil, err
+	}
+	if len(groupUUIDs) > 0 {
+		if err := q.InsertUserGroupMemberships(ctx, InsertUserGroupMembershipsParams{UserID: uid, Column2: groupUUIDs}); err != nil {
+			return nil, err
+		}
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+
+	row, err := r.queries.GetUserByID(ctx, uid)
+	if err != nil {
+		return nil, core.ErrAdminUserNotFound
+	}
+	return &core.User{
+		ID:        uuidToString(row.ID.Bytes),
+		Email:     row.Email,
+		FirstName: row.FirstName,
+		LastName:  row.LastName,
+		State:     core.UserState(row.State),
+	}, nil
+}
+
 // ListUserGroupMembers returns the current member user ids of an organisational
 // user group, ordered by id (Story 2.6). An unknown group maps to
 // core.ErrUserGroupNotFound → 404 (checked first, uniform).

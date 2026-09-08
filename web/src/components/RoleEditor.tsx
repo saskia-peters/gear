@@ -96,6 +96,16 @@ export function RoleEditor({ role, availablePermissions, onSaved, onCancel, onFo
     >
       <h3 className={styles.title}>{isEdit ? `Rolle „${role!.name}“ bearbeiten` : 'Neue Rolle'}</h3>
 
+      {/* Sticky action bar (Effort 2): always visible at the top. */}
+      <div className={styles.stickyActions}>
+        <button type="submit" className={styles.saveButton} disabled={busy}>
+          {busy ? 'Wird gespeichert...' : 'Speichern'}
+        </button>
+        <button type="button" className={styles.cancelButton} onClick={onCancel} disabled={busy}>
+          Abbrechen
+        </button>
+      </div>
+
       {feedback && (
         <p
           role={feedback.kind === 'error' ? 'alert' : 'status'}
@@ -156,15 +166,6 @@ export function RoleEditor({ role, availablePermissions, onSaved, onCancel, onFo
           ))}
         </div>
       </fieldset>
-
-      <div className={styles.actions}>
-        <button type="submit" className={styles.saveButton} disabled={busy}>
-          {busy ? 'Wird gespeichert...' : 'Speichern'}
-        </button>
-        <button type="button" className={styles.cancelButton} onClick={onCancel} disabled={busy}>
-          Abbrechen
-        </button>
-      </div>
     </form>
   )
 }

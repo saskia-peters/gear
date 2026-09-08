@@ -113,6 +113,16 @@ export function QualificationEditor({ qualification, onSaved, onCancel, onForbid
         {isEdit ? `Qualifikation „${qualification!.name}“ bearbeiten` : 'Neue Qualifikation'}
       </h3>
 
+      {/* Sticky action bar (Effort 2): always visible at the top. */}
+      <div className={styles.stickyActions}>
+        <button type="submit" className={styles.saveButton} disabled={busy}>
+          {busy ? 'Wird gespeichert...' : 'Speichern'}
+        </button>
+        <button type="button" className={styles.cancelButton} onClick={onCancel} disabled={busy}>
+          Abbrechen
+        </button>
+      </div>
+
       {feedback && (
         <p
           role={feedback.kind === 'error' ? 'alert' : 'status'}
@@ -203,15 +213,6 @@ export function QualificationEditor({ qualification, onSaved, onCancel, onForbid
           </div>
         )}
       </fieldset>
-
-      <div className={styles.actions}>
-        <button type="submit" className={styles.saveButton} disabled={busy}>
-          {busy ? 'Wird gespeichert...' : 'Speichern'}
-        </button>
-        <button type="button" className={styles.cancelButton} onClick={onCancel} disabled={busy}>
-          Abbrechen
-        </button>
-      </div>
     </form>
   )
 }

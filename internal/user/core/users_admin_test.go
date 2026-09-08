@@ -817,6 +817,69 @@ func TestAssignUserGroupMembersDedupesIDs(t *testing.T) {
 	}
 }
 
+func TestAssignUserGroupsValid(t *testing.T) {
+	// Effort 2 USER-detail group assignment: replacing a user's group set
+	// persists the memberships and returns the refreshed detail + message.
+	repo := usersAdminRepo()
+	svc := usersAdminService(t, repo)
+
+	res, err := svc.AssignUserGroups(context.Background(), adminActor(repo), "u-helfende", []string{"ug-ost"})
+	if err != nil {
+		t.Fatalf("AssignUserGroups failed: %v", err)
+	}
+	if res.Message != MsgUserGroupsUpdated {
+		t.Errorf("message = %q, want %q", res.Message, MsgUserGroupsUpdated)
+	}
+	if len(res.User.UserGroups) != 1 || res.User.UserGroups[0].ID != "ug-ost" {
+		t.Errorf("user groups = %+v, want [ug-ost]", res.User.UserGroups)
+	}
+}
+
+func TestAssignUserGroupsEmptyClears(t *testing.T) {
+	// Effort 2: an empty set removes every membership.
+	repo := usersAdminRepo()
+	svc := usersAdminService(t, repo)
+
+	res, err := svc.AssignUserGroups(context.Background(), adminActor(repo), "u-helfende", nil)
+	if err != nil {
+		t.Fatalf("AssignUserGroups(empty) failed: %v", err)
+	}
+	if len(res.User.UserGroups) != 0 {
+		t.Errorf("user groups = %+v, want none after clearing", res.User.UserGroups)
+	}
+}
+
+func TestAssignUserGroupsUnknownUser(t *testing.T) {
+	// Effort 2: an unknown user maps to the uniform 404.
+	repo := usersAdminRepo()
+	svc := usersAdminService(t, repo)
+
+	if _, err := svc.AssignUserGroups(context.Background(), adminActor(repo), "u-nope", []string{"ug-ost"}); err != ErrAdminUserNotFound {
+		t.Fatalf("err = %v, want ErrAdminUserNotFound", err)
+	}
+}
+
+func TestAssignUserGroupsUnknownGroup(t *testing.T) {
+	// Effort 2: an unknown group id maps to the uniform 400.
+	repo := usersAdminRepo()
+	svc := usersAdminService(t, repo)
+
+	if _, err := svc.AssignUserGroups(context.Background(), adminActor(repo), "u-helfende", []string{"ug-nope"}); err != ErrAdminUserUnknownUserGroup {
+		t.Fatalf("err = %v, want ErrAdminUserUnknownUserGroup", err)
+	}
+}
+
+func TestAssignUserGroupsForbidden(t *testing.T) {
+	// Effort 2: a caller without user_groups.manage is denied.
+	repo := usersAdminRepo()
+	repo.perms["u-helfende"] = []string{"users.view"}
+	svc := usersAdminService(t, repo)
+
+	if _, err := svc.AssignUserGroups(context.Background(), repo.users["helfende@gear.local"], "u-helfende", []string{"ug-ost"}); err != ErrForbidden {
+		t.Fatalf("err = %v, want ErrForbidden", err)
+	}
+}
+
 func TestListUserGroupMembersValid(t *testing.T) {
 	// GROUP_MEMBERS_LIST: the current member ids of a group are returned.
 	repo := usersAdminRepo()

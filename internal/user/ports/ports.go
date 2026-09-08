@@ -114,6 +114,10 @@ type Service interface {
 	ListUserGroups(ctx context.Context, actor *core.User) ([]*core.UserGroup, error)
 	CreateUserGroup(ctx context.Context, actor *core.User, input core.CreateUserGroupInput) (*core.UserGroup, error)
 	AssignUserGroupMembers(ctx context.Context, actor *core.User, groupID string, userIDs []string) (*core.UserGroup, error)
+	// AssignUserGroups replaces the organisational user-group set of a user
+	// from the USER detail (Effort 2), returning the refreshed user detail.
+	// Gated by `user_groups.manage` (defense-in-depth).
+	AssignUserGroups(ctx context.Context, actor *core.User, userID string, groupIDs []string) (*core.AdminUserWriteResult, error)
 	ListUserGroupMembers(ctx context.Context, actor *core.User, groupID string) ([]string, error)
 	DeleteUserGroup(ctx context.Context, actor *core.User, groupID string) error
 	// User-group ROLE assignment (Spec 2.9, AD-12): an organisational user group
@@ -203,6 +207,7 @@ type Repository interface {
 	ListUserGroups(ctx context.Context) ([]*core.UserGroup, error)
 	CreateUserGroup(ctx context.Context, name, description string) (*core.UserGroup, error)
 	AssignUserGroupMembers(ctx context.Context, groupID string, userIDs []string) (*core.UserGroup, error)
+	ReplaceUserGroupMemberships(ctx context.Context, userID string, groupIDs []string) (*core.User, error)
 	ListUserGroupMembers(ctx context.Context, groupID string) ([]string, error)
 	DeleteUserGroup(ctx context.Context, groupID string) error
 	// User-group ROLE persistence (Spec 2.9): ListUserGroupRoles returns the

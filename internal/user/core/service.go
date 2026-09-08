@@ -128,6 +128,11 @@ type Repository interface {
 	AssignUserGroupMembers(ctx context.Context, groupID string, userIDs []string) (*UserGroup, error)
 	ListUserGroupMembers(ctx context.Context, groupID string) ([]string, error)
 	DeleteUserGroup(ctx context.Context, groupID string) error
+	// ReplaceUserGroupMemberships replaces the organisational user-group set of
+	// a user from the USER detail (Effort 2) — delete-then-insert in one
+	// transaction (unknown user → ErrAdminUserNotFound, unknown group →
+	// ErrAdminUserUnknownUserGroup).
+	ReplaceUserGroupMemberships(ctx context.Context, userID string, groupIDs []string) (*User, error)
 	// Qualification Management persistence (Story 2.7, AD-7/FR-22):
 	// ListQualificationVocabulary returns the full qualification vocabulary
 	// (reusing the Story 2.6 ListQualifications query); CreateQualification/

@@ -407,6 +407,8 @@ export function AdminBenutzerPage() {
               user={view.user}
               canManage={canManage}
               canManageQualifications={canManageQualifications}
+              canManageGroups={canManageGroups}
+              userGroups={userGroups}
               onEdit={() => openEdit(view.user)}
               onBack={backToList}
               onRefreshDetail={() => void refreshDetail()}
