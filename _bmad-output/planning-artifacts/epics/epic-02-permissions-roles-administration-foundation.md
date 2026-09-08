@@ -240,3 +240,59 @@ So that a user locked out while SMTP is unconfigured can regain access.
 **Given** I generate an OTP,
 **When** the action completes,
 **Then** it is audited with actor, timestamp, and target user (NFR-O1).
+
+### Story 2.9: Admin Rework Effort 1 — Model & Backend
+
+As an admin,
+I want the permission and qualification model reworked so user-groups can grant access and qualifications carry a per-user valid-until,
+So that roles can be inherited via a team and fuehrende/schirrmeister can manage qualifications.
+
+**Acceptance Criteria:**
+
+**Given** the additive permission model,
+**When** a user's permission set is resolved,
+**Then** it is the union of individual roles, roles inherited via user-groups, and direct grants (no precedence, no subtraction), live per request (AD-12/FR-21).
+
+**Given** a user-group with assigned roles,
+**When** a user belongs to it,
+**Then** they inherit those roles' permissions immediately; removing a role from the group revokes it on the next request (FR-21).
+
+**Given** I hold `users.qualifications.manage`,
+**When** I assign a qualification to a user,
+**Then** fixed-validity qualifications require a per-user `expires_at` (400 if missing) while "unbegrenzt gültig" ones need none and never expire (Human decision A).
+
+**Given** fuehrende/schirrmeister/admin,
+**When** they open the user directory,
+**Then** they see it read-only (`users.view`) and can assign/revoke qualifications and edit per-user valid-until (`users.qualifications.manage`) (Spec 2.9).
+
+**Given** a user detail fetch,
+**When** the response is returned,
+**Then** it includes the resolved permission set with per-permission source(s) (role/team/direct) (Spec 2.9/2.10).
+
+### Story 2.10: Admin Rework Effort 2 — Spreadsheet & UI
+
+As an admin,
+I want the admin UI reworked into a spreadsheet-style user list with status filtering, provenance, and in-place qualification and user-group role management,
+So that the UI reflects the reworked Effort 1 model.
+
+**Acceptance Criteria:**
+
+**Given** the "Benutzer" surface,
+**When** I open it,
+**Then** I see a compact sortable spreadsheet (Vorname · Nachname · E-Mail · Status) defaulting to active users, with filter chips (Aktiv/Pending/Deaktiviert/Alle) and user-group tags (UX-DR6/8/10).
+
+**Given** a user detail,
+**When** I open it,
+**Then** I see the three source sections plus a collapsed "Alle Berechtigungen" view where each permission shows its source in parentheses (Rolle/Benutzergruppe/Direkt) (Spec 2.10).
+
+**Given** I hold `users.qualifications.manage`,
+**When** I open a user detail,
+**Then** I can assign/revoke qualifications and set the per-user valid-until (fixed quals require it; unlimited are "Unbegrenzt"); without the code the section is read-only (Spec 2.9).
+
+**Given** I hold `user_groups.manage`,
+**When** I open the user-groups section,
+**Then** I can assign/remove roles on a group and members inherit immediately; without it the editor is hidden (Spec 2.9).
+
+**Given** any fetch fails or a 401 occurs,
+**When** the request completes,
+**Then** the UI shows a German inline error or redirects to login, never crashing (Spec 2.10).

@@ -59,7 +59,7 @@ func assertSameCodes(t *testing.T, got, want []string) {
 	}
 }
 
-// RESOLVE_ADMIN (I/O matrix): an admin-group user resolves all 21 base codes.
+// RESOLVE_ADMIN (I/O matrix): an admin-group user resolves all 22 base codes.
 func TestResolvePermissionSetAdminResolvesAll21(t *testing.T) {
 	repo := newMockRepo()
 	repo.perms["admin-1"] = basePermissionCodes()

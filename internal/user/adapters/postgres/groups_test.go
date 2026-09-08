@@ -124,7 +124,7 @@ func TestPostgresRoleGroups(t *testing.T) {
 		t.Errorf("CreateGroup(dup, case variant) err = %v, want ErrRoleNameTaken", err)
 	}
 
-	// CREATE_BAD_CODE: a code outside the 21 base series → uniform 400, nothing
+	// CREATE_BAD_CODE: a code outside the 22 base series → uniform 400, nothing
 	// created.
 	if _, err := repo.CreateGroup(ctx, "bad."+stamp, "", []string{"bogus.code"}); !errors.Is(err, core.ErrUnknownPermissionCode) {
 		t.Errorf("CreateGroup(bad code) err = %v, want ErrUnknownPermissionCode", err)

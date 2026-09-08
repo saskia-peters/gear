@@ -40,7 +40,7 @@ describe('RoleEditor', () => {
     cleanup()
   })
 
-  it('NEW: renders the 21-code additive grid as unchecked checkboxes and a name field', () => {
+  it('NEW: renders the 22-code additive grid as unchecked checkboxes and a name field', () => {
     renderEditor()
     expect(screen.getByRole('heading', { name: 'Neue Rolle' })).toBeInTheDocument()
     expect(screen.getByLabelText('Name')).toBeInTheDocument()

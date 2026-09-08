@@ -23,7 +23,7 @@ describe('AdminNav', () => {
       </MemoryRouter>,
     )
 
-    // The 7-entry list is the same either way; the caller filters. We assert
+    // The entry list is the same either way; the caller filters. We assert
     // that the passed entries are the only ones rendered — no hidden surfaces.
     expect(screen.getByRole('navigation', { name: 'Verwaltung' })).toBeInTheDocument()
     expect(screen.getAllByRole('link').map((l) => l.textContent)).toEqual(['Übersicht', 'Werkzeuge'])

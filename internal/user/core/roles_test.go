@@ -45,7 +45,7 @@ func rolesService(t *testing.T, repo *mockRepo) *Service {
 func TestListRolesValid(t *testing.T) {
 	// LIST_GROUPS + LIST_CATALOG: an admin holding a roles.* code gets every
 	// group (base-roles-first, then name) each with its permission codes, plus
-	// the 21-code catalog with German labels.
+	// the 22-code catalog with German labels.
 	repo := rolesRepo()
 	svc := rolesService(t, repo)
 
@@ -71,7 +71,7 @@ func TestListRolesValid(t *testing.T) {
 	if len(helfende.Permissions) != 2 || helfende.Permissions[0] != "dashboard.view" || helfende.Permissions[1] != "inspection.submit" {
 		t.Errorf("helfende permissions = %v, want [dashboard.view inspection.submit]", helfende.Permissions)
 	}
-	// The catalog is the full 21-code base series with German labels.
+	// The catalog is the full 22-code base series with German labels.
 	if len(res.AvailablePermissions) != len(BasePermissionCodes) {
 		t.Fatalf("catalog count = %d, want %d", len(res.AvailablePermissions), len(BasePermissionCodes))
 	}

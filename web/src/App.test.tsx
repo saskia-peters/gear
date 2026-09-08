@@ -10,7 +10,7 @@ import { Sidebar } from './components/Sidebar.tsx'
 const TOKEN_STORAGE_KEY = 'gear.session_token'
 const PERMISSIONS_KEY = 'gear.permissions'
 
-// The admin role carries all 21 base codes (migration 000010 + admin.recovery.approve
+// The admin role carries all 22 base codes (migration 000010 + admin.recovery.approve
 // from Story 1.1). A representative full set for admin-driven tests.
 const ALL_ADMIN_CODES = [
   'dashboard.view',

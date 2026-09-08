@@ -90,7 +90,7 @@ type Repository interface {
 	// permission rows atomically; UpdateGroup replaces the group's
 	// name/description AND its permission set atomically (delete-then-insert in
 	// one transaction); ListAllPermissions returns the server-authoritative
-	// 21-code catalog with raw labels (the core derives the German labels).
+	// 22-code catalog with raw labels (the core derives the German labels).
 	// CreateGroup maps a case-insensitive duplicate name to ErrRoleNameTaken;
 	// UpdateGroup additionally maps an unknown id to ErrRoleNotFound.
 	ListGroups(ctx context.Context) ([]*RoleGroup, error)

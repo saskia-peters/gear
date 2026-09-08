@@ -1,6 +1,6 @@
 // Role & Permission-Group Management data module (Story 2.5). It holds the
 // server-authoritative permission catalog types plus the three API calls
-// (list / create / update) for the "Rollen" surface. The 21-code catalog is
+// (list / create / update) for the "Rollen" surface. The 22-code catalog is
 // fetched from the backend so the SPA editor never hardcodes a stale list
 // (Design Notes spec 2.5); PERMISSION_LABELS is only a local fallback when the
 // fetch fails.
@@ -33,7 +33,7 @@ export interface RoleInput {
 
 const GROUPS_URL = '/api/v1/admin/groups'
 
-// German display labels for the 21 base codes (UX-DR4/DR8). Local fallback; the
+// German display labels for the 22 base codes (UX-DR4/DR8). Local fallback; the
 // server is authoritative for the code list and labels.
 export const PERMISSION_LABELS: Record<string, string> = {
   'dashboard.view': 'Dashboard ansehen',
@@ -60,7 +60,7 @@ export const PERMISSION_LABELS: Record<string, string> = {
   'schedules.manage': 'Dienstpläne verwalten',
 }
 
-// The full 21-code base series (AD-12). Used to sort/validate the local fallback
+// The full 22-code base series (AD-12). Used to sort/validate the local fallback
 // only; the server remains authoritative.
 export const BASE_PERMISSION_CODES: readonly string[] = [
   'dashboard.view',
@@ -92,7 +92,7 @@ export function permissionLabel(code: string): string {
   return PERMISSION_LABELS[code] ?? code
 }
 
-// fallbackCatalog builds the full 21-code catalog from the shipped local copies
+// fallbackCatalog builds the full 22-code catalog from the shipped local copies
 // (BASE_PERMISSION_CODES + PERMISSION_LABELS). It is used when the server's
 // list response omits or empties available_permissions, so the editor still
 // renders all 21 checkboxes (the save is still validated server-side).
@@ -140,7 +140,7 @@ async function request(path: string, init: RequestInit): Promise<unknown> {
 }
 
 // listRoles fetches every permission group (base roles + custom) plus the
-// server-authoritative 21-code catalog. If the server response omits or empties
+// server-authoritative 22-code catalog. If the server response omits or empties
 // the catalog, the shipped BASE_PERMISSION_CODES/PERMISSION_LABELS fallback is
 // used so the editor never renders an empty grid.
 export async function listRoles(): Promise<RoleList> {

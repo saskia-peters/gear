@@ -908,7 +908,7 @@ func validateAdminUserInput(vorname, nachname, email, status string, roleIDs, gr
 	groupIDs = dedupeStrings(groupIDs)
 	grantCodes = dedupeStrings(grantCodes)
 	// Additive-only (FR-6/AD-12): a direct grant may only ever carry one of the
-	// 21 base codes — an unknown code is a uniform 400 (nothing is stored).
+	// 22 base codes — an unknown code is a uniform 400 (nothing is stored).
 	for _, c := range grantCodes {
 		if !basePermissionSet[c] {
 			return "", "", "", "", nil, nil, nil, ErrUnknownPermissionCode

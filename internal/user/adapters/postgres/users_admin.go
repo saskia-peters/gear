@@ -181,7 +181,7 @@ func (r *Repository) GetUserDetail(ctx context.Context, userID string) (*core.Ad
 // row and the three assignment sets are all-or-nothing. The email is unique
 // case-insensitively (a duplicate maps to core.ErrAdminUserEmailTaken → 409); a
 // role/user-group id that does not exist maps to core.ErrAdminUserUnknownRole /
-// ErrAdminUserUnknownUserGroup → 400; a direct-grant code outside the 21 base
+// ErrAdminUserUnknownUserGroup → 400; a direct-grant code outside the 22 base
 // series maps to core.ErrUnknownPermissionCode → 400. The state is written
 // verbatim (active or pending_approval) and the password hash stays empty
 // (credentials are provisioned out-of-band).
@@ -794,7 +794,7 @@ func resolveExistingUserIDs(ctx context.Context, q *Queries, ids []string) ([]pg
 
 // resolvePermissionIDsByCodes resolves direct-grant permission codes → row ids.
 // A code with no row maps to core.ErrUnknownPermissionCode (400); the caller
-// (core) has already verified every code is one of the 21 base codes, so a
+// (core) has already verified every code is one of the 22 base codes, so a
 // mismatch can only mean an out-of-band drift (belt-and-suspenders). An empty
 // input yields an empty set.
 func resolvePermissionIDsByCodes(ctx context.Context, q *Queries, codes []string) ([]pgtype.UUID, error) {
