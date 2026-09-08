@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Header } from '../../components/Header.tsx'
 import { AdminNav } from '../../components/AdminNav.tsx'
@@ -27,6 +27,13 @@ import styles from './AdminBenutzergruppenPage.module.css'
 // no permission, but a team may hold roles (Spec 2.9) whose permissions the
 // members inherit.
 //
+// Layout (UX): the "Neue Benutzergruppe" form sits at the top, then the group
+// list — each group with "Bearbeiten" (opens the group detail) and "Löschen".
+// The detail first shows the CURRENT members as a list, each with a small
+// "Von Gruppe entfernen" button, and a "Benutzer hinzufügen" button at the top
+// that reveals the AVAILABLE users (with their emails) to add. Team-role
+// assignment stays reachable from the detail via the roles editor.
+//
 // The whole page is gated on `user_groups.manage` (matching the server
 // sub-mount, AD-6); the server remains the source of truth. A 403 (revoked
 // role) clears the cached admin flag and leaves the admin module (review
@@ -41,12 +48,32 @@ export function AdminBenutzergruppenPage() {
   const [groupName, setGroupName] = useState('')
   const [groupFeedback, setGroupFeedback] = useState('')
   const [groupBusy, setGroupBusy] = useState(false)
-  // Group member editor + delete confirmation state (findings 5 & 6).
-  const [memberEditor, setMemberEditor] = useState<{ group: UserGroup; members: Set<string> } | null>(null)
+  // Detail view: the group being inspected + its current member ids.
+  const [detailGroup, setDetailGroup] = useState<UserGroup | null>(null)
+  const [memberIds, setMemberIds] = useState<string[]>([])
   const [memberBusy, setMemberBusy] = useState(false)
+  const [showAddUsers, setShowAddUsers] = useState(false)
+  const [showRolesEditor, setShowRolesEditor] = useState(false)
   const [confirmDeleteGroup, setConfirmDeleteGroup] = useState<UserGroup | null>(null)
-  // Group role-assignment editor (Effort 2): the group being edited.
-  const [rolesEditor, setRolesEditor] = useState<{ group: UserGroup } | null>(null)
+
+  // Resolve member ids to user objects (name + email) for display. A member not
+  // present in the fetched user list (e.g. the caller lacks users.view) falls
+  // back to the raw id so the member still shows up.
+  const usersById = useMemo(() => {
+    const map = new Map<string, AdminUserSummary>()
+    for (const u of users) map.set(u.id, u)
+    return map
+  }, [users])
+
+  const currentMembers = useMemo(
+    () => memberIds.map((id) => usersById.get(id) ?? { id, vorname: id, nachname: '', email: '', status: 'active' as const }),
+    [memberIds, usersById],
+  )
+
+  const availableUsers = useMemo(() => {
+    const memberSet = new Set(memberIds)
+    return users.filter((u) => !memberSet.has(u.id))
+  }, [users, memberIds])
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -67,10 +94,10 @@ export function AdminBenutzergruppenPage() {
       }
       setLoadError('Benutzergruppen konnten nicht geladen werden.')
     }
-    // The member editor needs the full user list to offer checkboxes. The
-    // caller holds user_groups.manage but not necessarily users.view, so a 403
-    // here means "no directory access" — the member editor simply has no users
-    // to offer (the group list itself still works). Never log the caller out.
+    // The detail's member list and the add-users list need the user directory.
+    // The caller holds user_groups.manage but not necessarily users.view, so a
+    // 403 here means "no directory access" — members fall back to ids and the
+    // add list is empty (the group list itself still works). Never log out.
     try {
       const userData = await listUsers()
       setUsers(userData)
@@ -149,16 +176,17 @@ export function AdminBenutzergruppenPage() {
     }
   }
 
-  // finding 6: open the member editor for a group, pre-checking current members.
-  // Opening one overlay closes the others (they are mutually exclusive).
-  async function openMemberEditor(group: UserGroup) {
-    setRolesEditor(null)
-    setConfirmDeleteGroup(null)
-    setMemberBusy(true)
+  // Open the detail view for a group, loading its current member ids.
+  async function openDetail(group: UserGroup) {
+    setDetailGroup(group)
+    setMemberIds([])
+    setShowAddUsers(false)
+    setShowRolesEditor(false)
     setGroupFeedback('')
+    setMemberBusy(true)
     try {
       const ids = await listUserGroupMembers(group.id)
-      setMemberEditor({ group, members: new Set(ids) })
+      setMemberIds(ids)
     } catch (err) {
       if (err instanceof ApiError && err.status === 403) {
         handleForbidden()
@@ -174,29 +202,24 @@ export function AdminBenutzergruppenPage() {
     }
   }
 
-  function toggleMember(userID: string) {
-    setMemberEditor((prev) => {
-      if (!prev) return prev
-      const next = new Set(prev.members)
-      if (next.has(userID)) {
-        next.delete(userID)
-      } else {
-        next.add(userID)
-      }
-      return { ...prev, members: next }
-    })
+  function backToList() {
+    setDetailGroup(null)
+    setMemberIds([])
+    setShowAddUsers(false)
+    setShowRolesEditor(false)
+    setGroupFeedback('')
   }
 
-  // finding 6: save the member set via the existing assign endpoint.
-  async function saveMembers() {
-    if (!memberEditor) return
+  // Add ONE user to the group via the replace-set endpoint.
+  async function addUser(user: AdminUserSummary) {
+    if (!detailGroup) return
     setMemberBusy(true)
     setGroupFeedback('')
     try {
-      await assignUserGroupMembers(memberEditor.group.id, [...memberEditor.members])
-      setGroupFeedback(`Mitglieder von „${memberEditor.group.name}“ aktualisiert.`)
-      setMemberEditor(null)
-      await load()
+      await assignUserGroupMembers(detailGroup.id, [...memberIds, user.id])
+      setGroupFeedback(`„${user.vorname} ${user.nachname}“ wurde zu „${detailGroup.name}“ hinzugefügt.`)
+      const ids = await listUserGroupMembers(detailGroup.id)
+      setMemberIds(ids)
     } catch (err) {
       if (err instanceof ApiError && err.status === 403) {
         handleForbidden()
@@ -206,10 +229,40 @@ export function AdminBenutzergruppenPage() {
         handleUnauthorized()
         return
       }
-      setGroupFeedback(err instanceof ApiError && err.message ? err.message : 'Die Mitglieder konnten nicht gespeichert werden.')
+      setGroupFeedback(err instanceof ApiError && err.message ? err.message : 'Der Benutzer konnte nicht hinzugefügt werden.')
     } finally {
       setMemberBusy(false)
     }
+  }
+
+  // Remove ONE user from the group via the replace-set endpoint.
+  async function removeUser(user: AdminUserSummary) {
+    if (!detailGroup) return
+    setMemberBusy(true)
+    setGroupFeedback('')
+    try {
+      await assignUserGroupMembers(detailGroup.id, memberIds.filter((id) => id !== user.id))
+      setGroupFeedback(`„${user.vorname} ${user.nachname}“ wurde aus „${detailGroup.name}“ entfernt.`)
+      const ids = await listUserGroupMembers(detailGroup.id)
+      setMemberIds(ids)
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 403) {
+        handleForbidden()
+        return
+      }
+      if (err instanceof ApiError && err.status === 401) {
+        handleUnauthorized()
+        return
+      }
+      setGroupFeedback(err instanceof ApiError && err.message ? err.message : 'Der Benutzer konnte nicht entfernt werden.')
+    } finally {
+      setMemberBusy(false)
+    }
+  }
+
+  function handleGroupRolesSaved(message: string) {
+    setGroupFeedback(message)
+    setShowRolesEditor(false)
   }
 
   // finding 5: delete a group after explicit confirmation.
@@ -237,91 +290,211 @@ export function AdminBenutzergruppenPage() {
     }
   }
 
-  // Effort 2: open the role-assignment editor for a group. Opening one overlay
-  // closes the others (they are mutually exclusive).
-  function openRolesEditor(group: UserGroup) {
-    setMemberEditor(null)
-    setConfirmDeleteGroup(null)
-    setRolesEditor({ group })
-    setGroupFeedback('')
-  }
-
-  function handleGroupRolesSaved(message: string) {
-    setGroupFeedback(message)
-    setRolesEditor(null)
-    void load()
-  }
-
   return (
     <div className={styles.page}>
       <Header />
       <div className={styles.body}>
         <AdminNav entries={filteredAdminNav(getPermissions())} />
         <main className={styles.main}>
-          <h2 className={styles.title}>Benutzergruppen</h2>
-          <p className={styles.description}>
-            Teams anlegen, Mitglieder zuordnen und Team-Rollen vergeben.
-          </p>
+          {detailGroup ? (
+            <>
+              <h2 className={styles.title}>{detailGroup.name}</h2>
+              <p className={styles.description}>
+                Mitglieder verwalten und Team-Rollen vergeben.
+              </p>
 
-          {loadError && (
-            <p role="alert" className={styles.feedbackError}>
-              {loadError}
-            </p>
-          )}
-          {groupFeedback && (
-            <p
-              role={groupFeedback.startsWith('Benutzergruppe') || groupFeedback.includes('Mitglieder') || groupFeedback.includes('Rollen von') ? 'status' : 'alert'}
-              className={groupFeedback.startsWith('Benutzergruppe') || groupFeedback.includes('Mitglieder') || groupFeedback.includes('Rollen von') ? styles.feedbackSuccess : styles.feedbackError}
-            >
-              {groupFeedback}
-            </p>
-          )}
+              <div className={styles.detailActions}>
+                <button type="button" className={styles.backButton} onClick={backToList}>
+                  ← Zurück zur Liste
+                </button>
+                <button
+                  type="button"
+                  className={styles.groupActionButton}
+                  onClick={() => {
+                    setShowAddUsers((v) => !v)
+                    setShowRolesEditor(false)
+                  }}
+                  disabled={memberBusy}
+                >
+                  Benutzer hinzufügen
+                </button>
+                <button
+                  type="button"
+                  className={styles.groupActionButton}
+                  onClick={() => {
+                    setShowRolesEditor((v) => !v)
+                    setShowAddUsers(false)
+                  }}
+                >
+                  Rollen
+                </button>
+              </div>
 
-          {loading ? (
+              {groupFeedback && (
+                <p
+                  role={groupFeedback.startsWith('„') ? 'status' : groupFeedback.includes('hinzugefügt') || groupFeedback.includes('entfernt') || groupFeedback.includes('Rollen von') ? 'status' : 'alert'}
+                  className={groupFeedback.startsWith('„') || groupFeedback.includes('hinzugefügt') || groupFeedback.includes('entfernt') || groupFeedback.includes('Rollen von') ? styles.feedbackSuccess : styles.feedbackError}
+                >
+                  {groupFeedback}
+                </p>
+              )}
+
+              {showRolesEditor && (
+                <GroupRolesEditor
+                  groupId={detailGroup.id}
+                  groupName={detailGroup.name}
+                  roles={roles}
+                  onSaved={handleGroupRolesSaved}
+                  onForbidden={handleForbidden}
+                  onUnauthorized={handleUnauthorized}
+                  onCancel={() => setShowRolesEditor(false)}
+                />
+              )}
+
+              {showAddUsers && (
+                <section aria-label="Benutzer hinzufügen" className={styles.addUsersSection}>
+                  <h3 className={styles.memberEditorTitle}>Verfügbare Benutzer</h3>
+                  {availableUsers.length === 0 ? (
+                    <p className={styles.emptyNote}>
+                      {users.length === 0
+                        ? 'Keine Benutzer verfügbar (kein Verzeichniszugriff oder keine Benutzer vorhanden).'
+                        : 'Alle Benutzer sind dieser Benutzergruppe bereits zugeordnet.'}
+                    </p>
+                  ) : (
+                    <ul className={styles.availableList}>
+                      {availableUsers.map((user) => (
+                        <li key={user.id} className={styles.availableRow}>
+                          <div className={styles.userInfo}>
+                            <span className={styles.userName}>
+                              {user.vorname} {user.nachname}
+                            </span>
+                            <span className={styles.userEmail}>{user.email}</span>
+                          </div>
+                          <button
+                            type="button"
+                            className={styles.smallAddButton}
+                            onClick={() => void addUser(user)}
+                            disabled={memberBusy}
+                          >
+                            Hinzufügen
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </section>
+              )}
+
+              <section aria-label="Mitglieder" className={styles.membersSection}>
+                <h3 className={styles.memberEditorTitle}>Mitglieder</h3>
+                {memberBusy && memberIds.length === 0 ? (
+                  <p className={styles.emptyNote}>Mitglieder werden geladen…</p>
+                ) : currentMembers.length === 0 ? (
+                  <p className={styles.emptyNote}>Keine Benutzer in dieser Benutzergruppe.</p>
+                ) : (
+                  <ul className={styles.memberList}>
+                    {currentMembers.map((user) => (
+                      <li key={user.id} className={styles.memberRow}>
+                        <div className={styles.userInfo}>
+                          <span className={styles.userName}>
+                            {user.vorname} {user.nachname}
+                          </span>
+                          <span className={styles.userEmail}>{user.email}</span>
+                        </div>
+                        <button
+                          type="button"
+                          className={styles.smallRemoveButton}
+                          onClick={() => void removeUser(user)}
+                          disabled={memberBusy}
+                        >
+                          Von Gruppe entfernen
+                        </button>
+                      </li>
+                    ))}
+                  </ul>
+                )}
+              </section>
+            </>
+          ) : loading ? (
             <div className={styles.skeleton} aria-busy="true" aria-label="Benutzergruppen werden geladen">
               <div className={styles.skeletonRow} aria-hidden="true" />
               <div className={styles.skeletonRow} aria-hidden="true" />
             </div>
           ) : (
             <>
+              <h2 className={styles.title}>Benutzergruppen</h2>
+              <p className={styles.description}>
+                Teams anlegen, Mitglieder zuordnen und Team-Rollen vergeben.
+              </p>
+
+              {loadError && (
+                <p role="alert" className={styles.feedbackError}>
+                  {loadError}
+                </p>
+              )}
+              {groupFeedback && (
+                <p
+                  role={groupFeedback.startsWith('Benutzergruppe') ? 'status' : 'alert'}
+                  className={groupFeedback.startsWith('Benutzergruppe') ? styles.feedbackSuccess : styles.feedbackError}
+                >
+                  {groupFeedback}
+                </p>
+              )}
+
+              <section aria-label="Neue Benutzergruppe anlegen" className={styles.groupForm}>
+                <label className={styles.label} htmlFor="group-name">
+                  Neue Benutzergruppe
+                </label>
+                <div className={styles.groupFormRow}>
+                  <input
+                    id="group-name"
+                    className={styles.input}
+                    value={groupName}
+                    onChange={(e) => {
+                      setGroupName(e.target.value)
+                      setGroupFeedback('')
+                    }}
+                    maxLength={120}
+                    placeholder="z. B. Gruppe Ost"
+                  />
+                  <button
+                    type="button"
+                    className={styles.newGroupButton}
+                    onClick={() => void handleCreateGroup()}
+                    disabled={groupBusy}
+                  >
+                    {groupBusy ? 'Wird erstellt...' : 'Erstellen'}
+                  </button>
+                </div>
+              </section>
+
               <section aria-label="Benutzergruppen" className={styles.groupsSection}>
-                <ul className={styles.groupsList}>
-                  {userGroups.map((group) => (
-                    <li key={group.id} className={styles.groupRow}>
-                      <span className={styles.groupName}>{group.name}</span>
-                      <div className={styles.groupRowActions}>
-                        <button
-                          type="button"
-                          className={styles.groupActionButton}
-                          onClick={() => void openMemberEditor(group)}
-                          disabled={memberBusy}
-                        >
-                          Mitglieder
-                        </button>
-                        <button
-                          type="button"
-                          className={styles.groupActionButton}
-                          onClick={() => openRolesEditor(group)}
-                        >
-                          Rollen
-                        </button>
-                        <button
-                          type="button"
-                          className={styles.groupDeleteButton}
-                          onClick={() => {
-                            setMemberEditor(null)
-                            setRolesEditor(null)
-                            setConfirmDeleteGroup(group)
-                          }}
-                        >
-                          Löschen
-                        </button>
-                      </div>
-                    </li>
-                  ))}
-                </ul>
-                {userGroups.length === 0 && (
+                {userGroups.length === 0 ? (
                   <p className={styles.emptyNote}>Noch keine Benutzergruppen.</p>
+                ) : (
+                  <ul className={styles.groupsList}>
+                    {userGroups.map((group) => (
+                      <li key={group.id} className={styles.groupRow}>
+                        <span className={styles.groupName}>{group.name}</span>
+                        <div className={styles.groupRowActions}>
+                          <button
+                            type="button"
+                            className={styles.groupActionButton}
+                            onClick={() => void openDetail(group)}
+                          >
+                            Bearbeiten
+                          </button>
+                          <button
+                            type="button"
+                            className={styles.groupDeleteButton}
+                            onClick={() => setConfirmDeleteGroup(group)}
+                          >
+                            Löschen
+                          </button>
+                        </div>
+                      </li>
+                    ))}
+                  </ul>
                 )}
 
                 {confirmDeleteGroup && (
@@ -344,87 +517,6 @@ export function AdminBenutzergruppenPage() {
                     </div>
                   </div>
                 )}
-
-                {memberEditor && (
-                  <div className={styles.memberEditor}>
-                    <h4 className={styles.memberEditorTitle}>
-                      Mitglieder von „{memberEditor.group.name}“
-                    </h4>
-                    {users.length === 0 ? (
-                      <p className={styles.emptyNote}>Keine Benutzer verfügbar.</p>
-                    ) : (
-                      <ul className={styles.memberList}>
-                        {users.map((user) => (
-                          <li key={user.id} className={styles.memberRow}>
-                            <label className={styles.memberLabel}>
-                              <input
-                                type="checkbox"
-                                className={styles.checkbox}
-                                checked={memberEditor.members.has(user.id)}
-                                onChange={() => toggleMember(user.id)}
-                              />
-                              <span className={styles.memberName}>
-                                {user.vorname} {user.nachname}
-                              </span>
-                            </label>
-                          </li>
-                        ))}
-                      </ul>
-                    )}
-                    <div className={styles.confirmActions}>
-                      <button type="button" className={styles.newGroupButton} onClick={() => void saveMembers()} disabled={memberBusy}>
-                        {memberBusy ? 'Wird gespeichert...' : 'Speichern'}
-                      </button>
-                      <button
-                        type="button"
-                        className={styles.cancelButton}
-                        onClick={() => setMemberEditor(null)}
-                        disabled={memberBusy}
-                      >
-                        Abbrechen
-                      </button>
-                    </div>
-                  </div>
-                )}
-
-                {rolesEditor && (
-                  <GroupRolesEditor
-                    groupId={rolesEditor.group.id}
-                    groupName={rolesEditor.group.name}
-                    roles={roles}
-                    onSaved={handleGroupRolesSaved}
-                    onForbidden={handleForbidden}
-                    onUnauthorized={handleUnauthorized}
-                    onCancel={() => setRolesEditor(null)}
-                  />
-                )}
-
-                <div className={styles.groupForm}>
-                  <label className={styles.label} htmlFor="group-name">
-                    Neue Benutzergruppe
-                  </label>
-                  <div className={styles.groupFormRow}>
-                    <input
-                      id="group-name"
-                      className={styles.input}
-                      value={groupName}
-                      onChange={(e) => {
-                        setGroupName(e.target.value)
-                        setGroupFeedback('')
-                      }}
-                      maxLength={120}
-                      placeholder="z. B. Gruppe Ost"
-                    />
-                    <button
-                      type="button"
-                      className={styles.newGroupButton}
-                      onClick={() => void handleCreateGroup()}
-                      disabled={groupBusy}
-                    >
-                      {groupBusy ? 'Wird erstellt...' : 'Erstellen'}
-                    </button>
-                  </div>
-                </div>
               </section>
             </>
           )}

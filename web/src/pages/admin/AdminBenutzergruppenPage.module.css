@@ -254,55 +254,6 @@
   cursor: not-allowed;
 }
 
-.memberEditorTitle {
-  font-size: var(--gear-font-label-size);
-  font-weight: var(--gear-font-label-weight);
-  line-height: var(--gear-font-label-line-height);
-  color: var(--gear-color-ink-primary);
-  margin: 0;
-}
-
-.memberList {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-  display: flex;
-  flex-direction: column;
-  gap: var(--gear-space-1);
-  max-height: 240px;
-  overflow-y: auto;
-}
-
-.memberRow {
-  padding: var(--gear-space-1) 0;
-}
-
-.memberLabel {
-  display: flex;
-  align-items: center;
-  gap: var(--gear-space-3);
-  min-height: 48px;
-  padding: var(--gear-space-1) var(--gear-space-2);
-  cursor: pointer;
-  border-radius: var(--gear-radius-md);
-}
-
-.memberLabel:hover {
-  background-color: var(--gear-color-surface-base);
-}
-
-.checkbox {
-  width: 24px;
-  height: 24px;
-  accent-color: var(--gear-color-brand);
-}
-
-.memberName {
-  font-size: var(--gear-font-body-size);
-  color: var(--gear-color-ink-primary);
-  line-height: var(--gear-font-body-line-height);
-}
-
 .emptyNote {
   font-size: var(--gear-font-meta-size);
   color: var(--gear-color-ink-secondary);
@@ -314,8 +265,10 @@
   display: flex;
   flex-direction: column;
   gap: var(--gear-space-2);
-  padding-top: var(--gear-space-2);
-  border-top: 1px solid var(--gear-color-border-hairline);
+  padding: var(--gear-space-4);
+  background-color: var(--gear-color-surface-raised);
+  border: 1px solid var(--gear-color-border-hairline);
+  border-radius: var(--gear-radius-md);
 }
 
 .label {
@@ -377,6 +330,179 @@
 .newGroupButton:disabled {
   opacity: 0.6;
   cursor: not-allowed;
+}
+
+/* --- Detail view (Bearbeiten) ------------------------------------------- */
+
+.detailActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gear-space-2);
+  align-items: center;
+}
+
+.backButton {
+  min-height: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--gear-space-2) var(--gear-space-3);
+  border: 1px solid var(--gear-color-border-hairline);
+  border-radius: var(--gear-radius-md);
+  background-color: transparent;
+  color: var(--gear-color-ink-primary);
+  font-family: var(--gear-font-family);
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  cursor: pointer;
+}
+
+.backButton:focus-visible {
+  outline: 2px solid var(--gear-focus-ring-color);
+  outline-offset: 2px;
+}
+
+.addUsersSection,
+.membersSection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-3);
+  padding: var(--gear-space-4);
+  background-color: var(--gear-color-surface-raised);
+  border: 1px solid var(--gear-color-border-hairline);
+  border-radius: var(--gear-radius-md);
+}
+
+.addUsersSection {
+  background-color: var(--gear-color-surface-base);
+}
+
+.availableList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-1);
+  max-height: 240px;
+  overflow-y: auto;
+}
+
+.availableRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gear-space-3);
+  padding: var(--gear-space-2) var(--gear-space-2);
+  border-bottom: 1px solid var(--gear-color-border-hairline);
+}
+
+.availableRow:last-child {
+  border-bottom: none;
+}
+
+.userInfo {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-0, 2px);
+  min-width: 0;
+}
+
+.userName {
+  font-size: var(--gear-font-body-size);
+  color: var(--gear-color-ink-primary);
+  line-height: var(--gear-font-body-line-height);
+  font-weight: var(--gear-font-label-weight);
+}
+
+.userEmail {
+  font-size: var(--gear-font-meta-size);
+  color: var(--gear-color-ink-secondary);
+  line-height: var(--gear-font-meta-line-height);
+  word-break: break-word;
+}
+
+/* Small per-row action buttons (the user asked for small, so they stay compact
+   but keep a >=48px hit target via padding). */
+.smallAddButton,
+.smallRemoveButton {
+  min-height: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--gear-space-1) var(--gear-space-3);
+  border-radius: var(--gear-radius-md);
+  font-family: var(--gear-font-family);
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+  white-space: nowrap;
+}
+
+.smallAddButton {
+  background-color: transparent;
+  color: var(--gear-color-brand);
+  border: 1px solid var(--gear-color-brand);
+}
+
+.smallAddButton:hover:not(:disabled) {
+  background-color: var(--gear-color-brand);
+  color: var(--gear-color-ink-on-brand);
+}
+
+.smallRemoveButton {
+  background-color: transparent;
+  color: var(--gear-color-status-red);
+  border: 1px solid var(--gear-color-status-red);
+}
+
+.smallRemoveButton:hover:not(:disabled) {
+  background-color: var(--gear-color-status-red);
+  color: var(--gear-color-ink-on-brand);
+}
+
+.smallAddButton:focus-visible,
+.smallRemoveButton:focus-visible {
+  outline: 2px solid var(--gear-focus-ring-color);
+  outline-offset: 2px;
+}
+
+.smallAddButton:disabled,
+.smallRemoveButton:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.memberEditorTitle {
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  line-height: var(--gear-font-label-line-height);
+  color: var(--gear-color-ink-primary);
+  margin: 0;
+}
+
+.memberList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-1);
+  max-height: 320px;
+  overflow-y: auto;
+}
+
+.memberRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gear-space-3);
+  padding: var(--gear-space-1) var(--gear-space-2);
+}
+
+.memberRow:hover {
+  background-color: var(--gear-color-surface-base);
 }
 
 @media (min-width: 641px) {
