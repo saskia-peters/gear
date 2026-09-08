@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { render, screen, cleanup, within } from '@testing-library/react'
+import { render, screen, cleanup, within, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
@@ -356,7 +356,7 @@ describe('AdminBenutzergruppenPage', () => {
     expect(await screen.findByText('Keine Benutzer in dieser Benutzergruppe.')).toBeInTheDocument()
   })
 
-  it('GROUP_ROLES: team-role assignment stays reachable from the detail', async () => {
+  it('GROUP_ROLES: team roles are an expandable section above the members; assign stays reachable', async () => {
     stubFetchRoutes([
       stubGroups(),
       stubUsers(),
@@ -372,9 +372,16 @@ describe('AdminBenutzergruppenPage', () => {
     await user.click(screen.getByRole('button', { name: 'Bearbeiten' }))
     await screen.findByText('Keine Benutzer in dieser Benutzergruppe.')
 
-    await user.click(screen.getByRole('button', { name: 'Rollen' }))
-    expect(await screen.findByText(/Rollen von „Gruppe Ost“/)).toBeInTheDocument()
-    await user.click(screen.getByRole('checkbox', { name: /helfende/ }))
+    // "Rollen" is an expandable section ABOVE the members list (not a button).
+    const rolesSummary = screen.getByText('Rollen').closest('summary')!
+    expect(rolesSummary).toBeInTheDocument()
+    const membersSection = screen.getByRole('region', { name: 'Mitglieder' })
+    expect(rolesSummary.compareDocumentPosition(membersSection) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy()
+
+    await user.click(rolesSummary)
+    const helfende = screen.getByRole('checkbox', { name: /helfende/ }) as HTMLInputElement
+    await waitFor(() => expect(helfende).toBeInTheDocument())
+    await user.click(helfende)
     await user.click(screen.getByRole('button', { name: 'Speichern' }))
 
     expect(await screen.findByText(/Rollen von „Gruppe Ost“ aktualisiert/)).toBeInTheDocument()

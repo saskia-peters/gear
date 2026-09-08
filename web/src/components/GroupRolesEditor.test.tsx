@@ -114,6 +114,27 @@ describe('GroupRolesEditor', () => {
     })
   })
 
+  it('COMPACT: in compact mode the redundant title and Abbrechen button are hidden', async () => {
+    fetchOnce(true, 200, { roles: ROLES })
+    render(
+      <GroupRolesEditor
+        groupId="ug-ost"
+        groupName="Gruppe Ost"
+        roles={ROLES}
+        onSaved={() => {}}
+        onForbidden={() => {}}
+        onUnauthorized={() => {}}
+        onCancel={() => {}}
+        compact
+      />,
+    )
+
+    await screen.findByRole('checkbox', { name: /helfende/ })
+    expect(screen.queryByText(/Rollen von „Gruppe Ost“/)).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Abbrechen' })).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Speichern' })).toBeInTheDocument()
+  })
+
   it('FORBIDDEN: a 403 on load invokes onForbidden (parent leaves the module)', async () => {
     fetchOnce(false, 403, { error: { code: 'forbidden', message: 'Keine Berechtigung.' } })
     const onForbidden = vi.fn()

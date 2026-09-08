@@ -13,6 +13,9 @@ interface GroupRolesEditorProps {
   /** Invoked when a 401 answers an in-page fetch (expired session → login). */
   onUnauthorized: () => void
   onCancel: () => void
+  /** Compact mode: omit the redundant title and Abbrechen button (used when the
+      editor is embedded in an expandable section). */
+  compact?: boolean
 }
 
 type Feedback = { kind: 'error' | 'success'; message: string } | null
@@ -23,7 +26,7 @@ type Feedback = { kind: 'error' | 'success'; message: string } | null
 // GET/POST /user-groups/{id}/roles. Members inherit the new roles on the next
 // resolution. Gated by user_groups.manage (the parent only renders it for
 // holders). The server remains authoritative — this is only the editor surface.
-export function GroupRolesEditor({ groupId, groupName, roles, onSaved, onForbidden, onUnauthorized, onCancel }: GroupRolesEditorProps) {
+export function GroupRolesEditor({ groupId, groupName, roles, onSaved, onForbidden, onUnauthorized, onCancel, compact }: GroupRolesEditorProps) {
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [busy, setBusy] = useState(true)
   const [feedback, setFeedback] = useState<Feedback>(null)
@@ -89,7 +92,9 @@ export function GroupRolesEditor({ groupId, groupName, roles, onSaved, onForbidd
 
   return (
     <div className={styles.editor}>
-      <h4 className={styles.title}>Rollen von „{groupName}“</h4>
+      {!compact && (
+        <h4 className={styles.title}>Rollen von „{groupName}“</h4>
+      )}
       <p className={styles.hint}>
         Mitglieder der Benutzergruppe erben die zugewiesenen Rollen.
       </p>
@@ -131,9 +136,11 @@ export function GroupRolesEditor({ groupId, groupName, roles, onSaved, onForbidd
         <button type="button" className={styles.saveButton} onClick={() => void save()} disabled={busy}>
           {busy ? 'Wird gespeichert...' : 'Speichern'}
         </button>
-        <button type="button" className={styles.cancelButton} onClick={onCancel} disabled={busy}>
-          Abbrechen
-        </button>
+        {!compact && (
+          <button type="button" className={styles.cancelButton} onClick={onCancel} disabled={busy}>
+            Abbrechen
+          </button>
+        )}
       </div>
     </div>
   )

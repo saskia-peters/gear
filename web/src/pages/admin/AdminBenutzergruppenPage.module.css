@@ -363,7 +363,8 @@
 }
 
 .addUsersSection,
-.membersSection {
+.membersSection,
+.rolesSection {
   display: flex;
   flex-direction: column;
   gap: var(--gear-space-3);
@@ -375,6 +376,47 @@
 
 .addUsersSection {
   background-color: var(--gear-color-surface-base);
+}
+
+.rolesSummary {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gear-space-2);
+  cursor: pointer;
+  min-height: 48px;
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  line-height: var(--gear-font-label-line-height);
+  color: var(--gear-color-ink-primary);
+  list-style: none;
+}
+
+.rolesSummary::-webkit-details-marker {
+  display: none;
+}
+
+.rolesSummary::after {
+  content: '▾';
+  color: var(--gear-color-brand);
+  font-size: var(--gear-font-label-size);
+}
+
+.rolesSection[open] .rolesSummary::after {
+  content: '▴';
+}
+
+.rolesSummary:focus-visible {
+  outline: 2px solid var(--gear-focus-ring-color);
+  outline-offset: 2px;
+  border-radius: var(--gear-radius-sm, 4px);
+}
+
+.rolesHint {
+  font-size: var(--gear-font-meta-size);
+  color: var(--gear-color-ink-secondary);
+  line-height: var(--gear-font-meta-line-height);
+  font-weight: var(--gear-font-regular-weight);
 }
 
 .searchRow {

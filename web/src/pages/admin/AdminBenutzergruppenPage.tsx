@@ -53,7 +53,6 @@ export function AdminBenutzergruppenPage() {
   const [memberIds, setMemberIds] = useState<string[]>([])
   const [memberBusy, setMemberBusy] = useState(false)
   const [showAddUsers, setShowAddUsers] = useState(false)
-  const [showRolesEditor, setShowRolesEditor] = useState(false)
   const [confirmDeleteGroup, setConfirmDeleteGroup] = useState<UserGroup | null>(null)
   // Available-users search + sort (name/email columns).
   const [availableSearch, setAvailableSearch] = useState('')
@@ -219,7 +218,6 @@ export function AdminBenutzergruppenPage() {
     setDetailGroup(group)
     setMemberIds([])
     setShowAddUsers(false)
-    setShowRolesEditor(false)
     setAvailableSearch('')
     setAvailableSort(null)
     setGroupFeedback('')
@@ -246,7 +244,6 @@ export function AdminBenutzergruppenPage() {
     setDetailGroup(null)
     setMemberIds([])
     setShowAddUsers(false)
-    setShowRolesEditor(false)
     setAvailableSearch('')
     setAvailableSort(null)
     setGroupFeedback('')
@@ -309,7 +306,6 @@ export function AdminBenutzergruppenPage() {
 
   function handleGroupRolesSaved(message: string) {
     setGroupFeedback(message)
-    setShowRolesEditor(false)
   }
 
   // finding 5: delete a group after explicit confirmation.
@@ -357,23 +353,10 @@ export function AdminBenutzergruppenPage() {
                 <button
                   type="button"
                   className={styles.groupActionButton}
-                  onClick={() => {
-                    setShowAddUsers((v) => !v)
-                    setShowRolesEditor(false)
-                  }}
+                  onClick={() => setShowAddUsers((v) => !v)}
                   disabled={memberBusy}
                 >
                   Benutzer hinzufügen
-                </button>
-                <button
-                  type="button"
-                  className={styles.groupActionButton}
-                  onClick={() => {
-                    setShowRolesEditor((v) => !v)
-                    setShowAddUsers(false)
-                  }}
-                >
-                  Rollen
                 </button>
               </div>
 
@@ -384,18 +367,6 @@ export function AdminBenutzergruppenPage() {
                 >
                   {groupFeedback}
                 </p>
-              )}
-
-              {showRolesEditor && (
-                <GroupRolesEditor
-                  groupId={detailGroup.id}
-                  groupName={detailGroup.name}
-                  roles={roles}
-                  onSaved={handleGroupRolesSaved}
-                  onForbidden={handleForbidden}
-                  onUnauthorized={handleUnauthorized}
-                  onCancel={() => setShowRolesEditor(false)}
-                />
               )}
 
               {showAddUsers && (
@@ -479,6 +450,23 @@ export function AdminBenutzergruppenPage() {
                   )}
                 </section>
               )}
+
+              <details className={styles.rolesSection}>
+                <summary className={styles.rolesSummary}>
+                  Rollen
+                  <span className={styles.rolesHint}>Team-Rollen vergeben — Mitglieder erben sie.</span>
+                </summary>
+                <GroupRolesEditor
+                  groupId={detailGroup.id}
+                  groupName={detailGroup.name}
+                  roles={roles}
+                  onSaved={handleGroupRolesSaved}
+                  onForbidden={handleForbidden}
+                  onUnauthorized={handleUnauthorized}
+                  onCancel={() => {}}
+                  compact
+                />
+              </details>
 
               <section aria-label="Mitglieder" className={styles.membersSection}>
                 <h3 className={styles.memberEditorTitle}>Mitglieder</h3>
