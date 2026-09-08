@@ -12,6 +12,7 @@ import { ProfilePage } from './pages/ProfilePage.tsx'
 import { AdminPage } from './pages/AdminPage.tsx'
 import { AdminRecoveryPage } from './pages/AdminRecoveryPage.tsx'
 import { AdminBenutzerPage } from './pages/admin/AdminBenutzerPage.tsx'
+import { AdminPendingApprovalsPage } from './pages/admin/AdminPendingApprovalsPage.tsx'
 import { AdminBenutzergruppenPage } from './pages/admin/AdminBenutzergruppenPage.tsx'
 import { AdminRollenPage } from './pages/admin/AdminRollenPage.tsx'
 import { AdminQualifikationenPage } from './pages/admin/AdminQualifikationenPage.tsx'
@@ -305,6 +306,18 @@ export function AppRoutes() {
             <RequireAdminModule>
               <RequireAdminEntry codes={adminNavCodes('benutzer')}>
                 <AdminBenutzerPage />
+              </RequireAdminEntry>
+            </RequireAdminModule>
+          </AuthenticatedPage>
+        }
+      />
+      <Route
+        path="/admin/benutzer/pending"
+        element={
+          <AuthenticatedPage>
+            <RequireAdminModule>
+              <RequireAdminEntry codes={['users.approve']}>
+                <AdminPendingApprovalsPage />
               </RequireAdminEntry>
             </RequireAdminModule>
           </AuthenticatedPage>

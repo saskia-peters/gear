@@ -57,6 +57,7 @@ export function AdminBenutzerPage() {
   const canManage = hasPermission('users.manage')
   const canManageGroups = hasPermission('user_groups.manage')
   const canManageQualifications = hasPermission('users.qualifications.manage')
+  const canViewApprovals = hasPermission('users.approve')
   const canViewRoles =
     hasPermission('roles.create') || hasPermission('roles.edit') || hasPermission('roles.assign')
 
@@ -287,6 +288,11 @@ export function AdminBenutzerPage() {
           ) : (
             <>
               <div className={styles.toolbar}>
+                {canViewApprovals && (
+                  <button type="button" className={styles.pendingButton} onClick={() => navigate('/admin/benutzer/pending')}>
+                    Ausstehende Anträge
+                  </button>
+                )}
                 {canManage && (
                   <button type="button" className={styles.newButton} onClick={openCreate}>
                     Neuer Benutzer

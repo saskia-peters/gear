@@ -50,6 +50,7 @@ function renderPage() {
       <MemoryRouter initialEntries={['/admin/benutzer']}>
         <Routes>
           <Route path="/admin/benutzer" element={<AdminBenutzerPage />} />
+          <Route path="/admin/benutzer/pending" element={<div>PendingPage</div>} />
           <Route path="/" element={<div>Dashboard</div>} />
           <Route path="/login" element={<div>LoginPage</div>} />
         </Routes>
@@ -232,6 +233,28 @@ describe('AdminBenutzerPage', () => {
 
     expect(await screen.findByText('Benutzer angelegt. Zugangsdaten werden separat vergeben.')).toBeInTheDocument()
     expect(await screen.findByText('Anna')).toBeInTheDocument()
+  })
+
+  it('PENDING_BUTTON: a users.approve holder sees the "Ausstehende Anträge" button and it opens the pending page', async () => {
+    localStorage.setItem('gear.permissions', JSON.stringify(['users.view', 'users.manage', 'users.approve']))
+    stubFetchRoutes([stubList(usersFixture()), stubGroups()])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByText('Tim')
+    const pendingButton = screen.getByRole('button', { name: 'Ausstehende Anträge' })
+    await user.click(pendingButton)
+
+    expect(await screen.findByText('PendingPage')).toBeInTheDocument()
+  })
+
+  it('PENDING_BUTTON_HIDDEN: without users.approve the pending button is not rendered', async () => {
+    localStorage.setItem('gear.permissions', JSON.stringify(['users.view', 'users.manage']))
+    stubFetchRoutes([stubList(usersFixture()), stubGroups()])
+    renderPage()
+
+    await screen.findByText('Tim')
+    expect(screen.queryByRole('button', { name: 'Ausstehende Anträge' })).not.toBeInTheDocument()
   })
 
   it('VIEW_ONLY: a users.view-only caller sees the list but no create CTA', async () => {

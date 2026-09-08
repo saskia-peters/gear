@@ -64,23 +64,35 @@
 .toolbar {
   display: flex;
   justify-content: flex-end;
+  gap: var(--gear-space-2);
 }
 
 /* Button floor: every target is >= 48px tall (a11y floor). */
 .newButton,
-.editButton {
+.editButton,
+.pendingButton {
   min-height: 48px;
   display: inline-flex;
   align-items: center;
   justify-content: center;
   padding: var(--gear-space-3) var(--gear-space-5);
-  border: none;
   border-radius: var(--gear-radius-md);
   font-family: var(--gear-font-family);
   font-size: var(--gear-font-label-size);
   font-weight: var(--gear-font-label-weight);
   cursor: pointer;
   transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.pendingButton {
+  background-color: transparent;
+  color: var(--gear-color-brand);
+  border: 1px solid var(--gear-color-brand);
+}
+
+.pendingButton:hover {
+  background-color: var(--gear-color-brand);
+  color: var(--gear-color-ink-on-brand);
 }
 
 .newButton {
@@ -104,7 +116,8 @@
 }
 
 .newButton:focus-visible,
-.editButton:focus-visible {
+.editButton:focus-visible,
+.pendingButton:focus-visible {
   outline: 2px solid var(--gear-focus-ring-color);
   outline-offset: 2px;
 }

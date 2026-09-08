@@ -82,18 +82,6 @@
   line-height: var(--gear-font-body-line-height);
 }
 
-.pending {
-  margin-bottom: var(--gear-space-8);
-}
-
-.pendingTitle {
-  font-size: var(--gear-font-title-size);
-  font-weight: var(--gear-font-title-weight);
-  line-height: var(--gear-font-title-line-height);
-  color: var(--gear-color-ink-primary);
-  margin: 0 0 var(--gear-space-4);
-}
-
 .secondaryLink {
   font-size: var(--gear-font-label-size);
   color: var(--gear-color-brand);
