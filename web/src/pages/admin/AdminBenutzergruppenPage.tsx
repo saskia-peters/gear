@@ -55,6 +55,9 @@ export function AdminBenutzergruppenPage() {
   const [showAddUsers, setShowAddUsers] = useState(false)
   const [showRolesEditor, setShowRolesEditor] = useState(false)
   const [confirmDeleteGroup, setConfirmDeleteGroup] = useState<UserGroup | null>(null)
+  // Available-users search + sort (name/email columns).
+  const [availableSearch, setAvailableSearch] = useState('')
+  const [availableSort, setAvailableSort] = useState<{ key: 'vorname' | 'nachname' | 'email'; dir: 'asc' | 'desc' } | null>(null)
 
   // Resolve member ids to user objects (name + email) for display. A member not
   // present in the fetched user list (e.g. the caller lacks users.view) falls
@@ -74,6 +77,41 @@ export function AdminBenutzergruppenPage() {
     const memberSet = new Set(memberIds)
     return users.filter((u) => !memberSet.has(u.id))
   }, [users, memberIds])
+
+  // The available list is searchable across all columns and sortable by
+  // Vorname / Nachname / E-Mail. Search is case-insensitive substring over the
+  // full name and the email; sorting uses the German collation like UserTable.
+  const filteredAvailableUsers = useMemo(() => {
+    const query = availableSearch.trim().toLocaleLowerCase('de')
+    const filtered = query === ''
+      ? availableUsers
+      : availableUsers.filter((u) =>
+          `${u.vorname} ${u.nachname} ${u.email}`.toLocaleLowerCase('de').includes(query),
+        )
+    if (availableSort === null) return filtered
+    const { key, dir } = availableSort
+    return [...filtered].sort((a, b) => {
+      const cmp = a[key].localeCompare(b[key], 'de', { sensitivity: 'base' })
+      return dir === 'asc' ? cmp : -cmp
+    })
+  }, [availableUsers, availableSearch, availableSort])
+
+  function cycleAvailableSort(key: 'vorname' | 'nachname' | 'email') {
+    setAvailableSort((prev) => {
+      if (prev === null || prev.key !== key) {
+        return { key, dir: 'asc' }
+      }
+      if (prev.dir === 'asc') {
+        return { key, dir: 'desc' }
+      }
+      return null
+    })
+  }
+
+  function ariaSort(key: 'vorname' | 'nachname' | 'email'): 'ascending' | 'descending' | 'none' {
+    if (availableSort === null || availableSort.key !== key) return 'none'
+    return availableSort.dir === 'asc' ? 'ascending' : 'descending'
+  }
 
   const load = useCallback(async () => {
     setLoading(true)
@@ -182,6 +220,8 @@ export function AdminBenutzergruppenPage() {
     setMemberIds([])
     setShowAddUsers(false)
     setShowRolesEditor(false)
+    setAvailableSearch('')
+    setAvailableSort(null)
     setGroupFeedback('')
     setMemberBusy(true)
     try {
@@ -207,6 +247,8 @@ export function AdminBenutzergruppenPage() {
     setMemberIds([])
     setShowAddUsers(false)
     setShowRolesEditor(false)
+    setAvailableSearch('')
+    setAvailableSort(null)
     setGroupFeedback('')
   }
 
@@ -354,33 +396,81 @@ export function AdminBenutzergruppenPage() {
               {showAddUsers && (
                 <section aria-label="Benutzer hinzufügen" className={styles.addUsersSection}>
                   <h3 className={styles.memberEditorTitle}>Verfügbare Benutzer</h3>
-                  {availableUsers.length === 0 ? (
+                  {users.length === 0 ? (
                     <p className={styles.emptyNote}>
-                      {users.length === 0
-                        ? 'Keine Benutzer verfügbar (kein Verzeichniszugriff oder keine Benutzer vorhanden).'
-                        : 'Alle Benutzer sind dieser Benutzergruppe bereits zugeordnet.'}
+                      Keine Benutzer verfügbar (kein Verzeichniszugriff oder keine Benutzer vorhanden).
                     </p>
                   ) : (
-                    <ul className={styles.availableList}>
-                      {availableUsers.map((user) => (
-                        <li key={user.id} className={styles.availableRow}>
-                          <div className={styles.userInfo}>
-                            <span className={styles.userName}>
-                              {user.vorname} {user.nachname}
-                            </span>
-                            <span className={styles.userEmail}>{user.email}</span>
-                          </div>
-                          <button
-                            type="button"
-                            className={styles.smallAddButton}
-                            onClick={() => void addUser(user)}
-                            disabled={memberBusy}
-                          >
-                            Hinzufügen
-                          </button>
-                        </li>
-                      ))}
-                    </ul>
+                    <>
+                      <div className={styles.searchRow}>
+                        <label className={styles.label} htmlFor="available-search">
+                          Suchen
+                        </label>
+                        <input
+                          id="available-search"
+                          type="search"
+                          className={styles.input}
+                          value={availableSearch}
+                          onChange={(e) => setAvailableSearch(e.target.value)}
+                          placeholder="Name oder E-Mail…"
+                        />
+                      </div>
+                      {filteredAvailableUsers.length === 0 ? (
+                        <p className={styles.emptyNote}>
+                          {availableUsers.length === 0
+                            ? 'Alle Benutzer sind dieser Benutzergruppe bereits zugeordnet.'
+                            : 'Keine Benutzer entsprechen der Suche.'}
+                        </p>
+                      ) : (
+                        <table className={styles.availableTable}>
+                          <thead>
+                            <tr>
+                              {([
+                                { key: 'vorname', label: 'Vorname' },
+                                { key: 'nachname', label: 'Nachname' },
+                                { key: 'email', label: 'E-Mail' },
+                              ] as const).map((col) => (
+                                <th key={col.key} scope="col" aria-sort={ariaSort(col.key)}>
+                                  <button
+                                    type="button"
+                                    className={styles.sortButton}
+                                    onClick={() => cycleAvailableSort(col.key)}
+                                    aria-label={`Nach ${col.label} sortieren${ariaSort(col.key) === 'ascending' ? ' (absteigend)' : ariaSort(col.key) === 'descending' ? ' (aufsteigend)' : ''}`}
+                                  >
+                                    {col.label}
+                                    <span className={styles.sortIndicator} aria-hidden="true">
+                                      {ariaSort(col.key) === 'ascending' ? '▲' : ariaSort(col.key) === 'descending' ? '▼' : ''}
+                                    </span>
+                                  </button>
+                                </th>
+                              ))}
+                              <th scope="col">
+                                <span className={styles.srOnly}>Aktion</span>
+                              </th>
+                            </tr>
+                          </thead>
+                          <tbody>
+                            {filteredAvailableUsers.map((user) => (
+                              <tr key={user.id} className={styles.availableRow}>
+                                <td className={styles.availableCell}>{user.vorname}</td>
+                                <td className={styles.availableCell}>{user.nachname}</td>
+                                <td className={styles.availableCell}>{user.email}</td>
+                                <td className={styles.availableActionCell}>
+                                  <button
+                                    type="button"
+                                    className={styles.smallAddButton}
+                                    onClick={() => void addUser(user)}
+                                    disabled={memberBusy}
+                                  >
+                                    Hinzufügen
+                                  </button>
+                                </td>
+                              </tr>
+                            ))}
+                          </tbody>
+                        </table>
+                      )}
+                    </>
                   )}
                 </section>
               )}

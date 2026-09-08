@@ -249,14 +249,17 @@ describe('AdminBenutzergruppenPage', () => {
     // Tim is already a member, so the available list shows the others WITH emails.
     await user.click(screen.getByRole('button', { name: 'Benutzer hinzufügen' }))
     const addSection = screen.getByRole('region', { name: 'Benutzer hinzufügen' })
-    expect(within(addSection).getByText('Lena Schmidt')).toBeInTheDocument()
+    const lenaCell = within(addSection).getByText('Schmidt')
     expect(within(addSection).getByText('lena@gear.local')).toBeInTheDocument()
-    expect(within(addSection).getByText('Max Gone')).toBeInTheDocument()
-    expect(within(addSection).queryByText('Tim Müller')).not.toBeInTheDocument()
+    expect(within(addSection).getByText('Gone')).toBeInTheDocument()
+    // Tim is not offered (already a member).
+    expect(within(addSection).queryByText('Müller')).not.toBeInTheDocument()
+    // Headers are sortable.
+    expect(within(addSection).getByRole('columnheader', { name: /Vorname/ })).toBeInTheDocument()
+    expect(within(addSection).getByRole('columnheader', { name: /E-Mail/ })).toBeInTheDocument()
 
-    // Click Hinzufügen on Lena's row (the section has one button per available
-    // user, so scope to her row).
-    const lenaRow = within(addSection).getByText('Lena Schmidt').closest('li')!
+    // Click Hinzufügen on Lena's row (scope to her row).
+    const lenaRow = lenaCell.closest('tr')!
     await user.click(within(lenaRow).getByRole('button', { name: 'Hinzufügen' }))
     expect(await screen.findByText(/„Lena Schmidt“ wurde zu „Gruppe Ost“ hinzugefügt/)).toBeInTheDocument()
     const postCalls = (vi.mocked(fetch).mock.calls as Array<[string, RequestInit?]>).filter(([u, init]) =>
@@ -264,6 +267,61 @@ describe('AdminBenutzergruppenPage', () => {
     expect(postCalls).toHaveLength(1)
     const body = JSON.parse(postCalls[0][1]!.body as string)
     expect(body.user_ids).toEqual(expect.arrayContaining(['u-tim', 'u-lena']))
+  })
+
+  it('DETAIL_ADD_SEARCH: the search box filters available users across name and email', async () => {
+    stubFetchRoutes([
+      stubGroups(),
+      stubUsers(),
+      stubRoles(),
+      stubMembers([]),
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByText('Gruppe Ost')
+    await user.click(screen.getByRole('button', { name: 'Bearbeiten' }))
+    await screen.findByText('Keine Benutzer in dieser Benutzergruppe.')
+    await user.click(screen.getByRole('button', { name: 'Benutzer hinzufügen' }))
+
+    const addSection = screen.getByRole('region', { name: 'Benutzer hinzufügen' })
+    const search = within(addSection).getByLabelText('Suchen')
+    // By email substring.
+    await user.type(search, 'lena')
+    expect(within(addSection).getByText('Schmidt')).toBeInTheDocument()
+    expect(within(addSection).queryByText('Müller')).not.toBeInTheDocument()
+    expect(within(addSection).queryByText('Gone')).not.toBeInTheDocument()
+  })
+
+  it('DETAIL_ADD_SORT: clicking a column header sorts the available users (toggle asc/desc)', async () => {
+    stubFetchRoutes([
+      stubGroups(),
+      stubUsers(),
+      stubRoles(),
+      stubMembers([]),
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByText('Gruppe Ost')
+    await user.click(screen.getByRole('button', { name: 'Bearbeiten' }))
+    await screen.findByText('Keine Benutzer in dieser Benutzergruppe.')
+    await user.click(screen.getByRole('button', { name: 'Benutzer hinzufügen' }))
+
+    const addSection = screen.getByRole('region', { name: 'Benutzer hinzufügen' })
+    // Click "Nachname" once → ascending. Fixture order: Tim Müller, Lena Schmidt, Max Gone.
+    await user.click(within(addSection).getByRole('button', { name: /Nach Nachname sortieren/ }))
+    const rowsAsc = within(addSection).getAllByRole('row').slice(1)
+    expect(within(rowsAsc[0]).getByText('Gone')).toBeInTheDocument()
+    expect(within(rowsAsc[1]).getByText('Müller')).toBeInTheDocument()
+    expect(within(rowsAsc[2]).getByText('Schmidt')).toBeInTheDocument()
+
+    // Second click → descending.
+    await user.click(within(addSection).getByRole('button', { name: /Nach Nachname sortieren/ }))
+    const rowsDesc = within(addSection).getAllByRole('row').slice(1)
+    expect(within(rowsDesc[0]).getByText('Schmidt')).toBeInTheDocument()
+    expect(within(rowsDesc[1]).getByText('Müller')).toBeInTheDocument()
+    expect(within(rowsDesc[2]).getByText('Gone')).toBeInTheDocument()
   })
 
   it('DETAIL_EMPTY_MEMBERS: a group with no members shows the empty state', async () => {
