@@ -117,7 +117,10 @@ export function GroupRolesEditor({ groupId, groupName, roles, onSaved, onForbidd
                   onChange={() => toggle(role.id)}
                   disabled={busy}
                 />
-                <span className={styles.roleName}>{role.name}</span>
+                <span className={styles.roleName}>
+                  {role.name}
+                  {role.is_base_role ? <span className={styles.baseTag}>Basis</span> : null}
+                </span>
               </label>
             </li>
           ))}

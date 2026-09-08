@@ -85,6 +85,18 @@
   line-height: var(--gear-font-body-line-height);
 }
 
+.baseTag {
+  margin-left: var(--gear-space-2);
+  padding: var(--gear-space-1) var(--gear-space-2);
+  background-color: var(--gear-color-status-orange-soft);
+  border: 1px solid var(--gear-color-status-orange);
+  border-radius: var(--gear-radius-sm, 4px);
+  font-size: var(--gear-font-meta-size);
+  font-weight: var(--gear-font-label-weight);
+  color: var(--gear-color-status-orange);
+  white-space: nowrap;
+}
+
 .emptyNote {
   font-size: var(--gear-font-meta-size);
   color: var(--gear-color-ink-secondary);

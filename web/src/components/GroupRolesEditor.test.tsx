@@ -56,6 +56,16 @@ describe('GroupRolesEditor', () => {
     expect(gerat.checked).toBe(false)
   })
 
+  it('BASIS_TAG: a base role shows the "Basis" badge like the user editor (a custom role does not)', async () => {
+    fetchOnce(true, 200, { roles: ROLES })
+    renderEditor()
+
+    await screen.findByText(/Rollen von „Gruppe Ost“/)
+    expect(screen.getByText('Basis')).toBeInTheDocument()
+    // Only the one base role (helfende) carries the badge.
+    expect(screen.getAllByText('Basis')).toHaveLength(1)
+  })
+
   it('ASSIGN: saving posts the full role set atomically', async () => {
     const mock = vi.fn().mockImplementation(async (_url: string, init?: RequestInit) => {
       if (init?.method === 'POST') {
