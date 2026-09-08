@@ -231,13 +231,23 @@ describe('AdminBenutzergruppenPage', () => {
   })
 
   it('DETAIL_ADD: "Benutzer hinzufügen" reveals available users (with emails) and adds one', async () => {
+    // Stateful member list: after the POST the GET refresh returns both.
+    let currentMemberIds = ['u-tim']
     stubFetchRoutes([
       stubGroups(),
       stubUsers(),
       stubRoles(),
-      stubMembers(['u-tim']),
-      stubAssignMembers(['u-tim', 'u-lena']),
-      stubMembers(['u-tim', 'u-lena']),
+      {
+        matcher: (url, init) => url === `${USER_GROUPS_URL}/ug-ost/members` && !init?.method,
+        response: () => ({ ok: true, status: 200, body: { user_ids: currentMemberIds } }),
+      },
+      {
+        matcher: (url, init) => url === `${USER_GROUPS_URL}/ug-ost/members` && init?.method === 'POST',
+        response: () => {
+          currentMemberIds = ['u-tim', 'u-lena']
+          return { ok: true, status: 200, body: { message: 'Mitglieder der Benutzergruppe aktualisiert.', group: groupsFixture().user_groups[0], user_ids: currentMemberIds } }
+        },
+      },
     ])
     const user = userEvent.setup()
     renderPage()
@@ -267,6 +277,12 @@ describe('AdminBenutzergruppenPage', () => {
     expect(postCalls).toHaveLength(1)
     const body = JSON.parse(postCalls[0][1]!.body as string)
     expect(body.user_ids).toEqual(expect.arrayContaining(['u-tim', 'u-lena']))
+
+    // The add-users panel closes and the view returns to the group detail:
+    // Lena now appears in the member list, the add panel is gone.
+    expect(screen.queryByRole('region', { name: 'Benutzer hinzufügen' })).not.toBeInTheDocument()
+    expect(screen.getByText('Lena Schmidt')).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: 'Von Gruppe entfernen' }).length).toBeGreaterThan(0)
   })
 
   it('DETAIL_ADD_SEARCH: the search box filters available users across name and email', async () => {

@@ -252,7 +252,9 @@ export function AdminBenutzergruppenPage() {
     setGroupFeedback('')
   }
 
-  // Add ONE user to the group via the replace-set endpoint.
+  // Add ONE user to the group via the replace-set endpoint. On success the
+  // add-users panel closes so the view returns to the group detail (member
+  // list) showing the newly added member.
   async function addUser(user: AdminUserSummary) {
     if (!detailGroup) return
     setMemberBusy(true)
@@ -262,6 +264,9 @@ export function AdminBenutzergruppenPage() {
       setGroupFeedback(`„${user.vorname} ${user.nachname}“ wurde zu „${detailGroup.name}“ hinzugefügt.`)
       const ids = await listUserGroupMembers(detailGroup.id)
       setMemberIds(ids)
+      setShowAddUsers(false)
+      setAvailableSearch('')
+      setAvailableSort(null)
     } catch (err) {
       if (err instanceof ApiError && err.status === 403) {
         handleForbidden()
