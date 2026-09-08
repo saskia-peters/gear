@@ -345,6 +345,100 @@ export function UserDetail({
         </p>
       )}
 
+      <div className={styles.actions}>
+        {canManage && isActive && (
+          <button
+            type="button"
+            className={styles.editButton}
+            onClick={onEdit}
+          >
+            Bearbeiten
+          </button>
+        )}
+
+        {canManage && isActive && !confirmingDeactivate && !confirmingOtp && !otpResult && (
+          <button
+            type="button"
+            className={styles.otpButton}
+            onClick={() => setConfirmingOtp(true)}
+          >
+            Einmal-Passwort
+          </button>
+        )}
+
+        {canManage && isActive && !confirmingDeactivate && !confirmingOtp && !otpResult && (
+          <button
+            type="button"
+            className={styles.deactivateButton}
+            onClick={() => setConfirmingDeactivate(true)}
+          >
+            Deaktivieren
+          </button>
+        )}
+
+        {confirmingDeactivate && (
+          <div className={styles.confirmBox} role="alert">
+            <p className={styles.confirmText}>
+              Benutzer deaktivieren? Der Benutzer kann sich ab sofort nicht mehr
+              anmelden („Sofort kein Login“).
+            </p>
+            <div className={styles.confirmActions}>
+              <button type="button" className={styles.confirmButton} onClick={() => void confirmDeactivate()} disabled={busy}>
+                {busy ? 'Wird deaktiviert...' : 'Ja, deaktivieren'}
+              </button>
+              <button
+                type="button"
+                className={styles.cancelButton}
+                onClick={() => setConfirmingDeactivate(false)}
+                disabled={busy}
+              >
+                Abbrechen
+              </button>
+            </div>
+          </div>
+        )}
+
+        {confirmingOtp && (
+          <div className={styles.confirmBox} role="alert">
+            <p className={styles.confirmText}>
+              Einmal-Passwort für {user.email} erstellen? Das Passwort wird nur
+              einmal angezeigt und muss sicher außerhalb des Systems übermittelt
+              werden (nicht per E-Mail).
+            </p>
+            <div className={styles.confirmActions}>
+              <button type="button" className={styles.otpConfirmButton} onClick={() => void confirmIssueOtp()} disabled={busy}>
+                {busy ? 'Wird erstellt...' : 'Ja, erstellen'}
+              </button>
+              <button
+                type="button"
+                className={styles.cancelButton}
+                onClick={() => setConfirmingOtp(false)}
+                disabled={busy}
+              >
+                Abbrechen
+              </button>
+            </div>
+          </div>
+        )}
+
+        {otpResult && (
+          <div className={styles.otpPanel} role="status">
+            <p className={styles.otpWarning}>{otpResult.message}</p>
+            <p className={styles.otpValue}>{otpResult.one_time_password}</p>
+            <p className={styles.otpExpiry}>
+              Gültig bis {new Date(otpResult.expires_at).toLocaleDateString('de-DE')}
+            </p>
+            <button
+              type="button"
+              className={styles.otpDismissButton}
+              onClick={() => setOtpResult(null)}
+            >
+              Schließen
+            </button>
+          </div>
+        )}
+      </div>
+
       <div className={styles.section}>
         <h4 className={styles.sectionTitle}>Kontakt</h4>
         <p className={styles.line}>
@@ -609,100 +703,6 @@ export function UserDetail({
                 </div>
               )
             })()}
-          </div>
-        )}
-      </div>
-
-      <div className={styles.actions}>
-        {canManage && isActive && (
-          <button
-            type="button"
-            className={styles.editButton}
-            onClick={onEdit}
-          >
-            Bearbeiten
-          </button>
-        )}
-
-        {canManage && isActive && !confirmingDeactivate && !confirmingOtp && !otpResult && (
-          <button
-            type="button"
-            className={styles.otpButton}
-            onClick={() => setConfirmingOtp(true)}
-          >
-            Einmal-Passwort
-          </button>
-        )}
-
-        {canManage && isActive && !confirmingDeactivate && !confirmingOtp && !otpResult && (
-          <button
-            type="button"
-            className={styles.deactivateButton}
-            onClick={() => setConfirmingDeactivate(true)}
-          >
-            Deaktivieren
-          </button>
-        )}
-
-        {confirmingDeactivate && (
-          <div className={styles.confirmBox} role="alert">
-            <p className={styles.confirmText}>
-              Benutzer deaktivieren? Der Benutzer kann sich ab sofort nicht mehr
-              anmelden („Sofort kein Login“).
-            </p>
-            <div className={styles.confirmActions}>
-              <button type="button" className={styles.confirmButton} onClick={() => void confirmDeactivate()} disabled={busy}>
-                {busy ? 'Wird deaktiviert...' : 'Ja, deaktivieren'}
-              </button>
-              <button
-                type="button"
-                className={styles.cancelButton}
-                onClick={() => setConfirmingDeactivate(false)}
-                disabled={busy}
-              >
-                Abbrechen
-              </button>
-            </div>
-          </div>
-        )}
-
-        {confirmingOtp && (
-          <div className={styles.confirmBox} role="alert">
-            <p className={styles.confirmText}>
-              Einmal-Passwort für {user.email} erstellen? Das Passwort wird nur
-              einmal angezeigt und muss sicher außerhalb des Systems übermittelt
-              werden (nicht per E-Mail).
-            </p>
-            <div className={styles.confirmActions}>
-              <button type="button" className={styles.otpConfirmButton} onClick={() => void confirmIssueOtp()} disabled={busy}>
-                {busy ? 'Wird erstellt...' : 'Ja, erstellen'}
-              </button>
-              <button
-                type="button"
-                className={styles.cancelButton}
-                onClick={() => setConfirmingOtp(false)}
-                disabled={busy}
-              >
-                Abbrechen
-              </button>
-            </div>
-          </div>
-        )}
-
-        {otpResult && (
-          <div className={styles.otpPanel} role="status">
-            <p className={styles.otpWarning}>{otpResult.message}</p>
-            <p className={styles.otpValue}>{otpResult.one_time_password}</p>
-            <p className={styles.otpExpiry}>
-              Gültig bis {new Date(otpResult.expires_at).toLocaleDateString('de-DE')}
-            </p>
-            <button
-              type="button"
-              className={styles.otpDismissButton}
-              onClick={() => setOtpResult(null)}
-            >
-              Schließen
-            </button>
           </div>
         )}
       </div>
