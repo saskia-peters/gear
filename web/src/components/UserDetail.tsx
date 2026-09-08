@@ -494,17 +494,25 @@ export function UserDetail({
           <div className={styles.qualAssign}>
             <h5 className={styles.qualAssignTitle}>Qualifikation zuweisen</h5>
             {(() => {
-              const selectedQual = vocabulary.find((q) => q.id === selectedQualId)
+              // Only qualifications the user does NOT yet hold are offered for
+              // assignment — an already-assigned qualification would re-assign
+              // (renew) its per-user expiry, which is an edit the Gültig-bis
+              // button covers, not a new assignment.
+              const assignedIds = new Set(user.qualifications.map((a) => a.id))
+              const available = vocabulary.filter((q) => !assignedIds.has(q.id))
+              const selectedQual = available.find((q) => q.id === selectedQualId)
               const fixedRequiresExpiry = selectedQual?.expiry_kind === 'fixed'
               const expiryMissing = fixedRequiresExpiry && expiryInput === ''
               const assignDisabled = qualBusy || !selectedQualId || expiryMissing
-              return vocabulary.length === 0 ? (
+              return available.length === 0 ? (
                 vocabularyFailed ? (
                   <p className={styles.emptyNote}>
                     Die Auswahlliste ist nicht verfügbar. Bereits zugewiesene Qualifikationen können entzogen oder angepasst werden.
                   </p>
-                ) : (
+                ) : vocabulary.length === 0 ? (
                   <p className={styles.emptyNote}>Keine Qualifikationen verfügbar.</p>
+                ) : (
+                  <p className={styles.emptyNote}>Alle Qualifikationen sind diesem Benutzer bereits zugewiesen.</p>
                 )
               ) : (
                 <div className={styles.qualAssignRow}>
@@ -522,7 +530,7 @@ export function UserDetail({
                     disabled={qualBusy}
                   >
                     <option value="">Auswählen…</option>
-                    {vocabulary.map((q) => (
+                    {available.map((q) => (
                       <option key={q.id} value={q.id}>
                         {q.name}
                       </option>

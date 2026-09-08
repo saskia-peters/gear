@@ -234,6 +234,48 @@ describe('UserDetail', () => {
     }))
   })
 
+  it('QUAL_HIDES_ASSIGNED: an already-assigned qualification is not offered for assignment', async () => {
+    // The user already holds Kettensäge (q-1) and Generator (q-2). The
+    // vocabulary also contains them (plus a free one) — the dropdown must
+    // exclude the assigned ones so re-assignment cannot renew an existing
+    // assignment from the "assign" surface.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        qualifications: [
+          { id: 'q-1', name: 'Kettensäge', description: '', expiry_kind: 'fixed', expires_at: '2099-01-01T00:00:00Z', status: 'valid' },
+          { id: 'q-2', name: 'Generator', description: '', expiry_kind: 'unlimited', expires_at: null, status: 'unlimited' },
+          { id: 'q-3', name: 'Kran', description: '', expiry_kind: 'fixed', expires_at: '2099-01-01T00:00:00Z', status: 'valid' },
+        ],
+      }),
+    }))
+    renderDetail({ canManageQualifications: true })
+
+    await screen.findByText('Qualifikation zuweisen')
+    const options = screen.getAllByRole('option').map((o) => o.textContent)
+    // The placeholder plus only the unassigned qualification.
+    expect(options).toEqual(['Auswählen…', 'Kran'])
+  })
+
+  it('QUAL_ALL_ASSIGNED: when every qualification is assigned, no dropdown and a hint are shown', async () => {
+    // The vocabulary contains exactly the two qualifications the user holds.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        qualifications: [
+          { id: 'q-1', name: 'Kettensäge', description: '', expiry_kind: 'fixed', expires_at: '2099-01-01T00:00:00Z', status: 'valid' },
+          { id: 'q-2', name: 'Generator', description: '', expiry_kind: 'unlimited', expires_at: null, status: 'unlimited' },
+        ],
+      }),
+    }))
+    renderDetail({ canManageQualifications: true })
+
+    expect(await screen.findByText('Alle Qualifikationen sind diesem Benutzer bereits zugewiesen.')).toBeInTheDocument()
+    expect(screen.queryByLabelText('Qualifikation')).not.toBeInTheDocument()
+  })
+
   it('QUAL_REVOKE: a holder can revoke an assigned qualification', async () => {
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
