@@ -474,7 +474,8 @@
 }
 
 .editButton,
-.deactivateButton {
+.deactivateButton,
+.otpButton {
   min-height: 48px;
   display: inline-flex;
   align-items: center;
@@ -510,8 +511,20 @@
   color: var(--gear-color-ink-on-brand);
 }
 
+.otpButton {
+  background-color: transparent;
+  color: var(--gear-color-brand);
+  border: 1px solid var(--gear-color-brand);
+}
+
+.otpButton:hover {
+  background-color: var(--gear-color-brand);
+  color: var(--gear-color-ink-on-brand);
+}
+
 .editButton:focus-visible,
-.deactivateButton:focus-visible {
+.deactivateButton:focus-visible,
+.otpButton:focus-visible {
   outline: 2px solid var(--gear-focus-ring-color);
   outline-offset: 2px;
 }
@@ -576,6 +589,86 @@
 .cancelButton:focus-visible {
   outline: 2px solid var(--gear-focus-ring-color);
   outline-offset: 2px;
+}
+
+/* One-time-password issuance (Spec 2.8): confirm box + the show-once panel. */
+.otpConfirmButton {
+  min-height: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--gear-space-3) var(--gear-space-5);
+  border: none;
+  border-radius: var(--gear-radius-md);
+  font-family: var(--gear-font-family);
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  cursor: pointer;
+  background-color: var(--gear-color-button-primary-bg);
+  color: var(--gear-color-button-primary-text);
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.otpPanel {
+  padding: var(--gear-space-3) var(--gear-space-4);
+  background-color: var(--gear-color-status-orange-soft);
+  border: 1px solid var(--gear-color-status-orange);
+  border-radius: var(--gear-radius-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-3);
+}
+
+.otpWarning {
+  margin: 0;
+  font-size: var(--gear-font-body-size);
+  color: var(--gear-color-ink-primary);
+  line-height: var(--gear-font-body-line-height);
+}
+
+.otpValue {
+  margin: 0;
+  font-size: 1.4rem;
+  font-weight: var(--gear-font-title-weight);
+  letter-spacing: 0.12em;
+  color: var(--gear-color-ink-primary);
+  font-family: var(--gear-font-family);
+}
+
+.otpExpiry {
+  margin: 0;
+  font-size: var(--gear-font-meta-size);
+  color: var(--gear-color-ink-secondary);
+  line-height: var(--gear-font-meta-line-height);
+}
+
+.otpDismissButton {
+  align-self: flex-start;
+  min-height: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--gear-space-2) var(--gear-space-4);
+  border: 1px solid var(--gear-color-border-hairline);
+  border-radius: var(--gear-radius-md);
+  font-family: var(--gear-font-family);
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  cursor: pointer;
+  background-color: transparent;
+  color: var(--gear-color-ink-primary);
+}
+
+.otpConfirmButton:focus-visible,
+.otpDismissButton:focus-visible {
+  outline: 2px solid var(--gear-focus-ring-color);
+  outline-offset: 2px;
+}
+
+.otpConfirmButton:disabled,
+.otpDismissButton:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
 }
 
 @media (min-width: 641px) {

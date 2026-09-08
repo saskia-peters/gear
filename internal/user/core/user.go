@@ -82,6 +82,14 @@ type User struct {
 	// fallback / Epic 2 one-time password). It is cleared once the user
 	// completes a change via a reset link. Never serialized to clients.
 	MustChangePassword bool `json:"-"`
+	// OneTimePasswordHash holds the Argon2id hash of a currently valid
+	// single-use one-time password (Spec 2.8). Empty means no OTP is issued.
+	// The plaintext OTP is shown once in the issuance response and never
+	// stored, emailed or read back (NFR-S4). Never serialized to clients.
+	OneTimePasswordHash string `json:"-"`
+	// OneTimePasswordExpiresAt is the TTL of the issued OTP (Spec 2.8). A zero
+	// value means no OTP is issued. Never serialized to clients.
+	OneTimePasswordExpiresAt time.Time `json:"-"`
 	Attributes                 map[string]any `json:"attributes,omitempty"`
 	CreatedAt                  time.Time      `json:"created_at"`
 	UpdatedAt                  time.Time      `json:"updated_at"`

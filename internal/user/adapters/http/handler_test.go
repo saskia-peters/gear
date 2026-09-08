@@ -52,6 +52,7 @@ type mockService struct {
 	createAdminUserFunc      func(ctx context.Context, actor *core.User, input core.CreateAdminUserInput) (*core.AdminUserWriteResult, error)
 	updateAdminUserFunc      func(ctx context.Context, actor *core.User, userID string, input core.UpdateAdminUserInput) (*core.AdminUserWriteResult, error)
 	deactivateAdminUserFunc  func(ctx context.Context, actor *core.User, userID string, confirmed bool) (*core.DeactivateUserResult, error)
+	issueOneTimePasswordFunc func(ctx context.Context, actor *core.User, userID string, confirmed bool) (*core.OneTimePasswordResult, error)
 	listUserGroupsFunc       func(ctx context.Context, actor *core.User) ([]*core.UserGroup, error)
 	createUserGroupFunc      func(ctx context.Context, actor *core.User, input core.CreateUserGroupInput) (*core.UserGroup, error)
 	assignUserGroupFunc      func(ctx context.Context, actor *core.User, groupID string, userIDs []string) (*core.UserGroup, error)
@@ -307,6 +308,19 @@ func (m *mockService) DeactivateUser(ctx context.Context, actor *core.User, user
 		return m.deactivateAdminUserFunc(ctx, actor, userID, confirmed)
 	}
 	return &core.DeactivateUserResult{Message: core.MsgUserDeactivated, UserID: userID, Email: "volunteer@gear.local"}, nil
+}
+
+func (m *mockService) IssueOneTimePassword(ctx context.Context, actor *core.User, userID string, confirmed bool) (*core.OneTimePasswordResult, error) {
+	if m.issueOneTimePasswordFunc != nil {
+		return m.issueOneTimePasswordFunc(ctx, actor, userID, confirmed)
+	}
+	return &core.OneTimePasswordResult{
+		Message:         core.MsgOneTimePasswordIssued,
+		UserID:          userID,
+		Email:           "volunteer@gear.local",
+		OneTimePassword: "ABCDE23456",
+		ExpiresAt:       time.Now().UTC().Add(core.OneTimePasswordTTL),
+	}, nil
 }
 
 func (m *mockService) ListUserGroups(ctx context.Context, actor *core.User) ([]*core.UserGroup, error) {
@@ -1823,6 +1837,18 @@ func (r *changePasswordRepo) DeletePasswordResetToken(_ context.Context, _ strin
 func (r *changePasswordRepo) SetUserMustChangePassword(_ context.Context, _ string) error { return nil }
 
 func (r *changePasswordRepo) ClearUserMustChangePassword(_ context.Context, _ string) error { return nil }
+
+func (r *changePasswordRepo) SetUserOneTimePassword(_ context.Context, _, _ string, _ time.Time) (bool, error) {
+	return true, nil
+}
+
+func (r *changePasswordRepo) ClearUserOneTimePassword(_ context.Context, _, _ string) (bool, error) {
+	return true, nil
+}
+
+func (r *changePasswordRepo) GetUserByID(_ context.Context, _ string) (*core.User, error) {
+	return nil, core.ErrAdminUserNotFound
+}
 
 func (r *changePasswordRepo) IsUserInPermissionGroup(_ context.Context, _, _ string) (bool, error) {
 	return false, nil

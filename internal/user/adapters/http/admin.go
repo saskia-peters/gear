@@ -60,6 +60,10 @@ func (h *Handler) AdminRoutes() http.Handler {
 	users.Get("/{userID}", h.GetAdminUserDetail)
 	users.Put("/{userID}", h.UpdateAdminUser)
 	users.Post("/{userID}/deactivate", h.DeactivateAdminUser)
+	// One-time-password issuance (Spec 2.8): POST /users/{userID}/otp hands an
+	// ACTIVE, password-lost user a single-use OTP. Gated by `users.manage` in
+	// the core (defense-in-depth).
+	users.Post("/{userID}/otp", h.IssueOneTimePasswordHandler)
 	// User↔user-group membership from the user detail (Effort 2): replace a
 	// user's organisational group set, gated by `user_groups.manage`.
 	users.Put("/{userID}/groups", h.AssignUserGroupsHandler)

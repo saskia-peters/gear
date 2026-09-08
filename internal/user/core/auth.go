@@ -145,23 +145,35 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (*LoginResult, er
 		return nil, NewLockoutError(retryAfter, email)
 	}
 
-	// Single canonical verify: the account's real hash when the account can
-	// authenticate (active AND has a stored hash), otherwise a fixed-cost dummy
-	// hash. This keeps the verify cost identical on every code path (UX-DR7)
-	// and never verifies against an empty/malformed hash (which would leak
-	// timing for accounts without credentials).
-	canAuthenticate := user != nil && user.State == StateActive && user.PasswordHash != ""
+	// Single canonical verify (UX-DR7): exactly one Argon2id verify always runs.
+	// When the account is ACTIVE and holds a VALID (unexpired) one-time password
+	// (Spec 2.8), the presented password is verified against the OTP hash
+	// INSTEAD of the normal password hash. Otherwise the account's real hash is
+	// the target when it can authenticate (active AND has a stored hash), and a
+	// fixed-cost dummy hash is used for every other combination. A deactivated/
+	// pending account with an OTP hash still falls to the dummy hash — the OTP
+	// never re-admits a deactivated account (Spec 2.8). An expired OTP is not
+	// accepted: normal password auth applies (LOGIN_OTP_EXPIRED).
+	otpUsable := false
+	canAuthenticate := false
 	targetHash := dummyPasswordHash
-	if canAuthenticate {
-		targetHash = user.PasswordHash
+	if user != nil && user.State == StateActive {
+		if user.OneTimePasswordHash != "" && user.OneTimePasswordExpiresAt.After(now) {
+			otpUsable = true
+			targetHash = user.OneTimePasswordHash
+		} else if user.PasswordHash != "" {
+			canAuthenticate = true
+			targetHash = user.PasswordHash
+		}
 	}
 
 	ok, err := s.hasher.Verify(input.Password, targetHash)
-	if err != nil || !ok || !canAuthenticate {
-		// Wrong password for any account state (or a non-existent account)
-		// maps to the same error (UX-DR7). Every failure — including unknown
-		// emails — is recorded against the normalized email so the counter and
-		// lockout apply identically to every probed email (anti-enumeration).
+	if err != nil || !ok || (!otpUsable && !canAuthenticate) {
+		// Wrong password — or wrong/expired OTP (Spec 2.8) — for any account
+		// state (or a non-existent account) maps to the same error (UX-DR7).
+		// Every failure — including unknown emails — is recorded against the
+		// normalized email so the counter and lockout apply identically to
+		// every probed email (anti-enumeration).
 		if err := s.repo.IncrementLoginAttempts(ctx, email); err != nil {
 			return nil, fmt.Errorf("user core: failed to record login failure: %w", err)
 		}
@@ -198,17 +210,50 @@ func (s *Service) Login(ctx context.Context, input LoginInput) (*LoginResult, er
 		}
 	}
 
-	// Forced password change (FR-26): when the account is flagged
-	// must_change_password (SMTP-not-configured fallback / Epic 2 one-time
-	// password), authentication SUCCEEDS but no app session is issued. Instead
-	// a fresh single-use reset token is minted and returned so the client runs
-	// the forced-change flow (/reset-password/<token>); completing it clears
-	// the flag and revokes sessions, forcing a clean re-login. Ordering: the
-	// MFA step above has already validated the second factor.
-	if user.MustChangePassword {
+	// Forced password change (FR-26 / Spec 2.8 one-time password): when the
+	// account is flagged must_change_password — or the password slot was
+	// authenticated by a one-time password — authentication SUCCEEDS but no app
+	// session is issued. Instead a fresh single-use reset token is minted and
+	// returned so the client runs the forced-change flow (/reset-password/
+	// <token>); completing it clears the flag and revokes sessions, forcing a
+	// clean re-login. Ordering: the MFA step above has already validated the
+	// second factor.
+	//
+	// A one-time-password login is consumed here as an atomic compare-and-swap
+	// claim AFTER the token is minted — a mint failure must never strand the
+	// user without a credential (Design Notes). If a racing login already
+	// consumed the OTP, this login fails (single-use under concurrency).
+	if user.MustChangePassword || otpUsable {
 		raw, err := s.mintResetToken(ctx, user.ID)
 		if err != nil {
 			return nil, fmt.Errorf("user core: failed to issue forced-change token: %w", err)
+		}
+		if otpUsable {
+			consumed, err := s.repo.ClearUserOneTimePassword(ctx, user.ID, user.OneTimePasswordHash)
+			if err != nil {
+				return nil, fmt.Errorf("user core: failed to consume one-time password: %w", err)
+			}
+			if !consumed {
+				// A racing login already consumed this OTP — the claim fails and
+				// the login is rejected (LOGIN_OTP_CONSUMED). The just-minted
+				// reset token is discarded so the losing login never leaves an
+				// orphaned, undelivered credential behind.
+				if err := s.repo.DeletePasswordResetToken(ctx, hashToken(raw)); err != nil {
+					s.log().Warn("failed to discard orphaned reset token after lost one-time-password claim", "error", err)
+				}
+				return nil, ErrInvalidCredentials
+			}
+			// Winning claim only: belt-and-suspenders — ensure the flag is set so
+			// the OTP login always lands in the forced-change flow (it is already
+			// true in practice, SetUserOneTimePassword sets it at issuance; this
+			// only fires when it was somehow cleared in between). Best-effort: a
+			// failure is logged, never rolled back into the successful login —
+			// the reset token already delivers the flow (availability, NFR-O1).
+			if !user.MustChangePassword {
+				if err := s.repo.SetUserMustChangePassword(ctx, user.ID); err != nil {
+					s.log().Warn("failed to flag forced password change after one-time-password login", "error", err)
+				}
+			}
 		}
 		return &LoginResult{MustChangePassword: true, ResetToken: raw}, nil
 	}

@@ -248,7 +248,7 @@ func (r *Repository) CreateAdminUser(ctx context.Context, email, firstName, last
 	}
 	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
 		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
-		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail)
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail, row.OneTimePasswordHash, row.OneTimePasswordExpiresAt)
 }
 
 // UpdateAdminUser atomically replaces a user's profile fields, state AND all
@@ -362,7 +362,7 @@ func (r *Repository) UpdateAdminUser(ctx context.Context, userID, email, firstNa
 	}
 	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
 		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
-		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail)
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail, row.OneTimePasswordHash, row.OneTimePasswordExpiresAt)
 }
 
 // DeactivateUser flips an ACTIVE user to `deactivated` AND revokes the user's
@@ -417,7 +417,7 @@ func (r *Repository) DeactivateUser(ctx context.Context, userID string) (*core.U
 	}
 	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
 		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
-		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail)
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail, row.OneTimePasswordHash, row.OneTimePasswordExpiresAt)
 }
 
 // ListUserGroups returns every organisational user group (Story 2.6, AD-12),

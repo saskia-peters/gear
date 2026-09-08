@@ -339,7 +339,10 @@ describe('UserDetail', () => {
     }))
     const user = userEvent.setup()
     const onRefreshDetail = vi.fn()
-    renderDetail({ canManageGroups: true, userGroups: [{ id: 'ug-ost', name: 'Gruppe Ost' }, { id: 'ug-west', name: 'Gruppe West' }], onRefreshDetail })
+    renderDetail({ canManageGroups: true, userGroups: [
+      { id: 'ug-ost', name: 'Gruppe Ost', description: '', created_at: '' },
+      { id: 'ug-west', name: 'Gruppe West', description: '', created_at: '' },
+    ], onRefreshDetail })
 
     // The editable checkbox list appears (not just badges).
     await user.click(screen.getByRole('button', { name: 'Benutzergruppen speichern' }))
@@ -349,8 +352,117 @@ describe('UserDetail', () => {
   })
 
   it('GROUPS_READONLY: without user_groups.manage the section is read-only badges', () => {
-    renderDetail({ canManageGroups: false, userGroups: [{ id: 'ug-ost', name: 'Gruppe Ost' }] })
+    renderDetail({ canManageGroups: false, userGroups: [{ id: 'ug-ost', name: 'Gruppe Ost', description: '', created_at: '' }] })
     expect(screen.queryByRole('button', { name: 'Benutzergruppen speichern' })).not.toBeInTheDocument()
     expect(screen.getByText('Gruppe Ost')).toBeInTheDocument()
+  })
+
+  it('OTP_ISSUE: the confirm flow shows the one-time password once with the server message', async () => {
+    // ISSUE_OK (Spec 2.8): a confirmed issuance displays the plaintext OTP once
+    // in the show-once panel, using the SERVER-authoritative German message
+    // (finding 8 — never a hardcoded parallel warning).
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        message: 'Einmal-Passwort erstellt. Nur einmal anzeigen — sicher außerhalb des Systems übermitteln (nicht per E-Mail).',
+        user_id: 'u-tim',
+        email: 'tim@gear.local',
+        one_time_password: 'ABC2345678',
+        expires_at: '2099-01-01T00:00:00Z',
+      }),
+    }))
+    const user = userEvent.setup()
+    renderDetail()
+
+    await user.click(screen.getByRole('button', { name: 'Einmal-Passwort' }))
+    expect(screen.getByText(/nur einmal angezeigt/)).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Ja, erstellen' }))
+
+    await waitFor(() => {
+      expect(screen.getByText('ABC2345678')).toBeInTheDocument()
+    })
+    expect(screen.getByText(/Nur einmal anzeigen/)).toBeInTheDocument()
+    // The validity window is shown so the admin knows the OTP's TTL.
+    expect(screen.getByText(/Gültig bis/)).toBeInTheDocument()
+    const fetchMock = vi.mocked(fetch)
+    expect(fetchMock).toHaveBeenCalledWith('/api/v1/admin/users/u-tim/otp', expect.objectContaining({
+      method: 'POST',
+      body: JSON.stringify({ confirmed: true }),
+    }))
+  })
+
+  it('OTP_DISMISS: closing the panel discards the one-time password', async () => {
+    // Spec 2.8: the OTP is shown ONCE; closing the panel discards it (no
+    // re-display, no copy persistence in SPA state).
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce({
+      ok: true,
+      status: 200,
+      json: async () => ({
+        message: 'Einmal-Passwort erstellt. Nur einmal anzeigen — sicher außerhalb des Systems übermitteln (nicht per E-Mail).',
+        user_id: 'u-tim',
+        email: 'tim@gear.local',
+        one_time_password: 'ABC2345678',
+        expires_at: '2099-01-01T00:00:00Z',
+      }),
+    }))
+    const user = userEvent.setup()
+    renderDetail()
+
+    await user.click(screen.getByRole('button', { name: 'Einmal-Passwort' }))
+    await user.click(screen.getByRole('button', { name: 'Ja, erstellen' }))
+    await waitFor(() => expect(screen.getByText('ABC2345678')).toBeInTheDocument())
+
+    await user.click(screen.getByRole('button', { name: 'Schließen' }))
+    expect(screen.queryByText('ABC2345678')).not.toBeInTheDocument()
+  })
+
+  it('OTP_FORBIDDEN: a 403 on issuance invokes onForbidden (parent leaves the module)', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 403,
+      json: async () => ({ error: { code: 'forbidden', message: 'Keine Berechtigung.' } }),
+    }))
+    const user = userEvent.setup()
+    const onForbidden = vi.fn()
+    renderDetail({ onForbidden })
+
+    await user.click(screen.getByRole('button', { name: 'Einmal-Passwort' }))
+    await user.click(screen.getByRole('button', { name: 'Ja, erstellen' }))
+
+    await waitFor(() => {
+      expect(onForbidden).toHaveBeenCalled()
+    })
+  })
+
+  it('OTP_UNAUTHORIZED: a 401 on issuance invokes onUnauthorized (login redirect)', async () => {
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValueOnce({
+      ok: false,
+      status: 401,
+      json: async () => ({ error: { code: 'unauthorized', message: 'Authentifizierung erforderlich.' } }),
+    }))
+    const user = userEvent.setup()
+    const onUnauthorized = vi.fn()
+    renderDetail({ onUnauthorized })
+
+    await user.click(screen.getByRole('button', { name: 'Einmal-Passwort' }))
+    await user.click(screen.getByRole('button', { name: 'Ja, erstellen' }))
+
+    await waitFor(() => {
+      expect(onUnauthorized).toHaveBeenCalled()
+    })
+  })
+
+  it('OTP_HIDDEN: without users.manage or for an inactive user the action is hidden', () => {
+    // Spec 2.8: the OTP action is visible only for ACTIVE users and only to a
+    // users.manage holder.
+    renderDetail({ canManage: false })
+    expect(screen.queryByRole('button', { name: 'Einmal-Passwort' })).not.toBeInTheDocument()
+
+    const inactive = activeUser()
+    inactive.status = 'deactivated'
+    renderDetail({ user: inactive })
+    expect(screen.queryByRole('button', { name: 'Einmal-Passwort' })).not.toBeInTheDocument()
   })
 })

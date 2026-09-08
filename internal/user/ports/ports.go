@@ -111,6 +111,13 @@ type Service interface {
 	CreateAdminUser(ctx context.Context, actor *core.User, input core.CreateAdminUserInput) (*core.AdminUserWriteResult, error)
 	UpdateAdminUser(ctx context.Context, actor *core.User, userID string, input core.UpdateAdminUserInput) (*core.AdminUserWriteResult, error)
 	DeactivateUser(ctx context.Context, actor *core.User, userID string, confirmed bool) (*core.DeactivateUserResult, error)
+	// IssueOneTimePassword (Spec 2.8, FR-26 Epic 2) generates a single-use,
+	// hashed, expiring one-time password for an ACTIVE account and flags it
+	// must_change_password, so the user's next login with the OTP runs the
+	// forced-change flow (Story 1.8) instead of issuing an app session. The
+	// plaintext OTP is returned exactly once (never stored/emailed/read back).
+	// Gated by `users.manage` (defense-in-depth); a non-active target → 409.
+	IssueOneTimePassword(ctx context.Context, actor *core.User, userID string, confirmed bool) (*core.OneTimePasswordResult, error)
 	ListUserGroups(ctx context.Context, actor *core.User) ([]*core.UserGroup, error)
 	CreateUserGroup(ctx context.Context, actor *core.User, input core.CreateUserGroupInput) (*core.UserGroup, error)
 	AssignUserGroupMembers(ctx context.Context, actor *core.User, groupID string, userIDs []string) (*core.UserGroup, error)
@@ -172,9 +179,20 @@ type Repository interface {
 	CreatePasswordResetToken(ctx context.Context, userID, tokenHash string, expiresAt time.Time) error
 	ConsumePasswordResetToken(ctx context.Context, tokenHash string) (*core.PasswordResetToken, error)
 	DeleteExpiredPasswordResetTokens(ctx context.Context, userID string) error
+	DeletePasswordResetToken(ctx context.Context, tokenHash string) error
 	SetUserMustChangePassword(ctx context.Context, userID string) error
 	ClearUserMustChangePassword(ctx context.Context, userID string) error
 	InsertAuditEventAnonymous(ctx context.Context, operation string) error
+	// One-time-password persistence (Spec 2.8): SetUserOneTimePassword upserts
+	// the Argon2id hash + expiry of an admin-issued OTP and flags
+	// must_change_password, reporting whether a row was affected (false = the
+	// target vanished); ClearUserOneTimePassword atomically consumes the OTP
+	// via compare-and-swap on the stored hash (false = already consumed by a
+	// racing login); GetUserByID resolves a user's profile + state (unknown id
+	// → ErrAdminUserNotFound).
+	SetUserOneTimePassword(ctx context.Context, userID, hash string, expiresAt time.Time) (bool, error)
+	ClearUserOneTimePassword(ctx context.Context, userID, hash string) (bool, error)
+	GetUserByID(ctx context.Context, userID string) (*core.User, error)
 	IsUserInPermissionGroup(ctx context.Context, userID, groupName string) (bool, error)
 	// Dual-admin recovery persistence (FR-27).
 	CountActiveAdmins(ctx context.Context) (int, error)

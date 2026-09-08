@@ -45,7 +45,7 @@ func (r *Repository) CreateRegisteredUser(ctx context.Context, email, displayNam
 
 	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
 		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
-		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail)
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail, row.OneTimePasswordHash, row.OneTimePasswordExpiresAt)
 }
 
 // GetUserByEmail queries a user by their email address. If not found, returns nil, nil.
@@ -60,7 +60,7 @@ func (r *Repository) GetUserByEmail(ctx context.Context, email string) (*core.Us
 
 	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
 		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
-		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail)
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail, row.OneTimePasswordHash, row.OneTimePasswordExpiresAt)
 }
 
 // ListPermissionsByUser resolves the user's live permission set (AD-12):
@@ -286,7 +286,7 @@ func (r *Repository) UpdateUserPassword(ctx context.Context, userID, passwordHas
 	}
 	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
 		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
-		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail)
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail, row.OneTimePasswordHash, row.OneTimePasswordExpiresAt)
 }
 
 // UpdateUserProfile persists the user's editable base data (first/last/display
@@ -324,7 +324,7 @@ func (r *Repository) UpdateUserProfile(ctx context.Context, userID, firstName, l
 	}
 	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
 		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
-		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail)
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail, row.OneTimePasswordHash, row.OneTimePasswordExpiresAt)
 }
 
 // StagePendingEmail stores a staged email change (Story 2.1) in a single
@@ -354,7 +354,7 @@ func (r *Repository) StagePendingEmail(ctx context.Context, userID, pendingEmail
 	}
 	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
 		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
-		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail)
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail, row.OneTimePasswordHash, row.OneTimePasswordExpiresAt)
 }
 
 // ClearPendingEmail clears a staged email change (pending_email -> NULL) for
@@ -522,6 +522,76 @@ func (r *Repository) ClearUserMustChangePassword(ctx context.Context, userID str
 		return err
 	}
 	return r.queries.ClearUserMustChangePassword(ctx, uid)
+}
+
+// GetUserByID returns a single user's profile + state for the admin surfaces
+// (Story 2.6 / Spec 2.8 one-time-password target check). No secret material is
+// selected. An unknown or malformed id maps to core.ErrAdminUserNotFound.
+func (r *Repository) GetUserByID(ctx context.Context, userID string) (*core.User, error) {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return nil, core.ErrAdminUserNotFound
+	}
+	row, err := r.queries.GetUserByID(ctx, uid)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, core.ErrAdminUserNotFound
+		}
+		return nil, err
+	}
+	return &core.User{
+		ID:          uuidToString(row.ID.Bytes),
+		Email:       row.Email,
+		DisplayName: row.DisplayName,
+		FirstName:   row.FirstName,
+		LastName:    row.LastName,
+		State:       core.UserState(row.State),
+	}, nil
+}
+
+// SetUserOneTimePassword upserts an admin-issued one-time password for an
+// ACTIVE account (Spec 2.8): it stores the Argon2id hash + TTL expiry and flips
+// must_change_password so the next login forces the Story 1.8 change flow. The
+// plaintext OTP is never stored (NFR-S4). Re-issuing REPLACES the hash/expiry,
+// so the old OTP is invalid immediately (RE_ISSUE). It reports whether a row
+// was actually affected: a zero-row write (the target vanished between the
+// eligibility read and this update) returns false so the caller never hands
+// over a credential that cannot work.
+func (r *Repository) SetUserOneTimePassword(ctx context.Context, userID, hash string, expiresAt time.Time) (bool, error) {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return false, err
+	}
+	n, err := r.queries.SetUserOneTimePassword(ctx, SetUserOneTimePasswordParams{
+		ID:                         uid,
+		OneTimePasswordHash:        hash,
+		OneTimePasswordExpiresAt:   pgtype.Timestamptz{Time: expiresAt, Valid: true},
+	})
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// ClearUserOneTimePassword atomically consumes a single-use one-time password
+// (Spec 2.8 Design Notes): the UPDATE is a compare-and-swap on the stored hash
+// (WHERE id AND one_time_password_hash = $2), so two concurrent logins
+// presenting the same OTP cannot both succeed — the losing statement affects
+// zero rows and this method reports false, which the caller treats as an
+// already-consumed OTP (login fails).
+func (r *Repository) ClearUserOneTimePassword(ctx context.Context, userID, hash string) (bool, error) {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return false, err
+	}
+	n, err := r.queries.ClearUserOneTimePassword(ctx, ClearUserOneTimePasswordParams{
+		ID:                  uid,
+		OneTimePasswordHash: hash,
+	})
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
 }
 
 // IsUserInPermissionGroup reports whether the user is a member of the named
@@ -801,7 +871,7 @@ func (r *Repository) ApproveUser(ctx context.Context, userID string) (*core.User
 
 	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
 		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
-		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail)
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail, row.OneTimePasswordHash, row.OneTimePasswordExpiresAt)
 }
 
 // RejectUser atomically transitions a pending-approval user to deactivated
@@ -839,7 +909,7 @@ func (r *Repository) RejectUser(ctx context.Context, userID string) (*core.User,
 
 	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
 		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
-		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail)
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail, row.OneTimePasswordHash, row.OneTimePasswordExpiresAt)
 }
 
 func uuidToString(b [16]byte) string {
@@ -858,7 +928,7 @@ func uuidToString(b [16]byte) string {
 // JSON, so a "malformed" value is a valid non-object shape) surfaces as a clear
 // error instead of silently dropping it (Story 1.9 boundary: reads never crash
 // and never silently lose data).
-func userFromRow(id pgtype.UUID, email, displayName, firstName, lastName, passwordHash, state string, isMfa, mustChange bool, totpSecret pgtype.Text, pendingSecret pgtype.Text, pendingExpiry pgtype.Timestamptz, attributes []byte, createdAt, updatedAt pgtype.Timestamptz, pendingEmail pgtype.Text) (*core.User, error) {
+func userFromRow(id pgtype.UUID, email, displayName, firstName, lastName, passwordHash, state string, isMfa, mustChange bool, totpSecret pgtype.Text, pendingSecret pgtype.Text, pendingExpiry pgtype.Timestamptz, attributes []byte, createdAt, updatedAt pgtype.Timestamptz, pendingEmail pgtype.Text, oneTimePasswordHash string, oneTimePasswordExpiresAt pgtype.Timestamptz) (*core.User, error) {
 	var attrs map[string]any
 	if len(attributes) > 0 {
 		if err := json.Unmarshal(attributes, &attrs); err != nil {
@@ -881,6 +951,10 @@ func userFromRow(id pgtype.UUID, email, displayName, firstName, lastName, passwo
 	if pendingEmail.Valid {
 		staged = pendingEmail.String
 	}
+	var otpExpiry time.Time
+	if oneTimePasswordExpiresAt.Valid {
+		otpExpiry = oneTimePasswordExpiresAt.Time
+	}
 	return &core.User{
 		ID:                         uuidToString(id.Bytes),
 		Email:                      email,
@@ -892,6 +966,8 @@ func userFromRow(id pgtype.UUID, email, displayName, firstName, lastName, passwo
 		State:                      core.UserState(state),
 		IsMFAEnabled:               isMfa,
 		MustChangePassword:         mustChange,
+		OneTimePasswordHash:        oneTimePasswordHash,
+		OneTimePasswordExpiresAt:   otpExpiry,
 		TotpSecretEncrypted:        secret,
 		PendingTotpSecretEncrypted: pending,
 		PendingTotpExpiresAt:       expiry,

@@ -34,6 +34,14 @@ type mockRepo struct {
 	resetErr    error
 	// mustChange users flagged for a forced password change, keyed by user ID.
 	mustChange map[string]bool
+	// consumeOtpForceLost makes ClearUserOneTimePassword report "already
+	// consumed" (false), exercising the concurrent-consume CAS claim failure in
+	// Login (Spec 2.8 Design Notes).
+	consumeOtpForceLost bool
+	// setOtpForceLost makes SetUserOneTimePassword report zero rows affected
+	// (the target vanished between the eligibility read and the write), so
+	// IssueOneTimePassword maps it to ErrAdminUserNotFound (Spec 2.8).
+	setOtpForceLost bool
 	// adminGroup is the set of user IDs considered members of the admin group
 	// (Story 1.8); IsUserInPermissionGroup resolves against it.
 	adminGroup map[string]bool
@@ -475,6 +483,52 @@ func (m *mockRepo) ClearUserMustChangePassword(_ context.Context, userID string)
 		}
 	}
 	return nil
+}
+
+// GetUserByID returns a user's profile + state by ID (Spec 2.8 target check).
+// An unknown id maps to ErrAdminUserNotFound.
+func (m *mockRepo) GetUserByID(_ context.Context, userID string) (*User, error) {
+	u := m.userByID(userID)
+	if u == nil {
+		return nil, ErrAdminUserNotFound
+	}
+	return u, nil
+}
+
+// SetUserOneTimePassword stores the OTP hash + expiry and flags
+// must_change_password (Spec 2.8). Re-issuing replaces the previous values. It
+// reports whether a row was affected (false = the target vanished).
+func (m *mockRepo) SetUserOneTimePassword(_ context.Context, userID, hash string, expiresAt time.Time) (bool, error) {
+	if m.setOtpForceLost {
+		return false, nil
+	}
+	u := m.userByID(userID)
+	if u == nil {
+		return false, ErrAdminUserNotFound
+	}
+	u.OneTimePasswordHash = hash
+	u.OneTimePasswordExpiresAt = expiresAt
+	u.MustChangePassword = true
+	m.mustChange[userID] = true
+	return true, nil
+}
+
+// ClearUserOneTimePassword atomically consumes the OTP via compare-and-swap on
+// the stored hash (Spec 2.8 Design Notes): the hash must still equal the
+// presented one, otherwise the OTP was already consumed by a racing login and
+// false is reported. consumeOtpForceLost lets tests force the "already
+// consumed" outcome.
+func (m *mockRepo) ClearUserOneTimePassword(_ context.Context, userID, hash string) (bool, error) {
+	if m.consumeOtpForceLost {
+		return false, nil
+	}
+	u := m.userByID(userID)
+	if u == nil || u.OneTimePasswordHash != hash {
+		return false, nil
+	}
+	u.OneTimePasswordHash = ""
+	u.OneTimePasswordExpiresAt = time.Time{}
+	return true, nil
 }
 
 // IsUserInPermissionGroup reports admin-group membership (Story 1.8). Tests

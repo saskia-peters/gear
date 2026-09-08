@@ -133,6 +133,32 @@ func (q *Queries) ClearUserMustChangePassword(ctx context.Context, id pgtype.UUI
 	return err
 }
 
+const clearUserOneTimePassword = `-- name: ClearUserOneTimePassword :execrows
+UPDATE users
+SET one_time_password_hash       = '',
+    one_time_password_expires_at = NULL,
+    updated_at                   = now()
+WHERE id = $1 AND one_time_password_hash = $2
+`
+
+type ClearUserOneTimePasswordParams struct {
+	ID                  pgtype.UUID `json:"id"`
+	OneTimePasswordHash string      `json:"one_time_password_hash"`
+}
+
+// Atomic compare-and-swap consumption of a single-use one-time password (Spec
+// 2.8 Design Notes): clears the OTP hash+expiry ONLY while the stored hash
+// still equals the presented one, so two concurrent logins with the same OTP
+// cannot both succeed — the losing statement affects zero rows and the caller
+// treats it as an already-consumed OTP (login fails).
+func (q *Queries) ClearUserOneTimePassword(ctx context.Context, arg ClearUserOneTimePasswordParams) (int64, error) {
+	result, err := q.db.Exec(ctx, clearUserOneTimePassword, arg.ID, arg.OneTimePasswordHash)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const clearUserPendingTotpSecret = `-- name: ClearUserPendingTotpSecret :exec
 UPDATE users
 SET pending_totp_secret_encrypted = NULL,
@@ -338,7 +364,7 @@ func (q *Queries) CreateAdminRecoveryRequest(ctx context.Context, arg CreateAdmi
 const createAdminUser = `-- name: CreateAdminUser :one
 INSERT INTO users (email, display_name, first_name, last_name, password_hash, state)
 VALUES ($1, $2, $3, $4, '', $5)
-RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password, one_time_password_hash, one_time_password_expires_at
 `
 
 type CreateAdminUserParams struct {
@@ -366,6 +392,8 @@ type CreateAdminUserRow struct {
 	UpdatedAt                  pgtype.Timestamptz `json:"updated_at"`
 	PendingEmail               pgtype.Text        `json:"pending_email"`
 	MustChangePassword         bool               `json:"must_change_password"`
+	OneTimePasswordHash        string             `json:"one_time_password_hash"`
+	OneTimePasswordExpiresAt   pgtype.Timestamptz `json:"one_time_password_expires_at"`
 }
 
 // Create a user from the admin surface (Story 2.6): the submitted profile
@@ -400,6 +428,8 @@ func (q *Queries) CreateAdminUser(ctx context.Context, arg CreateAdminUserParams
 		&i.UpdatedAt,
 		&i.PendingEmail,
 		&i.MustChangePassword,
+		&i.OneTimePasswordHash,
+		&i.OneTimePasswordExpiresAt,
 	)
 	return i, err
 }
@@ -523,7 +553,7 @@ INSERT INTO users (
     $5,
     'pending_approval'
 )
-RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password, one_time_password_hash, one_time_password_expires_at
 `
 
 type CreateRegisteredUserParams struct {
@@ -551,6 +581,8 @@ type CreateRegisteredUserRow struct {
 	UpdatedAt                  pgtype.Timestamptz `json:"updated_at"`
 	PendingEmail               pgtype.Text        `json:"pending_email"`
 	MustChangePassword         bool               `json:"must_change_password"`
+	OneTimePasswordHash        string             `json:"one_time_password_hash"`
+	OneTimePasswordExpiresAt   pgtype.Timestamptz `json:"one_time_password_expires_at"`
 }
 
 func (q *Queries) CreateRegisteredUser(ctx context.Context, arg CreateRegisteredUserParams) (CreateRegisteredUserRow, error) {
@@ -579,6 +611,8 @@ func (q *Queries) CreateRegisteredUser(ctx context.Context, arg CreateRegistered
 		&i.UpdatedAt,
 		&i.PendingEmail,
 		&i.MustChangePassword,
+		&i.OneTimePasswordHash,
+		&i.OneTimePasswordExpiresAt,
 	)
 	return i, err
 }
@@ -1069,7 +1103,7 @@ func (q *Queries) GetSessionByTokenHash(ctx context.Context, tokenHash string) (
 }
 
 const getUserByEmail = `-- name: GetUserByEmail :one
-SELECT id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password
+SELECT id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password, one_time_password_hash, one_time_password_expires_at
 FROM users
 WHERE email = $1
 `
@@ -1091,6 +1125,8 @@ type GetUserByEmailRow struct {
 	UpdatedAt                  pgtype.Timestamptz `json:"updated_at"`
 	PendingEmail               pgtype.Text        `json:"pending_email"`
 	MustChangePassword         bool               `json:"must_change_password"`
+	OneTimePasswordHash        string             `json:"one_time_password_hash"`
+	OneTimePasswordExpiresAt   pgtype.Timestamptz `json:"one_time_password_expires_at"`
 }
 
 func (q *Queries) GetUserByEmail(ctx context.Context, email string) (GetUserByEmailRow, error) {
@@ -1113,6 +1149,8 @@ func (q *Queries) GetUserByEmail(ctx context.Context, email string) (GetUserByEm
 		&i.UpdatedAt,
 		&i.PendingEmail,
 		&i.MustChangePassword,
+		&i.OneTimePasswordHash,
+		&i.OneTimePasswordExpiresAt,
 	)
 	return i, err
 }
@@ -2500,6 +2538,37 @@ func (q *Queries) SetUserMustChangePassword(ctx context.Context, id pgtype.UUID)
 	return err
 }
 
+const setUserOneTimePassword = `-- name: SetUserOneTimePassword :execrows
+UPDATE users
+SET one_time_password_hash          = $2,
+    one_time_password_expires_at    = $3,
+    must_change_password            = true,
+    updated_at                      = now()
+WHERE id = $1
+`
+
+type SetUserOneTimePasswordParams struct {
+	ID                       pgtype.UUID        `json:"id"`
+	OneTimePasswordHash      string             `json:"one_time_password_hash"`
+	OneTimePasswordExpiresAt pgtype.Timestamptz `json:"one_time_password_expires_at"`
+}
+
+// Upsert an admin-issued one-time password for an ACTIVE account (Spec 2.8):
+// stores the Argon2id hash of a freshly generated OTP with its TTL expiry AND
+// flips must_change_password so the next login forces the Story 1.8 change
+// flow. The plaintext OTP is never stored (NFR-S4). Re-issuing REPLACES the
+// hash/expiry, so the old OTP is invalid immediately (RE_ISSUE). A zero-row
+// update (the target vanished between the eligibility read and this write) is
+// reported via :execrows so the caller never hands over a credential that
+// cannot work.
+func (q *Queries) SetUserOneTimePassword(ctx context.Context, arg SetUserOneTimePasswordParams) (int64, error) {
+	result, err := q.db.Exec(ctx, setUserOneTimePassword, arg.ID, arg.OneTimePasswordHash, arg.OneTimePasswordExpiresAt)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const setUserPendingTotpSecret = `-- name: SetUserPendingTotpSecret :exec
 UPDATE users
 SET pending_totp_secret_encrypted = $2,
@@ -2526,7 +2595,7 @@ const setUserState = `-- name: SetUserState :one
 UPDATE users
 SET state = $1, updated_at = now()
 WHERE id = $2 AND state = $3
-RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password, one_time_password_hash, one_time_password_expires_at
 `
 
 type SetUserStateParams struct {
@@ -2552,6 +2621,8 @@ type SetUserStateRow struct {
 	UpdatedAt                  pgtype.Timestamptz `json:"updated_at"`
 	PendingEmail               pgtype.Text        `json:"pending_email"`
 	MustChangePassword         bool               `json:"must_change_password"`
+	OneTimePasswordHash        string             `json:"one_time_password_hash"`
+	OneTimePasswordExpiresAt   pgtype.Timestamptz `json:"one_time_password_expires_at"`
 }
 
 // Conditional account-state transition (Story 2.4, FR-20): flips a user from
@@ -2581,6 +2652,8 @@ func (q *Queries) SetUserState(ctx context.Context, arg SetUserStateParams) (Set
 		&i.UpdatedAt,
 		&i.PendingEmail,
 		&i.MustChangePassword,
+		&i.OneTimePasswordHash,
+		&i.OneTimePasswordExpiresAt,
 	)
 	return i, err
 }
@@ -2618,7 +2691,7 @@ WHERE users.id = $1
       WHERE other.id <> $1
         AND (lower(other.email) = lower($2) OR lower(other.pending_email) = lower($2))
   )
-RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password, one_time_password_hash, one_time_password_expires_at
 `
 
 type StagePendingEmailParams struct {
@@ -2643,6 +2716,8 @@ type StagePendingEmailRow struct {
 	UpdatedAt                  pgtype.Timestamptz `json:"updated_at"`
 	PendingEmail               pgtype.Text        `json:"pending_email"`
 	MustChangePassword         bool               `json:"must_change_password"`
+	OneTimePasswordHash        string             `json:"one_time_password_hash"`
+	OneTimePasswordExpiresAt   pgtype.Timestamptz `json:"one_time_password_expires_at"`
 }
 
 // Persist a STAGED email change (Story 2.1): the new address is stored in
@@ -2677,6 +2752,8 @@ func (q *Queries) StagePendingEmail(ctx context.Context, arg StagePendingEmailPa
 		&i.UpdatedAt,
 		&i.PendingEmail,
 		&i.MustChangePassword,
+		&i.OneTimePasswordHash,
+		&i.OneTimePasswordExpiresAt,
 	)
 	return i, err
 }
@@ -2769,7 +2846,7 @@ UPDATE users
 SET password_hash = $2,
     updated_at    = now()
 WHERE id = $1
-RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password, one_time_password_hash, one_time_password_expires_at
 `
 
 type UpdateUserPasswordParams struct {
@@ -2794,6 +2871,8 @@ type UpdateUserPasswordRow struct {
 	UpdatedAt                  pgtype.Timestamptz `json:"updated_at"`
 	PendingEmail               pgtype.Text        `json:"pending_email"`
 	MustChangePassword         bool               `json:"must_change_password"`
+	OneTimePasswordHash        string             `json:"one_time_password_hash"`
+	OneTimePasswordExpiresAt   pgtype.Timestamptz `json:"one_time_password_expires_at"`
 }
 
 // Persist a new password hash for a user (FR-25). The plaintext password is
@@ -2819,6 +2898,8 @@ func (q *Queries) UpdateUserPassword(ctx context.Context, arg UpdateUserPassword
 		&i.UpdatedAt,
 		&i.PendingEmail,
 		&i.MustChangePassword,
+		&i.OneTimePasswordHash,
+		&i.OneTimePasswordExpiresAt,
 	)
 	return i, err
 }
@@ -2831,7 +2912,7 @@ SET first_name   = $2,
     attributes   = COALESCE($5, '{}'::jsonb),
     updated_at   = now()
 WHERE id = $1
-RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password, one_time_password_hash, one_time_password_expires_at
 `
 
 type UpdateUserProfileParams struct {
@@ -2859,6 +2940,8 @@ type UpdateUserProfileRow struct {
 	UpdatedAt                  pgtype.Timestamptz `json:"updated_at"`
 	PendingEmail               pgtype.Text        `json:"pending_email"`
 	MustChangePassword         bool               `json:"must_change_password"`
+	OneTimePasswordHash        string             `json:"one_time_password_hash"`
+	OneTimePasswordExpiresAt   pgtype.Timestamptz `json:"one_time_password_expires_at"`
 }
 
 // Persist the user's editable base data (first/last/display name, Story 2.1) and
@@ -2896,6 +2979,8 @@ func (q *Queries) UpdateUserProfile(ctx context.Context, arg UpdateUserProfilePa
 		&i.UpdatedAt,
 		&i.PendingEmail,
 		&i.MustChangePassword,
+		&i.OneTimePasswordHash,
+		&i.OneTimePasswordExpiresAt,
 	)
 	return i, err
 }
@@ -2909,7 +2994,7 @@ SET email        = $2,
     state        = $6,
     updated_at   = now()
 WHERE id = $1
-RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password, one_time_password_hash, one_time_password_expires_at
 `
 
 type UpdateUserProfileAdminParams struct {
@@ -2938,6 +3023,8 @@ type UpdateUserProfileAdminRow struct {
 	UpdatedAt                  pgtype.Timestamptz `json:"updated_at"`
 	PendingEmail               pgtype.Text        `json:"pending_email"`
 	MustChangePassword         bool               `json:"must_change_password"`
+	OneTimePasswordHash        string             `json:"one_time_password_hash"`
+	OneTimePasswordExpiresAt   pgtype.Timestamptz `json:"one_time_password_expires_at"`
 }
 
 // Replace an existing user's profile fields AND state from the admin surface
@@ -2972,6 +3059,8 @@ func (q *Queries) UpdateUserProfileAdmin(ctx context.Context, arg UpdateUserProf
 		&i.UpdatedAt,
 		&i.PendingEmail,
 		&i.MustChangePassword,
+		&i.OneTimePasswordHash,
+		&i.OneTimePasswordExpiresAt,
 	)
 	return i, err
 }

@@ -257,7 +257,7 @@ The one golang-migrate schema (NFR-R2, AD-11) holds every table the app persists
 
 | # | Table | Stores | Owned by | Notes / Non-technical meaning |
 | --- | --- | --- | --- | --- |
-| 1 | `users` | One row per person (name, email, account state, MFA flag) | User | The people. `state` = `pending_approval` / `active` / `deactivated` (FR-5). `attributes JSONB` carries flexible metadata (FR-7). |
+| 1 | `users` | One row per person (name, email, account state, MFA flag) | User | The people. `state` = `pending_approval` / `active` / `deactivated` (FR-5). `attributes JSONB` carries flexible metadata (FR-7). `one_time_password_hash` (Argon2id, Spec 2.8) + `one_time_password_expires_at` hold a single-use admin-issued one-time password (ACTIVE-only, never in plaintext, consumed on the one login that runs the forced password change); `must_change_password` flags an account whose next login must force a change (FR-26 / Epic 2 OTP fallback). |
 | 2 | `user_groups` | Organisational groups (e.g. "Gruppe Ost", "Fachgruppe Wassergefahren") | User | The **teams** volunteers are part of — organisational by itself, but a team can hold roles via `user_group_permission_groups` (Spec 2.9) so membership inherits them. A role-less team grants nothing (AD-12). |
 | 3 | `user_group_members` | The link: which user is in which user group (many-to-many) | User | "Who belongs to which team." |
 | 4 | `permission_groups` | Named bundles of permissions — the **roles**. Pre-seeded: `helfende`, `fuehrende`, `admin`, `schirrmeister`; admins may add named groups (AD-12) | User | The **roles** that grant access. Users can belong to several at once; rights are additive (FR-6). Flat (no nesting). |

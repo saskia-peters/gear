@@ -123,6 +123,19 @@ export interface DeactivateResult {
   email: string
 }
 
+// OtpIssueResult is the one-time-password issuance response (Spec 2.8): the
+// server-authoritative German confirmation, the target identity and the
+// PLAINTEXT one-time password — returned exactly once, never stored, never
+// recoverable. The SPA shows it once in a dismissible panel and discards it on
+// close (no re-display/copy persistence).
+export interface OtpIssueResult {
+  message: string
+  user_id: string
+  email: string
+  one_time_password: string
+  expires_at: string
+}
+
 // AdminUserWriteResult is the create/update response: the server-authoritative
 // German confirmation plus the resulting detail (finding 8 — the SPA must not
 // hardcode its own success text).
@@ -237,6 +250,19 @@ export async function deactivateUser(id: string): Promise<DeactivateResult> {
     headers: authTokenHeaders(),
     body: JSON.stringify({ confirmed: true }),
   })) as DeactivateResult
+}
+
+// issueOneTimePassword generates a single-use one-time password for an ACTIVE
+// user (Spec 2.8): the plaintext OTP is returned exactly once. Confirmation is
+// required server-side. Gated by users.manage. A 409 answers a non-active
+// target (deactivated/pending — OTPs are active-only); the server message is
+// displayed verbatim.
+export async function issueOneTimePassword(userId: string): Promise<OtpIssueResult> {
+  return (await request(`${USERS_URL}/${userId}/otp`, {
+    method: 'POST',
+    headers: authTokenHeaders(),
+    body: JSON.stringify({ confirmed: true }),
+  })) as OtpIssueResult
 }
 
 // listUserGroups fetches every organisational user group, ordered by name.

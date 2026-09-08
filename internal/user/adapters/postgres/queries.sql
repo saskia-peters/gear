@@ -32,10 +32,10 @@ INSERT INTO users (
     $5,
     'pending_approval'
 )
-RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password;
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password, one_time_password_hash, one_time_password_expires_at;
 
 -- name: GetUserByEmail :one
-SELECT id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password
+SELECT id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password, one_time_password_hash, one_time_password_expires_at
 FROM users
 WHERE email = $1;
 
@@ -179,7 +179,7 @@ UPDATE users
 SET password_hash = $2,
     updated_at    = now()
 WHERE id = $1
-RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password;
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password, one_time_password_hash, one_time_password_expires_at;
 
 -- name: UpdateUserProfile :one
 -- Persist the user's editable base data (first/last/display name, Story 2.1) and
@@ -198,7 +198,7 @@ SET first_name   = $2,
     attributes   = COALESCE($5, '{}'::jsonb),
     updated_at   = now()
 WHERE id = $1
-RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password;
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password, one_time_password_hash, one_time_password_expires_at;
 
 -- name: StagePendingEmail :one
 -- Persist a STAGED email change (Story 2.1): the new address is stored in
@@ -222,7 +222,7 @@ WHERE users.id = $1
       WHERE other.id <> $1
         AND (lower(other.email) = lower($2) OR lower(other.pending_email) = lower($2))
   )
-RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password;
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password, one_time_password_hash, one_time_password_expires_at;
 
 -- name: ClearPendingEmail :exec
 -- Clear a staged email change (pending_email -> NULL). Used by the Epic 2
@@ -327,6 +327,34 @@ UPDATE users
 SET must_change_password = false,
     updated_at           = now()
 WHERE id = $1;
+
+-- name: SetUserOneTimePassword :execrows
+-- Upsert an admin-issued one-time password for an ACTIVE account (Spec 2.8):
+-- stores the Argon2id hash of a freshly generated OTP with its TTL expiry AND
+-- flips must_change_password so the next login forces the Story 1.8 change
+-- flow. The plaintext OTP is never stored (NFR-S4). Re-issuing REPLACES the
+-- hash/expiry, so the old OTP is invalid immediately (RE_ISSUE). A zero-row
+-- update (the target vanished between the eligibility read and this write) is
+-- reported via :execrows so the caller never hands over a credential that
+-- cannot work.
+UPDATE users
+SET one_time_password_hash          = $2,
+    one_time_password_expires_at    = $3,
+    must_change_password            = true,
+    updated_at                      = now()
+WHERE id = $1;
+
+-- name: ClearUserOneTimePassword :execrows
+-- Atomic compare-and-swap consumption of a single-use one-time password (Spec
+-- 2.8 Design Notes): clears the OTP hash+expiry ONLY while the stored hash
+-- still equals the presented one, so two concurrent logins with the same OTP
+-- cannot both succeed — the losing statement affects zero rows and the caller
+-- treats it as an already-consumed OTP (login fails).
+UPDATE users
+SET one_time_password_hash       = '',
+    one_time_password_expires_at = NULL,
+    updated_at                   = now()
+WHERE id = $1 AND one_time_password_hash = $2;
 
 -- name: IsUserInPermissionGroup :one
 -- Reports whether the user is a member of the named permission group (AD-12),
@@ -467,7 +495,7 @@ ORDER BY created_at ASC, id ASC;
 UPDATE users
 SET state = @state_new, updated_at = now()
 WHERE id = @id AND state = @state_current
-RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password;
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password, one_time_password_hash, one_time_password_expires_at;
 
 -- name: AddUserToGroup :exec
 -- Idempotent role seed (Story 2.4, AD-2/AD-12): grants the named permission
@@ -531,7 +559,7 @@ RETURNING id, name, description, is_base_role;
 
 -- name: ListGroupPermissionIdsByCodes :many
 -- Resolve permission codes → row ids for the given code set. The server accepts
--- only the 21 base codes, so every resolved id exists; a code with no row is
+-- only the 22 base codes, so every resolved id exists; a code with no row is
 -- never matched and the caller rejects it as unknown (additive-only, FR-6).
 SELECT id
 FROM permissions
@@ -559,7 +587,7 @@ DELETE FROM permission_group_permissions
 WHERE permission_group_id = $1;
 
 -- name: ListAllPermissions :many
--- The server-authoritative permission catalog (Story 2.5): the full 21-code
+-- The server-authoritative permission catalog (Story 2.5): the full 22-code
 -- base series with their labels, so the SPA editor's checkbox grid never drifts
 -- from the seed. The German display label is derived in the core from the code;
 -- the description is the raw DB label (English seed text) fallback.
@@ -685,7 +713,7 @@ ORDER BY q.name;
 -- repository's case-insensitive pre-check.
 INSERT INTO users (email, display_name, first_name, last_name, password_hash, state)
 VALUES ($1, $2, $3, $4, '', $5)
-RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password;
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password, one_time_password_hash, one_time_password_expires_at;
 
 -- name: UpdateUserProfileAdmin :one
 -- Replace an existing user's profile fields AND state from the admin surface
@@ -701,7 +729,7 @@ SET email        = $2,
     state        = $6,
     updated_at   = now()
 WHERE id = $1
-RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password;
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password, one_time_password_hash, one_time_password_expires_at;
 
 -- name: UserEmailExists :one
 -- Case-insensitive email-uniqueness guard (Story 2.6): reports whether ANY
@@ -846,7 +874,7 @@ WHERE user_id = $1;
 
 -- name: InsertUserDirectGrants :exec
 -- Bulk insert a user's direct permission grants (Story 2.6, additive AD-12).
--- The input is resolved permission ids (the codes are validated against the 21
+-- The input is resolved permission ids (the codes are validated against the 22
 -- base codes by the core/repository). An empty set inserts zero rows.
 INSERT INTO user_permissions (user_id, permission_id)
 SELECT $1, p.id

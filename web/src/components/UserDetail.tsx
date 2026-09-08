@@ -6,8 +6,9 @@ import {
   assignUserQualification,
   revokeUserQualification,
   updateUserQualificationExpiry,
+  issueOneTimePassword,
 } from '../auth/users.ts'
-import type { AdminUserDetail, QualificationAssignment, UserGroup } from '../auth/users.ts'
+import type { AdminUserDetail, QualificationAssignment, UserGroup, OtpIssueResult } from '../auth/users.ts'
 import { assignUserGroups } from '../auth/users.ts'
 import { permissionLabel } from '../auth/roles.ts'
 import { listQualifications } from '../auth/qualifications.ts'
@@ -82,6 +83,13 @@ export function UserDetail({
   const [confirmingDeactivate, setConfirmingDeactivate] = useState(false)
   const [busy, setBusy] = useState(false)
   const [feedback, setFeedback] = useState<Feedback>(null)
+
+  // One-time-password issuance (Spec 2.8): confirmingOtp is the inline confirm
+  // step; otpResult holds the server response whose plaintext one-time password
+  // is shown ONCE in a dismissible panel. Closing the panel discards the value
+  // (it is never kept in SPA state beyond this render).
+  const [confirmingOtp, setConfirmingOtp] = useState(false)
+  const [otpResult, setOtpResult] = useState<OtpIssueResult | null>(null)
 
   // Editable-qualification state (Effort 2): the vocabulary to choose from, the
   // currently selected qualification id, the valid-until input, and the
@@ -189,6 +197,37 @@ export function UserDetail({
       setFeedback({
         kind: 'error',
         message: err instanceof Error && err.message ? err.message : 'Die Deaktivierung ist fehlgeschlagen.',
+      })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // confirmIssueOtp issues a single-use one-time password for an ACTIVE user
+  // (Spec 2.8). The plaintext value is shown once in a dismissible panel and
+  // discarded on close. The panel text is the SERVER-authoritative message
+  // (finding 8: never hardcode a parallel warning). A 401 → login redirect; a
+  // 403 → leave the admin module; any other error surfaces the server message.
+  async function confirmIssueOtp() {
+    setBusy(true)
+    setFeedback(null)
+    try {
+      const res = await issueOneTimePassword(user.id)
+      setOtpResult(res)
+      setConfirmingOtp(false)
+    } catch (err) {
+      const status = err instanceof Error && 'status' in err ? (err as { status: number }).status : 0
+      if (status === 403) {
+        onForbidden()
+        return
+      }
+      if (status === 401) {
+        onUnauthorized()
+        return
+      }
+      setFeedback({
+        kind: 'error',
+        message: err instanceof Error && err.message ? err.message : 'Das Einmal-Passwort konnte nicht erstellt werden.',
       })
     } finally {
       setBusy(false)
@@ -585,7 +624,17 @@ export function UserDetail({
           </button>
         )}
 
-        {canManage && isActive && !confirmingDeactivate && (
+        {canManage && isActive && !confirmingDeactivate && !confirmingOtp && !otpResult && (
+          <button
+            type="button"
+            className={styles.otpButton}
+            onClick={() => setConfirmingOtp(true)}
+          >
+            Einmal-Passwort
+          </button>
+        )}
+
+        {canManage && isActive && !confirmingDeactivate && !confirmingOtp && !otpResult && (
           <button
             type="button"
             className={styles.deactivateButton}
@@ -614,6 +663,46 @@ export function UserDetail({
                 Abbrechen
               </button>
             </div>
+          </div>
+        )}
+
+        {confirmingOtp && (
+          <div className={styles.confirmBox} role="alert">
+            <p className={styles.confirmText}>
+              Einmal-Passwort für {user.email} erstellen? Das Passwort wird nur
+              einmal angezeigt und muss sicher außerhalb des Systems übermittelt
+              werden (nicht per E-Mail).
+            </p>
+            <div className={styles.confirmActions}>
+              <button type="button" className={styles.otpConfirmButton} onClick={() => void confirmIssueOtp()} disabled={busy}>
+                {busy ? 'Wird erstellt...' : 'Ja, erstellen'}
+              </button>
+              <button
+                type="button"
+                className={styles.cancelButton}
+                onClick={() => setConfirmingOtp(false)}
+                disabled={busy}
+              >
+                Abbrechen
+              </button>
+            </div>
+          </div>
+        )}
+
+        {otpResult && (
+          <div className={styles.otpPanel} role="status">
+            <p className={styles.otpWarning}>{otpResult.message}</p>
+            <p className={styles.otpValue}>{otpResult.one_time_password}</p>
+            <p className={styles.otpExpiry}>
+              Gültig bis {new Date(otpResult.expires_at).toLocaleDateString('de-DE')}
+            </p>
+            <button
+              type="button"
+              className={styles.otpDismissButton}
+              onClick={() => setOtpResult(null)}
+            >
+              Schließen
+            </button>
           </div>
         )}
       </div>

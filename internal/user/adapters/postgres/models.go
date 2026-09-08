@@ -93,6 +93,8 @@ type User struct {
 	PendingTotpExpiresAt       pgtype.Timestamptz `json:"pending_totp_expires_at"`
 	PendingEmail               pgtype.Text        `json:"pending_email"`
 	MustChangePassword         bool               `json:"must_change_password"`
+	OneTimePasswordHash        string             `json:"one_time_password_hash"`
+	OneTimePasswordExpiresAt   pgtype.Timestamptz `json:"one_time_password_expires_at"`
 }
 
 type UserGroup struct {

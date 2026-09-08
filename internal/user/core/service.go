@@ -49,9 +49,21 @@ type Repository interface {
 	CreatePasswordResetToken(ctx context.Context, userID, tokenHash string, expiresAt time.Time) error
 	ConsumePasswordResetToken(ctx context.Context, tokenHash string) (*PasswordResetToken, error)
 	DeleteExpiredPasswordResetTokens(ctx context.Context, userID string) error
+	DeletePasswordResetToken(ctx context.Context, tokenHash string) error
 	SetUserMustChangePassword(ctx context.Context, userID string) error
 	ClearUserMustChangePassword(ctx context.Context, userID string) error
 	InsertAuditEventAnonymous(ctx context.Context, operation string) error
+	// One-time-password persistence (Spec 2.8): SetUserOneTimePassword upserts
+	// the Argon2id hash + expiry of an admin-issued OTP and flags
+	// must_change_password, reporting whether a row was affected (false = the
+	// target vanished, the credential must not be handed over); ClearUserOneTimePassword
+	// atomically CONSUMES the OTP via compare-and-swap on the stored hash and
+	// reports whether a row was affected — a false means a racing login already
+	// consumed it. GetUserByID resolves a single user's profile + state for the
+	// admin surfaces (unknown id → ErrAdminUserNotFound).
+	SetUserOneTimePassword(ctx context.Context, userID, hash string, expiresAt time.Time) (bool, error)
+	ClearUserOneTimePassword(ctx context.Context, userID, hash string) (bool, error)
+	GetUserByID(ctx context.Context, userID string) (*User, error)
 	// IsUserInPermissionGroup reports whether the user is a member of the named
 	// permission group (AD-12); the admin-group membership drives the
 	// server-authoritative IsAdmin flag (Story 1.8).
