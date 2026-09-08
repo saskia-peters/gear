@@ -1,5 +1,5 @@
 // Admin-module navigation model (Story 2.3, UX-DR6/AD-6/FR-19). This is the
-// single source of truth for the seven EXPERIENCE.md admin entries: their
+// single source of truth for the eight EXPERIENCE.md admin entries: their
 // gating permission codes, their routes, and their plain-language labels.
 //
 // User-facing microcopy must stay jargon-free (no permission-code names in the
@@ -50,6 +50,13 @@ export const ADMIN_NAV_ENTRIES: readonly AdminNavEntry[] = [
     label: 'Benutzer',
     description: 'Mitglieder verwalten und neue Anträge freigeben.',
     codes: ['users.view', 'users.approve', 'users.manage'],
+  },
+  {
+    key: 'benutzergruppen',
+    route: '/admin/benutzergruppen',
+    label: 'Benutzergruppen',
+    description: 'Teams anlegen, Mitglieder zuordnen und Rollen vergeben.',
+    codes: ['user_groups.manage'],
   },
   {
     key: 'rollen',

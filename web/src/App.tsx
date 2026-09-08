@@ -12,6 +12,7 @@ import { ProfilePage } from './pages/ProfilePage.tsx'
 import { AdminPage } from './pages/AdminPage.tsx'
 import { AdminRecoveryPage } from './pages/AdminRecoveryPage.tsx'
 import { AdminBenutzerPage } from './pages/admin/AdminBenutzerPage.tsx'
+import { AdminBenutzergruppenPage } from './pages/admin/AdminBenutzergruppenPage.tsx'
 import { AdminRollenPage } from './pages/admin/AdminRollenPage.tsx'
 import { AdminQualifikationenPage } from './pages/admin/AdminQualifikationenPage.tsx'
 import { AdminWerkzeugePage } from './pages/admin/AdminWerkzeugePage.tsx'
@@ -304,6 +305,18 @@ export function AppRoutes() {
             <RequireAdminModule>
               <RequireAdminEntry codes={adminNavCodes('benutzer')}>
                 <AdminBenutzerPage />
+              </RequireAdminEntry>
+            </RequireAdminModule>
+          </AuthenticatedPage>
+        }
+      />
+      <Route
+        path="/admin/benutzergruppen"
+        element={
+          <AuthenticatedPage>
+            <RequireAdminModule>
+              <RequireAdminEntry codes={adminNavCodes('benutzergruppen')}>
+                <AdminBenutzergruppenPage />
               </RequireAdminEntry>
             </RequireAdminModule>
           </AuthenticatedPage>

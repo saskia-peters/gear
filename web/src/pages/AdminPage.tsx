@@ -48,21 +48,6 @@ export function AdminPage() {
                 <span className={styles.cardDescription}>{entry.description}</span>
               </Link>
             ))}
-
-            {/* Benutzergruppen management card (Effort 2): a focused entry for
-                user↔user-group assignment, gated by user_groups.manage. It
-                lands on the Benutzer surface where the groups live. */}
-            {hasPermission('user_groups.manage') && (
-              <Link
-                to="/admin/benutzer"
-                className={styles.card}
-              >
-                <span className={styles.cardTitle}>Benutzergruppen</span>
-                <span className={styles.cardDescription}>
-                  Mitglieder Teams zuordnen und Team-Rollen vergeben.
-                </span>
-              </Link>
-            )}
           </section>
 
           {canViewApprovals && (

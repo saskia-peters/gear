@@ -189,7 +189,7 @@ describe('AdminPage', () => {
     ).toHaveAttribute('href', '/admin/recovery')
   })
 
-  it('GROUPS_CARD: a "Benutzergruppen" card is shown to user_groups.manage holders and links to the Benutzer surface', () => {
+  it('GROUPS_CARD: a "Benutzergruppen" card is shown to user_groups.manage holders and links to its own surface', () => {
     localStorage.clear()
     seedPermissions(['users.view', 'user_groups.manage'])
     render(
@@ -199,8 +199,9 @@ describe('AdminPage', () => {
         </MemoryRouter>
       </ThemeProvider>,
     )
-    const card = screen.getByRole('link', { name: /Benutzergruppen/ })
-    expect(card).toHaveAttribute('href', '/admin/benutzer')
+    const cards = screen.getByRole('region', { name: 'Verwaltungsbereiche' })
+    const card = within(cards).getByRole('link', { name: /Benutzergruppen/ })
+    expect(card).toHaveAttribute('href', '/admin/benutzergruppen')
     cleanup()
     localStorage.clear()
     seedPermissions(['users.view'])
@@ -211,6 +212,7 @@ describe('AdminPage', () => {
         </MemoryRouter>
       </ThemeProvider>,
     )
-    expect(screen.queryByRole('link', { name: /Benutzergruppen/ })).not.toBeInTheDocument()
+    const cardsAfter = screen.getByRole('region', { name: 'Verwaltungsbereiche' })
+    expect(within(cardsAfter).queryByRole('link', { name: /Benutzergruppen/ })).not.toBeInTheDocument()
   })
 })

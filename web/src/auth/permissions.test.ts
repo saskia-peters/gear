@@ -6,10 +6,11 @@ import {
 } from './permissions.ts'
 
 describe('permissions admin-nav model', () => {
-  it('ADMIN_NAV_ENTRIES: the nav lists exactly the 7 EXPERIENCE.md entries in IA order', () => {
+  it('ADMIN_NAV_ENTRIES: the nav lists exactly the 8 EXPERIENCE.md entries in IA order', () => {
     expect(ADMIN_NAV_ENTRIES.map((e) => e.label)).toEqual([
       'Übersicht',
       'Benutzer',
+      'Benutzergruppen',
       'Rollen',
       'Qualifikationen',
       'Werkzeuge',
@@ -25,11 +26,12 @@ describe('permissions admin-nav model', () => {
     }
   })
 
-  it('filteredAdminNav: a full admin set exposes all 7 entries', () => {
+  it('filteredAdminNav: a full admin set exposes all 8 entries', () => {
     const perms = [
       'users.view',
       'users.approve',
       'users.manage',
+      'user_groups.manage',
       'roles.create',
       'roles.edit',
       'roles.assign',
@@ -42,7 +44,7 @@ describe('permissions admin-nav model', () => {
       'dsgvo.delete',
       'admin.recovery.approve',
     ]
-    expect(filteredAdminNav(perms)).toHaveLength(7)
+    expect(filteredAdminNav(perms)).toHaveLength(8)
   })
 
   it('filteredAdminNav: a schirrmeister (tools.manage + tool_types.manage) sees only Übersicht + Werkzeuge', () => {
