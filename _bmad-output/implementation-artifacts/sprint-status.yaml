@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-04-2026 19:40
-last_updated: 09-09-2026 22:26
+last_updated: 09-09-2026 23:10
 project: gear
 project_key: NOKEY
 tracking_system: file-system
@@ -120,7 +120,7 @@ action_items:
     action: "Fix recovery/deny authorization — re-add an admin.recovery.approve gate
       (route-level or core) so only approvers can deny a pending recovery request"
     owner: "dev loop"
-    status: open
+    status: done
     ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-2-retro-2026-09-09.md"
   - id: "epic-2-retro-item-5-guard-empty-body-on-group-members-and-us"
     epic: 2
@@ -128,14 +128,14 @@ action_items:
       reject a missing user_ids/user_group_ids field like the sibling roles/qualifications
       endpoints"
     owner: "dev loop"
-    status: open
+    status: done
     ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-2-retro-2026-09-09.md"
   - id: "epic-2-retro-item-6-enforce-fixed-requires-expiry-on-the-per"
     epic: 2
     action: "Enforce fixed-requires-expiry on the per-user expiry-update path — reject
       nil on a fixed assignment, or re-read the vocabulary kind and require a date"
     owner: "dev loop"
-    status: open
+    status: done
     ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-2-retro-2026-09-09.md"
   - id: "epic-2-retro-item-7-reconcile-specs-to-as-built-spec-2-7-2-9"
     epic: 2
@@ -149,7 +149,7 @@ action_items:
     action: "Sync 22 base codes everywhere — fix permission_test.go (21 to 22, rename
       ResolvesAll21 test) and roles.ts checkbox-count comment"
     owner: "dev loop"
-    status: open
+    status: done
     ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-2-retro-2026-09-09.md"
   - id: "epic-2-retro-item-9-extract-shared-web-request-and-authtoken"
     epic: 2
