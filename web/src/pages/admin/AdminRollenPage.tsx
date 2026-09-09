@@ -12,7 +12,7 @@ import styles from './AdminRollenPage.module.css'
 // AdminRollenPage is the real "Rollen" surface (Story 2.5, UX-DR6/UX-DR8/
 // UX-DR9): a role list (the four base roles + any custom named groups, each
 // with a permission count and a base-role badge), a "Neue Rolle" action and an
-// editor (create/edit) with the additive 22-code checkbox grid. Editing takes
+// editor (create/edit) with the additive 23-code checkbox grid. Editing takes
 // effect immediately on the next request because permission resolution is live
 // (AD-2/AD-6/FR-6).
 //

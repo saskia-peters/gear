@@ -114,9 +114,9 @@ func TestGatewayForbidden(t *testing.T) {
 	}
 }
 
-// basePermissionCodes is the full AD-12 base series (Story 2.2 + Spec 2.9):
-// the 22 codes the seeded admin role resolves (migration 000013 added
-// users.qualifications.manage).
+// basePermissionCodes is the full AD-12 base series (Story 2.2 + Spec 2.9 +
+// 000016): the 23 codes the seeded admin role resolves (migration 000013 added
+// users.qualifications.manage; 000016 added user.account.approve).
 func basePermissionCodes() []string {
 	return []string{
 		"dashboard.view",
@@ -138,6 +138,7 @@ func basePermissionCodes() []string {
 		"dsgvo.access_report",
 		"dsgvo.delete",
 		"admin.recovery.approve",
+		"user.account.approve",
 		"admin.settings.email",
 		"admin.settings.backup",
 		"schedules.manage",
@@ -161,7 +162,7 @@ func basePermissionCodesExcept(excluded string) []string {
 }
 
 // TestGatewayForbiddenWithMissingRequiredCode (Story 2.2): even when the
-// resolver returns 21 of the 22 base codes — everything EXCEPT the single
+// resolver returns 22 of the 23 base codes — everything EXCEPT the single
 // required code — the gateway still answers 403. It checks the exact code,
 // never a wildcard, prefix or "mostly allowed" heuristic.
 func TestGatewayForbiddenWithMissingRequiredCode(t *testing.T) {
@@ -180,7 +181,7 @@ func TestGatewayForbiddenWithMissingRequiredCode(t *testing.T) {
 	}
 }
 
-// TestGatewayAllowedWithFullSeed confirms a caller carrying all 22 base codes
+// TestGatewayAllowedWithFullSeed confirms a caller carrying all 23 base codes
 // (the seeded admin, AD-12) passes the gateway.
 func TestGatewayAllowedWithFullSeed(t *testing.T) {
 	v := &mockValidator{session: &core.Session{User: activeUser()}}

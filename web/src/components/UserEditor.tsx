@@ -31,7 +31,7 @@ type Feedback =
 //
 // The editor is mounted only when the caller may act on the user: create/edit/
 // deactivate require `users.manage`, and the direct-grant grid is the same
-// additive 22-code catalog as the role editor. The server remains the source
+// additive 23-code catalog as the role editor. The server remains the source
 // of truth.
 export function UserEditor({ user, roles, userGroups, availablePermissions, onSaved, onCancel, onForbidden }: UserEditorProps) {
   const isEdit = user !== null

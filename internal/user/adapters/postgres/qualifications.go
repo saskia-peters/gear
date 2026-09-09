@@ -330,20 +330,33 @@ func (r *Repository) UpdateUserQualificationExpiry(ctx context.Context, userID, 
 	if err != nil {
 		return core.ErrQualificationAssignmentNotFound
 	}
-	if expiresAt != nil {
-		// An `unlimited` qualification must NEVER carry a per-assignment
-		// expires_at (Spec 2.9: "Unbegrenzt" never expires) — reject the
-		// override at the persistence seam too (review finding 2.9).
-		expiryRow, err := r.queries.GetQualificationExpiryKindByID(ctx, qid)
-		if err != nil {
-			if errors.Is(err, pgx.ErrNoRows) {
-				return core.ErrQualificationAssignmentNotFound
-			}
-			return err
+	// The fixed-vs-unlimited rule holds on UPDATE too, not just assign (retro
+	// finding F13): read the qualification's expiry kind so a `fixed`
+	// assignment can never be silently cleared to permanent-"valid", and an
+	// `unlimited` one can never carry a date.
+	expiryRow, err := r.queries.GetQualificationExpiryKindByID(ctx, qid)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return core.ErrQualificationAssignmentNotFound
 		}
-		if expiryRow.ExpiryKind == core.QualificationExpiryUnlimited {
+		return err
+	}
+	switch expiryRow.ExpiryKind {
+	case core.QualificationExpiryUnlimited:
+		if expiresAt != nil {
+			// An `unlimited` qualification must NEVER carry a per-assignment
+			// expires_at (Spec 2.9: "Unbegrenzt" never expires).
 			return core.ErrQualificationInvalidExpiresAt
 		}
+	case core.QualificationExpiryFixed:
+		if expiresAt == nil {
+			// A `fixed` qualification REQUIRES a per-assignment expires_at
+			// (Spec 2.9 human decision A) — clearing it here would make the
+			// assignment never expire (retro finding F13).
+			return core.ErrQualificationExpiryRequired
+		}
+	default:
+		return core.ErrQualificationAssignmentNotFound
 	}
 	rowsAffected, err := r.queries.UpdateUserQualificationExpiry(ctx, UpdateUserQualificationExpiryParams{
 		UserID:          uid,

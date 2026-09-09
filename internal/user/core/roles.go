@@ -52,7 +52,7 @@ type RoleGroup struct {
 }
 
 // PermissionCatalogEntry is one row of the server-authoritative permission
-// catalog (Story 2.5): a 22-code base series entry with its German display
+// catalog (Story 2.5): a 23-code base series entry with its German display
 // label. Served to the SPA so the editor's checkbox grid never hardcodes a
 // stale code list.
 type PermissionCatalogEntry struct {
@@ -94,7 +94,7 @@ var (
 	// 120-rune cap (400 invalid_request, distinct from the 409 duplicate).
 	ErrRoleInvalidName = errors.New("permission group name is invalid")
 	// ErrUnknownPermissionCode is returned when the input grants a code outside
-	// the 22-code base series (additive-only, FR-6).
+	// the 23-code base series (additive-only, FR-6).
 	ErrUnknownPermissionCode = errors.New("unknown permission code")
 	// ErrRoleNotFound is returned when an update targets an unknown group id.
 	ErrRoleNotFound = errors.New("permission group not found")
@@ -112,7 +112,7 @@ const (
 	// MsgRoleNameTaken is the uniform 409 conflict message.
 	MsgRoleNameTaken = "Es gibt bereits eine Rolle mit diesem Namen."
 	// MsgRoleUnknownPermission is the uniform 400 invalid message for a code
-	// outside the 22 base codes.
+	// outside the 23 base codes.
 	MsgRoleUnknownPermission = "Eine ausgewählte Berechtigung ist ungültig."
 	// MsgRoleNotFound is the uniform 404 not-found message for an unknown group.
 	MsgRoleNotFound = "Die Rolle wurde nicht gefunden."
@@ -130,10 +130,10 @@ const RoleNameMaxLength = 120
 // (Story 2.5). An empty description is fine (it is stored as '').
 const RoleDescriptionMaxLength = 500
 
-// BasePermissionCodes is the full AD-12 base series (Story 2.2/2.5, Spec 2.9):
-// the only codes the role editor may grant. The list is the server-authoritative
-// source the catalog and the create/update validation draw from — it never
-// drifts from the seed.
+// BasePermissionCodes is the full AD-12 base series (Story 2.2/2.5, Spec 2.9,
+// 000016): the only codes the role editor may grant. The list is the
+// server-authoritative source the catalog and the create/update validation
+// draw from — it never drifts from the seed.
 var BasePermissionCodes = []string{
 	"dashboard.view",
 	"inspection.submit",
@@ -154,6 +154,7 @@ var BasePermissionCodes = []string{
 	"dsgvo.access_report",
 	"dsgvo.delete",
 	"admin.recovery.approve",
+	"user.account.approve",
 	"admin.settings.email",
 	"admin.settings.backup",
 	"schedules.manage",
@@ -208,7 +209,7 @@ func permissionLabel(code, fallback string) string {
 }
 
 // ListRoles returns every permission group (base roles first, then name) plus
-// the full 22-code permission catalog with German labels (Story 2.5). The
+// the full 23-code permission catalog with German labels (Story 2.5). The
 // caller is gated by any of the `roles.*` codes upstream; here it is
 // re-verified defense-in-depth (AD-2/AD-6).
 func (s *Service) ListRoles(ctx context.Context, actor *User) (*RoleListResult, error) {
@@ -320,7 +321,7 @@ func (s *Service) UpdateRole(ctx context.Context, actor *User, id string, input 
 }
 
 // validateRoleInput trims the name AND description, enforces their length caps
-// and verifies every granted code is one of the 22 base codes (additive-only,
+// and verifies every granted code is one of the 23 base codes (additive-only,
 // FR-6). It returns the trimmed description, the deduplicated, order-preserved
 // code set. Empty/too-long names map to ErrRoleInvalidName (400); an over-long
 // description maps to ErrRoleInvalidDescription (400); an unknown code maps to

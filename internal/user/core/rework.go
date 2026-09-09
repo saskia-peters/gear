@@ -214,6 +214,11 @@ func (s *Service) UpdateUserQualificationExpiry(ctx context.Context, actor *User
 		if errors.Is(err, ErrQualificationInvalidExpiresAt) {
 			return nil, ErrQualificationInvalidExpiresAt
 		}
+		if errors.Is(err, ErrQualificationExpiryRequired) {
+			// A fixed qualification's per-user valid-until cannot be cleared to
+			// nil (retro finding F13) — the same rule that applies at assign.
+			return nil, ErrQualificationExpiryRequired
+		}
 		return nil, fmt.Errorf("user core: failed to update qualification valid-until: %w", err)
 	}
 

@@ -242,7 +242,7 @@ func (h *Handler) GetAdminUserDetail(w http.ResponseWriter, r *http.Request) {
 //   - 403 forbidden when the caller lacks `users.manage`
 //   - 409 conflict when the email is already taken (case-insensitive)
 //   - 400 invalid when a role/user-group id is unknown or a direct grant is not
-//     one of the 22 base codes, or invalid_request when the JSON is malformed,
+//     one of the 23 base codes, or invalid_request when the JSON is malformed,
 //     a name is empty/too long, the email is invalid, or the status is invalid
 //   - 401 unauthorized when the caller is not authenticated
 func (h *Handler) CreateAdminUser(w http.ResponseWriter, r *http.Request) {
@@ -302,7 +302,7 @@ func (h *Handler) CreateAdminUser(w http.ResponseWriter, r *http.Request) {
 //   - 404 not_found when the id is unknown or malformed
 //   - 409 conflict when the email is already taken by ANOTHER account
 //   - 400 invalid when a role/user-group id is unknown or a direct grant is not
-//     one of the 22 base codes, or invalid_request when the JSON is malformed,
+//     one of the 23 base codes, or invalid_request when the JSON is malformed,
 //     a name is empty/too long, the email is invalid, or the status is invalid
 //   - 401 unauthorized when the caller is not authenticated
 func (h *Handler) UpdateAdminUser(w http.ResponseWriter, r *http.Request) {
@@ -527,6 +527,13 @@ func (h *Handler) AssignAdminUserGroupMembers(w http.ResponseWriter, r *http.Req
 	var input assignAdminUserGroupMembersRequest
 	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&input); err != nil {
 		httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", "Ungültiges JSON-Format.")
+		return
+	}
+	// A missing user_ids field must not silently clear every member of the
+	// group (retro finding F12 — consistent with the guarded roles/assignee
+	// endpoints); only an explicit empty array clears.
+	if input.UserIDs == nil {
+		httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", core.MsgUserGroupMembersRequired)
 		return
 	}
 

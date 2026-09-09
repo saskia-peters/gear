@@ -20,7 +20,7 @@ type Feedback =
 
 // RoleEditor is the create/edit form for a permission group (Story 2.5,
 // UX-DR6/UX-DR8/UX-DR9). It captures a name, an optional description and an
-// ADDITIVE checkbox grid over the 22 base codes (checked = granted; no deny
+// ADDITIVE checkbox grid over the 23 base codes (checked = granted; no deny
 // permissions, FR-6/AD-12). Saving a new role POSTs; editing an existing role
 // PUTs with the same body. Inline German feedback (validation, errors,
 // success), ≥48px targets, keyboard/focus/SR (role="alert"/"status").

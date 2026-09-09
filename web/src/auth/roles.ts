@@ -55,12 +55,13 @@ export const PERMISSION_LABELS: Record<string, string> = {
   'dsgvo.access_report': 'DSGVO-Auskünfte erteilen',
   'dsgvo.delete': 'Daten löschen (DSGVO)',
   'admin.recovery.approve': 'Kontowiederherstellung freigeben',
+  'user.account.approve': 'Benutzerkonten freigeben',
   'admin.settings.email': 'E-Mail-Einstellungen verwalten',
   'admin.settings.backup': 'Sicherungen verwalten',
   'schedules.manage': 'Dienstpläne verwalten',
 }
 
-// The full 22-code base series (AD-12). Used to sort/validate the local fallback
+// The full 23-code base series (AD-12). Used to sort/validate the local fallback
 // only; the server remains authoritative.
 export const BASE_PERMISSION_CODES: readonly string[] = [
   'dashboard.view',
@@ -82,6 +83,7 @@ export const BASE_PERMISSION_CODES: readonly string[] = [
   'dsgvo.access_report',
   'dsgvo.delete',
   'admin.recovery.approve',
+  'user.account.approve',
   'admin.settings.email',
   'admin.settings.backup',
   'schedules.manage',

@@ -242,6 +242,19 @@ func TestPostgresAdminRework(t *testing.T) {
 		t.Errorf("per-assignment ExpiresAt = %v, want the past override (within a second)", detail.Qualifications[0].ExpiresAt)
 	}
 
+	// QUAL_EDIT_FIXED_NIL (retro finding F13): clearing a fixed qualification's
+	// per-user expiry to nil is rejected — it must never become permanent-"valid".
+	if err := repo.UpdateUserQualificationExpiry(ctx, member.ID, qual.ID, nil); !errors.Is(err, core.ErrQualificationExpiryRequired) {
+		t.Errorf("UpdateUserQualificationExpiry(fixed, nil) err = %v, want ErrQualificationExpiryRequired", err)
+	}
+	detail, err = repo.GetUserDetail(ctx, member.ID)
+	if err != nil {
+		t.Fatalf("GetUserDetail after rejected clear failed: %v", err)
+	}
+	if detail.Qualifications[0].ExpiresAt == nil {
+		t.Errorf("assignment expiry was cleared despite the reject, want it preserved")
+	}
+
 	// QUAL_REVOKE: revocation removes the assignment immediately.
 	if err := repo.RevokeQualificationFromUser(ctx, member.ID, qual.ID); err != nil {
 		t.Fatalf("RevokeQualificationFromUser failed: %v", err)

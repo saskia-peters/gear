@@ -1337,7 +1337,8 @@ func TestPostgresAdminRecoveryRepository(t *testing.T) {
 }
 
 // basePermissionCodes is the AD-12 base series seeded by migration 000010
-// (Story 2.2): the 22 codes the architecture spine maps every action to.
+// (Story 2.2 + 000013 + 000016): the 23 codes the architecture spine maps
+// every action to.
 func basePermissionCodes() []string {
 	return []string{
 		"admin.recovery.approve",
@@ -1357,6 +1358,7 @@ func basePermissionCodes() []string {
 		"tool.reinstate",
 		"tool_types.manage",
 		"tools.manage",
+		"user.account.approve",
 		"user_groups.manage",
 		"users.approve",
 		"users.manage",
@@ -1404,7 +1406,7 @@ func containsAllCodes(got, want []string) bool {
 }
 
 // TestPostgresBasePermissionSeedResolution verifies the seed migration 000010
-// end to end (Story 2.2, I/O matrix): all 22 base codes are installed, each
+// end to end (Story 2.2, I/O matrix): all 23 base codes are installed, each
 // base role resolves its matrix, a multi-role user resolves a DEDUPLICATED
 // union, a direct grant joins the union, and revocation is immediate (no
 // cache). Test users are deleted via t.Cleanup (CASCADE removes memberships
@@ -1441,7 +1443,7 @@ func TestPostgresBasePermissionSeedResolution(t *testing.T) {
 	}
 	t.Cleanup(func() { cleanupPool.Close() })
 
-	// 1. All 22 base codes are present in the permissions table. A set
+	// 1. All 23 base codes are present in the permissions table. A set
 	// comparison (subset check), so a DB that already holds unrelated
 	// permission rows does not break the assertion.
 	var permCodes []string
@@ -1464,7 +1466,7 @@ func TestPostgresBasePermissionSeedResolution(t *testing.T) {
 		t.Errorf("permissions table = %v, missing base codes from the AD-12 series", permCodes)
 	}
 
-	// 2. The seeded admin resolves ALL 22 codes via the admin-group matrix.
+	// 2. The seeded admin resolves ALL 23 codes via the admin-group matrix.
 	admin, err := repo.GetUserByEmail(ctx, "admin.1@gear.local")
 	if err != nil || admin == nil {
 		t.Skip("seeded admin not present — skipping admin resolution assertion")
@@ -1474,7 +1476,7 @@ func TestPostgresBasePermissionSeedResolution(t *testing.T) {
 		t.Fatalf("ListPermissionsByUser(admin) failed: %v", err)
 	}
 	if !sameCodeSet(adminPerms, basePermissionCodes()) {
-		t.Errorf("admin permissions = %v, want the full 22-code base series", adminPerms)
+		t.Errorf("admin permissions = %v, want the full 23-code base series", adminPerms)
 	}
 
 	// newGroupUser creates a fresh user, assigns it to the named group(s) and

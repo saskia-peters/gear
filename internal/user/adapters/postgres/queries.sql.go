@@ -1500,7 +1500,7 @@ type ListAllPermissionsRow struct {
 	Description string `json:"description"`
 }
 
-// The server-authoritative permission catalog (Story 2.5): the full 22-code
+// The server-authoritative permission catalog (Story 2.5): the full 23-code
 // base series with their labels, so the SPA editor's checkbox grid never drifts
 // from the seed. The German display label is derived in the core from the code;
 // the description is the raw DB label (English seed text) fallback.
@@ -1532,7 +1532,7 @@ ORDER BY code
 `
 
 // Resolve permission codes → row ids for the given code set. The server accepts
-// only the 22 base codes, so every resolved id exists; a code with no row is
+// only the 23 base codes, so every resolved id exists; a code with no row is
 // never matched and the caller rejects it as unknown (additive-only, FR-6).
 func (q *Queries) ListGroupPermissionIdsByCodes(ctx context.Context, dollar_1 []string) ([]pgtype.UUID, error) {
 	rows, err := q.db.Query(ctx, listGroupPermissionIdsByCodes, dollar_1)

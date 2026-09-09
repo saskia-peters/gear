@@ -40,6 +40,11 @@ const (
 	// qualification on a user AND editing a user's per-qualification
 	// valid-until (Spec 2.9). Granted to fuehrende, schirrmeister and admin.
 	UsersQualificationsManagePermission = "users.qualifications.manage"
+	// UserAccountApprovePermission gates approving or denying user-account
+	// / recovery actions (2026-09-09, retro finding F11): the admin-recovery
+	// DENY surface must not be reachable by every admin-module-code holder.
+	// Granted to the admin base role.
+	UserAccountApprovePermission = "user.account.approve"
 )
 
 // AdminModuleAccessCodes returns the server-authoritative set of permission
@@ -71,6 +76,7 @@ func AdminModuleAccessCodes() []string {
 		"dsgvo.access_report",
 		"dsgvo.delete",
 		"admin.recovery.approve",
+		"user.account.approve",
 	}
 }
 
@@ -370,6 +376,14 @@ const (
 	// MsgUserGroupMemberUnknown is the uniform 400 message for an unknown
 	// assigned member.
 	MsgUserGroupMemberUnknown = "Eine ausgewählte Person ist ungültig."
+	// MsgUserGroupMembersRequired is the uniform 400 message when the
+	// `user_ids` field is missing from a member-set replacement — a nil set
+	// must never silently clear every member (retro finding F12).
+	MsgUserGroupMembersRequired = "Bitte wähle mindestens eine Person aus."
+	// MsgUserGroupsRequired is the uniform 400 message when the
+	// `user_group_ids` field is missing from a user↔user-group replacement — a
+	// nil set must never silently clear every membership (retro finding F12).
+	MsgUserGroupsRequired = "Bitte wähle mindestens eine Benutzergruppe aus."
 )
 
 // UserNameMaxLength caps a user's Vorname/Nachname at 100 runes (matches the
@@ -913,7 +927,7 @@ func validateAdminUserInput(vorname, nachname, email, status string, roleIDs, gr
 	groupIDs = dedupeStrings(groupIDs)
 	grantCodes = dedupeStrings(grantCodes)
 	// Additive-only (FR-6/AD-12): a direct grant may only ever carry one of the
-	// 22 base codes — an unknown code is a uniform 400 (nothing is stored).
+	// 23 base codes — an unknown code is a uniform 400 (nothing is stored).
 	for _, c := range grantCodes {
 		if !basePermissionSet[c] {
 			return "", "", "", "", nil, nil, nil, ErrUnknownPermissionCode

@@ -7,7 +7,7 @@ import (
 )
 
 // basePermissionCodes is the AD-12 base series the seed migration installs:
-// admin = all 21, the base roles = the matrix subsets (Story 2.2).
+// admin = all 23, the base roles = the matrix subsets (Story 2.2).
 func basePermissionCodes() []string {
 	return []string{
 		"admin.recovery.approve",
@@ -27,9 +27,11 @@ func basePermissionCodes() []string {
 		"tool.reinstate",
 		"tool_types.manage",
 		"tools.manage",
+		"user.account.approve",
 		"user_groups.manage",
 		"users.approve",
 		"users.manage",
+		"users.qualifications.manage",
 		"users.view",
 	}
 }
@@ -59,8 +61,8 @@ func assertSameCodes(t *testing.T, got, want []string) {
 	}
 }
 
-// RESOLVE_ADMIN (I/O matrix): an admin-group user resolves all 22 base codes.
-func TestResolvePermissionSetAdminResolvesAll21(t *testing.T) {
+// RESOLVE_ADMIN (I/O matrix): an admin-group user resolves all 23 base codes.
+func TestResolvePermissionSetAdminResolvesAll23(t *testing.T) {
 	repo := newMockRepo()
 	repo.perms["admin-1"] = basePermissionCodes()
 	svc, _ := newTestService(repo, &mockHasher{})

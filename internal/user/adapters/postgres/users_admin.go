@@ -790,7 +790,7 @@ func resolveExistingUserIDs(ctx context.Context, q *Queries, ids []string) ([]pg
 
 // resolvePermissionIDsByCodes resolves direct-grant permission codes → row ids.
 // A code with no row maps to core.ErrUnknownPermissionCode (400); the caller
-// (core) has already verified every code is one of the 22 base codes, so a
+// (core) has already verified every code is one of the 23 base codes, so a
 // mismatch can only mean an out-of-band drift (belt-and-suspenders). An empty
 // input yields an empty set.
 func resolvePermissionIDsByCodes(ctx context.Context, q *Queries, codes []string) ([]pgtype.UUID, error) {

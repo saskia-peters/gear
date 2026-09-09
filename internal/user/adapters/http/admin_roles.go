@@ -25,7 +25,7 @@ import (
 // ListRoles handles GET /api/v1/admin/groups (Story 2.5): it returns every
 // permission group (the four base roles + any custom named groups), sorted
 // base-roles-first then by name, each with {id, name, description, is_base_role,
-// permissions:[code...]}, plus the server-authoritative 22-code permission
+// permissions:[code...]}, plus the server-authoritative 23-code permission
 // catalog with German labels (available_permissions) so the SPA editor never
 // hardcodes a stale code list.
 //
@@ -72,7 +72,7 @@ func (h *Handler) ListRoles(w http.ResponseWriter, r *http.Request) {
 // Error mapping (uniform envelope):
 //   - 403 forbidden when the caller lacks `roles.create`
 //   - 409 conflict when the name is already taken (case-insensitive)
-//   - 400 invalid when a permission code is not one of the 22 base codes, or
+//   - 400 invalid when a permission code is not one of the 23 base codes, or
 //     invalid_request when the name is empty/too long or the JSON is malformed
 //   - 401 unauthorized when the caller is not authenticated
 func (h *Handler) CreateRole(w http.ResponseWriter, r *http.Request) {
@@ -126,7 +126,7 @@ func (h *Handler) CreateRole(w http.ResponseWriter, r *http.Request) {
 //   - 403 forbidden when the caller lacks `roles.edit`
 //   - 404 not_found when the id is unknown or malformed
 //   - 409 conflict when renaming onto a name another group already holds
-//   - 400 invalid when a permission code is not one of the 22 base codes, or
+//   - 400 invalid when a permission code is not one of the 23 base codes, or
 //     invalid_request when the name is empty/too long or the JSON is malformed
 //   - 401 unauthorized when the caller is not authenticated
 func (h *Handler) UpdateRole(w http.ResponseWriter, r *http.Request) {

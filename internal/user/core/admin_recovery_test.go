@@ -34,7 +34,7 @@ func recoveryRepo() *mockRepo {
 	// caller holds `admin.recovery.approve` via ListPermissionsByUser, so the
 	// fixture seeds the resolved permission set for both admins.
 	repo.perms["u-admina"] = []string{AdminRecoveryApprovePermission}
-	repo.perms["u-adminb"] = []string{AdminRecoveryApprovePermission}
+	repo.perms["u-adminb"] = []string{AdminRecoveryApprovePermission, UserAccountApprovePermission}
 	return repo
 }
 
@@ -663,6 +663,31 @@ func TestDenyAdminRecoveryRequiresReason(t *testing.T) {
 	}
 	if _, err := svc.DenyAdminRecovery(context.Background(), adminB, "admina@gear.local", "  "); !errors.Is(err, ErrRecoveryDenyReasonRequired) {
 		t.Fatalf("missing deny reason error = %v, want ErrRecoveryDenyReasonRequired", err)
+	}
+}
+
+// TestDenyAdminRecoveryRequiresAccountApprovePermission pins the retro finding
+// F11 gate (2026-09-09): an admin-module holder with `admin.recovery.approve`
+// but WITHOUT `user.account.approve` must NOT be able to deny a pending
+// recovery request. The deny surface is gated by the account-approval
+// permission, re-verified in the core defense-in-depth.
+func TestDenyAdminRecoveryRequiresAccountApprovePermission(t *testing.T) {
+	repo := recoveryRepo()
+	svc, _ := recoveryService(t, repo)
+	adminA := repo.users["admina@gear.local"]
+	// adminB keeps only admin.recovery.approve (no user.account.approve).
+	repo.perms["u-adminb"] = []string{AdminRecoveryApprovePermission}
+	adminB := repo.users["adminb@gear.local"]
+	if _, err := svc.RequestAdminRecovery(context.Background(), adminA, "admina@gear.local"); err != nil {
+		t.Fatalf("request failed: %v", err)
+	}
+
+	if _, err := svc.DenyAdminRecovery(context.Background(), adminB, "admina@gear.local", "unberechtigte Anfrage"); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("deny without user.account.approve err = %v, want ErrForbidden (retro F11)", err)
+	}
+	// The pending request survives: deny was blocked before mutation.
+	if len(repo.adminRecovery) != 1 {
+		t.Errorf("pending request count = %d, want 1 (deny must not mutate without the permission)", len(repo.adminRecovery))
 	}
 }
 

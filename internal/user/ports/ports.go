@@ -84,7 +84,7 @@ type Service interface {
 	RejectUser(ctx context.Context, actor *core.User, userID string) (*core.UserApprovalResult, error)
 	// Role & Permission-Group Management (Story 2.5, AD-12/AD-6/FR-19):
 	// ListRoles returns every permission group (base roles first) plus the
-	// server-authoritative 22-code catalog with German labels; CreateRole
+	// server-authoritative 23-code catalog with German labels; CreateRole
 	// creates a named group with its additive permission set atomically;
 	// UpdateRole replaces a group's name/description and permission set
 	// atomically (base roles editable). The whole surface is gated by any of

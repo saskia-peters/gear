@@ -184,7 +184,7 @@ describe('AdminRollenPage', () => {
     expect(screen.queryByRole('button', { name: 'Neue Rolle' })).not.toBeInTheDocument()
   })
 
-  it('CATALOG_FALLBACK: an empty server catalog falls back to the shipped 22-code grid', async () => {
+  it('CATALOG_FALLBACK: an empty server catalog falls back to the shipped 23-code grid', async () => {
     stubFetchRoutes([
       {
         matcher: (url) => url === GROUPS_URL,
@@ -198,7 +198,7 @@ describe('AdminRollenPage', () => {
     await user.click(screen.getByRole('button', { name: 'Neue Rolle' }))
 
     // A label that exists only in the shipped fallback (not the 2-entry test
-    // catalog), plus the full 22-code grid.
+    // catalog), plus the full 23-code grid.
     expect(await screen.findByRole('checkbox', { name: 'Rollen zuweisen' })).toBeInTheDocument()
     expect(screen.getAllByRole('checkbox')).toHaveLength(22)
   })

@@ -829,6 +829,26 @@ func TestAssignAdminUserGroupMembersNotFound(t *testing.T) {
 	}
 }
 
+func TestAssignAdminUserGroupMembersEmptyBodyRejected(t *testing.T) {
+	// GROUP_ASSIGN empty body (retro finding F12): a missing user_ids field
+	// must NOT silently clear every member — 400.
+	svc := adminUserGroupsSvc(nil, nil, func(_ context.Context, _ *core.User, _ string, _ []string) (*core.UserGroup, error) {
+		t.Fatal("service must not be called for an empty body")
+		return nil, nil
+	})
+	h := newAdminUsersSurface(t, svc, &stubValidator{})
+
+	rec := doAdminUsers(http.MethodPost, "/user-groups/ug-1/members", "token", []byte(`{}`), h)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	_ = json.Unmarshal(rec.Body.Bytes(), &env)
+	if env.Error.Code != "invalid_request" {
+		t.Errorf("code = %q, want invalid_request", env.Error.Code)
+	}
+}
+
 func TestListAdminUserGroupMembersOK(t *testing.T) {
 	// GROUP_MEMBERS_LIST: the current member ids of a group are returned as an
 	// array (finding 6 drives the member editor's pre-checked set).

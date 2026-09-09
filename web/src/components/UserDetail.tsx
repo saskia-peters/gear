@@ -293,6 +293,13 @@ export function UserDetail({
   }
 
   async function handleUpdateExpiry(qual: QualificationAssignment) {
+    // A fixed qualification requires a per-user valid-until (Spec 2.9, retro
+    // finding F13): an empty date must not be sent as null (which the server
+    // now rejects) — the field stays editable until a date is chosen.
+    if (qual.expiry_kind === 'fixed' && editExpiryValue === '') {
+      setFeedback({ kind: 'error', message: 'Gültig bis ist erforderlich.' })
+      return
+    }
     setQualBusy(true)
     setFeedback(null)
     try {

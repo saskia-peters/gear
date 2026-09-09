@@ -1398,9 +1398,20 @@ func (m *mockRepo) UpdateUserQualificationExpiry(_ context.Context, userID, qual
 	if !containsString(m.userQualifications[userID], qualificationID) {
 		return ErrQualificationAssignmentNotFound
 	}
-	if q := m.qualifications[qualificationID]; q != nil && q.ExpiryKind == QualificationExpiryUnlimited && expiresAt != nil {
-		// An unlimited qualification must never carry a per-assignment expiry.
-		return ErrQualificationInvalidExpiresAt
+	if q := m.qualifications[qualificationID]; q != nil {
+		switch q.ExpiryKind {
+		case QualificationExpiryUnlimited:
+			if expiresAt != nil {
+				// An unlimited qualification must never carry a per-assignment expiry.
+				return ErrQualificationInvalidExpiresAt
+			}
+		case QualificationExpiryFixed:
+			if expiresAt == nil {
+				// A fixed qualification REQUIRES a per-assignment expiry —
+				// clearing it would make the assignment never expire (retro F13).
+				return ErrQualificationExpiryRequired
+			}
+		}
 	}
 	if expiresAt == nil {
 		delete(m.qualificationExpiry, userID+"\x00"+qualificationID)

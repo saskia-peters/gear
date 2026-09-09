@@ -427,9 +427,22 @@ func (s *Service) ApproveAdminRecovery(ctx context.Context, approver *User, targ
 // and than the requester, and must provide a Begründung. On deny the pending
 // request is invalidated so it can no longer be approved, and the deny is
 // audited as high-severity (admin.recovery.deny) with the reason in the detail.
+// Gated by `user.account.approve` (2026-09-09, retro finding F11): the deny
+// surface must not be reachable by every admin-module-code holder — a caller
+// needs the account-approval permission, re-verified here for defense-in-depth.
 func (s *Service) DenyAdminRecovery(ctx context.Context, approver *User, targetEmail, reason string) (*AdminRecoveryDenyResult, error) {
 	if approver == nil {
 		return nil, ErrInvalidCredentials
+	}
+	if approver.State != StateActive {
+		return nil, ErrForbidden
+	}
+	perms, err := s.repo.ListPermissionsByUser(ctx, approver.ID)
+	if err != nil {
+		return nil, fmt.Errorf("user core: failed to resolve denier permissions: %w", err)
+	}
+	if !hasUserAccountApprovePermission(perms) {
+		return nil, ErrForbidden
 	}
 	if strings.TrimSpace(reason) == "" {
 		return nil, ErrRecoveryDenyReasonRequired
@@ -569,6 +582,18 @@ func (s *Service) CompleteAdminRecovery(ctx context.Context, rawToken, newPasswo
 func hasRecoveryApprovePermission(perms []string) bool {
 	for _, p := range perms {
 		if p == AdminRecoveryApprovePermission {
+			return true
+		}
+	}
+	return false
+}
+
+// hasUserAccountApprovePermission reports whether perms includes the
+// `user.account.approve` permission (2026-09-09) — required to deny an
+// admin-recovery request (retro finding F11).
+func hasUserAccountApprovePermission(perms []string) bool {
+	for _, p := range perms {
+		if p == UserAccountApprovePermission {
 			return true
 		}
 	}

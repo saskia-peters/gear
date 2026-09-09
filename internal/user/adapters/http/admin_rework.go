@@ -72,6 +72,13 @@ func (h *Handler) AssignUserGroupsHandler(w http.ResponseWriter, r *http.Request
 		httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", "Ungültiges JSON-Format.")
 		return
 	}
+	// A missing user_group_ids field must not silently clear every membership
+	// of the user (retro finding F12 — consistent with the guarded
+	// roles/assignee endpoints); only an explicit empty array clears.
+	if input.UserGroupIDs == nil {
+		httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", core.MsgUserGroupsRequired)
+		return
+	}
 
 	res, err := h.service.AssignUserGroups(r.Context(), user, userID, input.UserGroupIDs)
 	if err != nil {
@@ -287,6 +294,10 @@ func (h *Handler) UpdateUserQualificationExpiryHandler(w http.ResponseWriter, r 
 			httpapi.WriteError(w, http.StatusForbidden, "forbidden", "Keine Berechtigung.")
 		case errors.Is(err, core.ErrQualificationAssignmentNotFound):
 			httpapi.WriteError(w, http.StatusNotFound, "not_found", core.MsgQualificationAssignmentNotFound)
+		case errors.Is(err, core.ErrQualificationExpiryRequired):
+			// A fixed qualification's per-user valid-until cannot be cleared to
+			// nil (retro finding F13).
+			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", core.MsgQualificationExpiryRequired)
 		case errors.Is(err, core.ErrQualificationInvalidExpiresAt):
 			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", core.MsgQualificationInvalidExpiry)
 		case errors.Is(err, core.ErrInvalidCredentials):

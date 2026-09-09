@@ -364,6 +364,31 @@ func TestAssignUserGroupsHandlerOK(t *testing.T) {
 	}
 }
 
+func TestAssignUserGroupsHandlerEmptyBodyRejected(t *testing.T) {
+	// Effort 2 / retro finding F12: a missing user_group_ids field must NOT
+	// silently clear every membership — 400, service never called.
+	svc := &mockService{
+		assignUserGroupsFunc: func(_ context.Context, _ *core.User, _ string, _ []string) (*core.AdminUserWriteResult, error) {
+			t.Fatal("service must not be called for an empty body")
+			return nil, nil
+		},
+	}
+	svc.resolvePermissionFunc = func(_ context.Context, _ *core.User) ([]string, error) {
+		return adminReworkPerms(), nil
+	}
+	h := newAdminReworkSurface(t, svc, &stubValidator{})
+
+	rec := doAdminUsers(http.MethodPut, "/users/u-helfende/groups", "token", []byte(`{}`), h)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	_ = json.Unmarshal(rec.Body.Bytes(), &env)
+	if env.Error.Code != "invalid_request" {
+		t.Errorf("code = %q, want invalid_request", env.Error.Code)
+	}
+}
+
 func TestAssignUserGroupsHandlerForbidden(t *testing.T) {
 	// Effort 2: a caller without user_groups.manage (but with users.view +
 	// users.qualifications.manage — the mount admits them) is denied by the

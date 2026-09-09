@@ -326,6 +326,28 @@ func TestUpdateUserQualificationExpiryNotFound(t *testing.T) {
 	}
 }
 
+func TestUpdateUserQualificationExpiryFixedRequiresDate(t *testing.T) {
+	// QUAL_EDIT_FIXED_NIL (retro finding F13): a fixed qualification's per-user
+	// valid-until cannot be cleared to permanent-"valid" — updating with a nil
+	// date is rejected (400), the same rule that applies at assign time.
+	repo := reworkRepo()
+	svc := usersAdminService(t, repo)
+	actor := repo.users["schirr@gear.local"]
+	repo.userQualifications["u-helf"] = []string{"q-fixed"}
+
+	if _, err := svc.UpdateUserQualificationExpiry(context.Background(), actor, "u-helf", "q-fixed", nil); err != ErrQualificationExpiryRequired {
+		t.Fatalf("UpdateUserQualificationExpiry(fixed, nil) err = %v, want ErrQualificationExpiryRequired", err)
+	}
+	// The assignment still exists with a date (never silently cleared).
+	detail, err := svc.GetUserDetail(context.Background(), actor, "u-helf")
+	if err != nil {
+		t.Fatalf("GetUserDetail failed: %v", err)
+	}
+	if len(detail.Qualifications) != 1 || detail.Qualifications[0].ExpiresAt == nil {
+		t.Errorf("assignment must keep its expiry after a rejected clear, got %+v", detail.Qualifications)
+	}
+}
+
 func TestFuehrendeSchirrmeisterReadOnlyDetail(t *testing.T) {
 	// FUEHRENDE_READONLY: a fuehrende/schirrmeister (users.view +
 	// users.qualifications.manage, no users.manage) can VIEW the detail and

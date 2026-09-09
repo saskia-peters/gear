@@ -465,10 +465,12 @@ type adminRecoveryDenyRequest struct {
 }
 
 // AdminRecoveryDeny handles POST /api/v1/admin/recovery/deny (FR-27,
-// review finding 1.10). It is gated by RequirePermission("admin.recovery.approve")
-// so the caller must be an authenticated admin with the recovery-approve
-// permission. Denying invalidates the target's pending request and audits the
-// deny with the reason in the operation detail.
+// review finding 1.10). The core `DenyAdminRecovery` re-verifies the
+// `user.account.approve` permission defense-in-depth (retro finding F11) — a
+// caller admitted by the outer admin-module gate who lacks it is denied, so a
+// fuehrende/schirrmeister with only `users.view` cannot invalidate a pending
+// recovery request. Denying invalidates the target's pending request and
+// audits the deny with the reason in the operation detail.
 //
 // Error mapping (uniform envelope):
 //   - 403 forbidden when the caller lacks the permission (middleware) or

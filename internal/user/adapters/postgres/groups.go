@@ -15,7 +15,7 @@ import (
 // codes; CreateGroup inserts a named group (is_base_role=false) AND its
 // permission rows atomically; UpdateGroup replaces the group's name/description
 // AND its permission set atomically (delete-then-insert in one transaction);
-// ListAllPermissions returns the server-authoritative 22-code catalog.
+// ListAllPermissions returns the server-authoritative 23-code catalog.
 //
 // Kept in its own file so repository.go does not grow into a god-class
 // (standing convention).
@@ -104,7 +104,7 @@ func (r *Repository) CreateGroup(ctx context.Context, name, description string, 
 		return nil, err
 	}
 	// Additive-only (FR-6): a requested code with no row is rejected — a group
-	// may only ever grant codes that exist in the 22-code base series. The
+	// may only ever grant codes that exist in the 23-code base series. The
 	// count comparison catches any unknown code (an empty input is valid).
 	if len(permIDs) != len(permissionCodes) {
 		return nil, core.ErrUnknownPermissionCode
