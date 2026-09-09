@@ -200,7 +200,7 @@ describe('AdminRollenPage', () => {
     // A label that exists only in the shipped fallback (not the 2-entry test
     // catalog), plus the full 23-code grid.
     expect(await screen.findByRole('checkbox', { name: 'Rollen zuweisen' })).toBeInTheDocument()
-    expect(screen.getAllByRole('checkbox')).toHaveLength(22)
+    expect(screen.getAllByRole('checkbox')).toHaveLength(23)
   })
 
   it('FORBIDDEN: a 403 on load clears the admin flag and leaves the admin module', async () => {
