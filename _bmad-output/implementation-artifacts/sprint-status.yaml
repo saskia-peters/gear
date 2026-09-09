@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-04-2026 19:40
-last_updated: 09-08-2026
+last_updated: 09-09-2026 22:26
 project: gear
 project_key: NOKEY
 tracking_system: file-system
@@ -51,18 +51,18 @@ development_status:
   1-11-auth-ux-foundation: done
   epic-1-retrospective: done
 
-  epic-2: in-progress
+  epic-2: done
   2-1-admin-module-access-isolation: done
-  2-2-resolution-of-active-permission-set: review
-  2-3-admin-ux-foundation: review
-  2-4-user-approval-workflow: review
-  2-5-role-permission-group-management: review
-  2-6-user-group-administration: review
-  2-7-qualification-management: review
-  2-8-admin-one-time-password-otp-issuance: review
+  2-2-resolution-of-active-permission-set: done
+  2-3-admin-ux-foundation: done
+  2-4-user-approval-workflow: done
+  2-5-role-permission-group-management: done
+  2-6-user-group-administration: done
+  2-7-qualification-management: done
+  2-8-admin-one-time-password-otp-issuance: done
   2-9-admin-rework-effort-1-model-backend: done
   2-10-admin-rework-effort-2-spreadsheet-ui: done
-  epic-2-retrospective: optional
+  epic-2-retrospective: done
 
   epic-3: backlog
   3-1-smtp-configuration-admin-settings-email: backlog
@@ -115,3 +115,53 @@ action_items:
     owner: "human"
     status: open
     ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-1-retro-2026-09-06.md"
+  - id: "epic-2-retro-item-4-fix-recovery-deny-authorization-re-add-a"
+    epic: 2
+    action: "Fix recovery/deny authorization — re-add an admin.recovery.approve gate
+      (route-level or core) so only approvers can deny a pending recovery request"
+    owner: "dev loop"
+    status: open
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-2-retro-2026-09-09.md"
+  - id: "epic-2-retro-item-5-guard-empty-body-on-group-members-and-us"
+    epic: 2
+    action: "Guard empty-body on group-members and user-groups replace endpoints —
+      reject a missing user_ids/user_group_ids field like the sibling roles/qualifications
+      endpoints"
+    owner: "dev loop"
+    status: open
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-2-retro-2026-09-09.md"
+  - id: "epic-2-retro-item-6-enforce-fixed-requires-expiry-on-the-per"
+    epic: 2
+    action: "Enforce fixed-requires-expiry on the per-user expiry-update path — reject
+      nil on a fixed assignment, or re-read the vocabulary kind and require a date"
+    owner: "dev loop"
+    status: open
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-2-retro-2026-09-09.md"
+  - id: "epic-2-retro-item-7-reconcile-specs-to-as-built-spec-2-7-2-9"
+    epic: 2
+    action: "Reconcile specs to as-built — spec 2.7/2.9 (qualification vocabulary
+      drop), spec 2.3/2.4 (pending-approvals page), reject semantics wording"
+    owner: "human"
+    status: open
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-2-retro-2026-09-09.md"
+  - id: "epic-2-retro-item-8-sync-22-base-codes-everywhere-fix-permis"
+    epic: 2
+    action: "Sync 22 base codes everywhere — fix permission_test.go (21 to 22, rename
+      ResolvesAll21 test) and roles.ts checkbox-count comment"
+    owner: "dev loop"
+    status: open
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-2-retro-2026-09-09.md"
+  - id: "epic-2-retro-item-9-extract-shared-web-request-and-authtoken"
+    epic: 2
+    action: "Extract shared web request() and authTokenHeaders into a single web/src/auth/http.ts
+      used by roles/qualifications/users"
+    owner: "dev loop"
+    status: open
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-2-retro-2026-09-09.md"
+  - id: "epic-2-retro-item-10-refresh-stale-never-joins-user_groups-co"
+    epic: 2
+    action: "Refresh stale never-joins-user_groups comments in queries.sql and core
+      to reflect the Spec 2.9 team-role UNION branch"
+    owner: "dev loop"
+    status: open
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-2-retro-2026-09-09.md"
