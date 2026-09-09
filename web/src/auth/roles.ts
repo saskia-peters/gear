@@ -5,7 +5,7 @@
 // (Design Notes spec 2.5); PERMISSION_LABELS is only a local fallback when the
 // fetch fails.
 
-import { authHeaders } from './authState.ts'
+import { ApiError, request, authTokenHeaders } from './http.ts'
 
 export interface RoleGroup {
   id: string
@@ -94,10 +94,10 @@ export function permissionLabel(code: string): string {
   return PERMISSION_LABELS[code] ?? code
 }
 
-// fallbackCatalog builds the full 22-code catalog from the shipped local copies
+// fallbackCatalog builds the full 23-code catalog from the shipped local copies
 // (BASE_PERMISSION_CODES + PERMISSION_LABELS). It is used when the server's
 // list response omits or empties available_permissions, so the editor still
-// renders all 21 checkboxes (the save is still validated server-side).
+// renders all 23 checkboxes (the save is still validated server-side).
 function fallbackCatalog(): PermissionCatalogEntry[] {
   return BASE_PERMISSION_CODES.map((code) => ({
     code,
@@ -105,48 +105,18 @@ function fallbackCatalog(): PermissionCatalogEntry[] {
   }))
 }
 
-// ApiError carries the server's uniform envelope message plus the HTTP status,
-// so a caller can branch on 403 (revocation downgrade) as well as show German
-// feedback.
-export class ApiError extends Error {
-  status: number
-  constructor(status: number, message: string) {
-    super(message)
-    this.name = 'ApiError'
-    this.status = status
-  }
-}
-
-// extractMessage reads the server's German message from the uniform envelope,
-// falling back to a generic German string.
-function extractMessage(status: number, body: unknown): string {
-  const msg =
-    (body as { error?: { message?: unknown } } | null)?.error?.message
-  if (typeof msg === 'string' && msg !== '') return msg
-  if (status >= 500) return 'Der Server ist gerade nicht erreichbar. Bitte versuche es später erneut.'
-  return 'Die Aktion ist fehlgeschlagen. Bitte versuche es erneut.'
-}
-
-async function request(path: string, init: RequestInit): Promise<unknown> {
-  let res: Response
-  try {
-    res = await fetch(path, init)
-  } catch {
-    throw new ApiError(0, 'Verbindung zum Server fehlgeschlagen. Bitte prüfe deine Internetverbindung.')
-  }
-  const body = await res.json().catch(() => null)
-  if (!res.ok) {
-    throw new ApiError(res.status, extractMessage(res.status, body))
-  }
-  return body
-}
+// ApiError is re-exported from the shared HTTP helper for callers that
+// imported it from here (backward compatibility — components branch on
+// err.status for the 403 revocation downgrade). The class itself lives in
+// ./http.ts (Epic 2 retro item 9).
+export { ApiError }
 
 // listRoles fetches every permission group (base roles + custom) plus the
-// server-authoritative 22-code catalog. If the server response omits or empties
+// server-authoritative 23-code catalog. If the server response omits or empties
 // the catalog, the shipped BASE_PERMISSION_CODES/PERMISSION_LABELS fallback is
 // used so the editor never renders an empty grid.
 export async function listRoles(): Promise<RoleList> {
-  const data = (await request(GROUPS_URL, { headers: authHeaders() })) as RoleList
+  const data = (await request(GROUPS_URL, { headers: authTokenHeaders() })) as RoleList
   const groups = Array.isArray(data.groups) ? data.groups : []
   let catalog = Array.isArray(data.available_permissions) ? data.available_permissions : []
   if (catalog.length === 0) {
@@ -159,7 +129,7 @@ export async function listRoles(): Promise<RoleList> {
 export async function createRole(input: RoleInput): Promise<RoleGroup> {
   return (await request(GROUPS_URL, {
     method: 'POST',
-    headers: authHeaders(),
+    headers: authTokenHeaders(),
     body: JSON.stringify(input),
   })) as RoleGroup
 }
@@ -168,7 +138,7 @@ export async function createRole(input: RoleInput): Promise<RoleGroup> {
 export async function updateRole(id: string, input: RoleInput): Promise<RoleGroup> {
   return (await request(`${GROUPS_URL}/${id}`, {
     method: 'PUT',
-    headers: authHeaders(),
+    headers: authTokenHeaders(),
     body: JSON.stringify(input),
   })) as RoleGroup
 }

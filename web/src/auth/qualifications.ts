@@ -6,8 +6,7 @@
 // FR-22/AD-7) and the user roster — the SPA only maps the status codes to
 // German badges.
 
-import { authHeaders } from './authState.ts'
-import { ApiError } from './roles.ts'
+import { ApiError, request, authTokenHeaders } from './http.ts'
 import type { PermissionCatalogEntry } from './roles.ts'
 
 export type QualificationExpiryKind = 'unlimited' | 'fixed'
@@ -86,33 +85,10 @@ export function qualificationStatusLabel(status: string): string {
 
 const QUALIFICATIONS_URL = '/api/v1/admin/qualifications'
 
-// extractMessage reads the server's German message from the uniform envelope,
-// falling back to a generic German string.
-function extractMessage(status: number, body: unknown): string {
-  const msg = (body as { error?: { message?: unknown } } | null)?.error?.message
-  if (typeof msg === 'string' && msg !== '') return msg
-  if (status >= 500) return 'Der Server ist gerade nicht erreichbar. Bitte versuche es später erneut.'
-  return 'Die Aktion ist fehlgeschlagen. Bitte versuche es erneut.'
-}
-
-async function request(path: string, init: RequestInit): Promise<unknown> {
-  let res: Response
-  try {
-    res = await fetch(path, init)
-  } catch {
-    throw new ApiError(0, 'Verbindung zum Server fehlgeschlagen. Bitte prüfe deine Internetverbindung.')
-  }
-  const body = await res.json().catch(() => null)
-  if (!res.ok) {
-    throw new ApiError(res.status, extractMessage(res.status, body))
-  }
-  return body
-}
-
 // listQualifications fetches the full qualification vocabulary (with status
 // indicators) plus the user roster for the assignment editor.
 export async function listQualifications(): Promise<QualificationList> {
-  const data = (await request(QUALIFICATIONS_URL, { headers: authHeaders() })) as QualificationList
+  const data = (await request(QUALIFICATIONS_URL, { headers: authTokenHeaders() })) as QualificationList
   return {
     qualifications: Array.isArray(data.qualifications) ? data.qualifications : [],
     users: Array.isArray(data.users) ? data.users : [],
@@ -125,7 +101,7 @@ export async function listQualifications(): Promise<QualificationList> {
 export async function createQualification(input: QualificationInput): Promise<QualificationWriteResult> {
   return (await request(QUALIFICATIONS_URL, {
     method: 'POST',
-    headers: authHeaders(),
+    headers: authTokenHeaders(),
     body: JSON.stringify(input),
   })) as QualificationWriteResult
 }
@@ -134,7 +110,7 @@ export async function createQualification(input: QualificationInput): Promise<Qu
 export async function updateQualification(id: string, input: QualificationInput): Promise<QualificationWriteResult> {
   return (await request(`${QUALIFICATIONS_URL}/${id}`, {
     method: 'PUT',
-    headers: authHeaders(),
+    headers: authTokenHeaders(),
     body: JSON.stringify(input),
   })) as QualificationWriteResult
 }
@@ -143,7 +119,7 @@ export async function updateQualification(id: string, input: QualificationInput)
 // of a qualification for the editor's pre-checked set.
 export async function listQualificationAssignees(id: string): Promise<QualificationAssignee[]> {
   const data = (await request(`${QUALIFICATIONS_URL}/${id}/assignees`, {
-    headers: authHeaders(),
+    headers: authTokenHeaders(),
   })) as { assignees?: QualificationAssignee[] }
   return Array.isArray(data.assignees) ? data.assignees : []
 }
@@ -153,7 +129,7 @@ export async function listQualificationAssignees(id: string): Promise<Qualificat
 export async function assignQualificationUsers(id: string, userIds: string[]): Promise<QualificationAssignResult> {
   return (await request(`${QUALIFICATIONS_URL}/${id}/assignees`, {
     method: 'POST',
-    headers: authHeaders(),
+    headers: authTokenHeaders(),
     body: JSON.stringify({ user_ids: userIds }),
   })) as QualificationAssignResult
 }

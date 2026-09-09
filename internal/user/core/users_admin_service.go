@@ -20,11 +20,12 @@ import (
 // deactivate need `users.manage` (Design Notes spec 2.6). The user-group
 // endpoints are gated by `user_groups.manage`.
 //
-// Organisational user groups grant NO permission (AD-12) — they are teams, not
-// roles. Only the permission-group/direct-grant path affects access, and the
-// permission-resolution query never joins user_groups (already true). Every
-// change takes effect immediately on the next request because resolution is
-// live per request (AD-2/FR-21/FR-22) — nothing here caches.
+// Organisational user groups grant NO permission by themselves (AD-12) — they
+// are teams, not roles. Only the permission-group/direct-grant path affects
+// access directly; a team may hold roles whose permissions its members inherit
+// via the three-way resolution (Spec 2.9). Every change takes effect
+// immediately on the next request because resolution is live per request
+// (AD-2/FR-21/FR-22) — nothing here caches.
 
 // ListUsers returns the users (id, names, email, state) ordered by name, for
 // the admin "Benutzer" list surface (Story 2.6, Spec 2.9). An optional status

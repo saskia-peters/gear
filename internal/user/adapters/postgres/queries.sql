@@ -662,8 +662,9 @@ ORDER BY pg.name;
 
 -- name: ListUserGroupMemberships :many
 -- The organisational user groups (teams) a user belongs to, for the user
--- detail surface (Story 2.6, AD-12). Membership grants NO permission by
--- itself — the resolution query never joins user_groups (already true).
+-- detail surface (Story 2.6, AD-12). Bare membership grants NO permission; a
+-- team may hold roles whose permissions its members inherit via the three-way
+-- resolution (Spec 2.9).
 SELECT ug.id, ug.name
 FROM user_groups ug
 JOIN user_group_members ugm ON ugm.user_group_id = ug.id
@@ -674,8 +675,9 @@ ORDER BY ug.name;
 -- The organisational user-group names each listed user belongs to (Effort 2):
 -- one row per (user_id, group name), ordered by user id then group name, so
 -- the admin "Benutzer" list can render inline group tags in a single query
--- instead of one lookup per row (no N+1). Membership grants NO permission
--- (AD-12); the resolution query never joins user_groups.
+-- instead of one lookup per row (no N+1). Bare membership grants NO permission
+-- (AD-12); a team may hold roles inherited via the three-way resolution (Spec
+-- 2.9).
 SELECT ugm.user_id, ug.name
 FROM user_group_members ugm
 JOIN user_groups ug ON ug.id = ugm.user_group_id

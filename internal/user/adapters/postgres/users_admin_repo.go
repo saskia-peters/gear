@@ -19,9 +19,9 @@ import (
 // DeactivateUser flips an active user to deactivated and revokes their
 // sessions in the same transaction; ListUserGroups/CreateUserGroup manage the
 // organisational teams; AssignUserGroupMembers replaces a group's member set
-// atomically. Membership of an organisational user group grants NO permission
-// (AD-12) — the resolution query never joins user_groups, so nothing here
-// changes access; only the permission-group/direct-grant writes do.
+// atomically. Bare membership of an organisational user group grants NO
+// permission (AD-12) — access changes only through the permission-group/direct-
+// grant writes and the roles a team holds (Spec 2.9 three-way resolution).
 //
 // Kept in its own file so repository.go does not grow into a god-class
 // (standing convention).

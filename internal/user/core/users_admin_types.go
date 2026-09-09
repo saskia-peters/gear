@@ -15,8 +15,9 @@ type AdminUserSummary struct {
 	Email    string `json:"email"`
 	Status   string `json:"status"`
 	// UserGroups holds the user-group (team) names the user belongs to, ordered
-	// by name. Membership grants NO permission (AD-12); the resolution query
-	// never joins user_groups. Empty when the user is in no team.
+	// by name. Bare membership grants NO permission (AD-12); a team may hold
+	// roles inherited via the three-way resolution (Spec 2.9). Empty when the
+	// user is in no team.
 	UserGroups []string `json:"user_groups"`
 }
 

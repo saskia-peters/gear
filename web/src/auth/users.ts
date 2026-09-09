@@ -5,7 +5,7 @@
 // pending_approval / deactivated) and the qualification expiry status — the
 // SPA only maps them to German badges.
 
-import { ApiError } from './roles.ts'
+import { ApiError, request, authTokenHeaders } from './http.ts'
 import type { PermissionCatalogEntry } from './roles.ts'
 
 export type UserStatus = 'active' | 'pending_approval' | 'deactivated'
@@ -176,37 +176,6 @@ export function qualificationStatusLabel(status: string): string {
 
 const USERS_URL = '/api/v1/admin/users'
 const USER_GROUPS_URL = '/api/v1/admin/user-groups'
-
-// extractMessage reads the server's German message from the uniform envelope,
-// falling back to a generic German string.
-function extractMessage(status: number, body: unknown): string {
-  const msg = (body as { error?: { message?: unknown } } | null)?.error?.message
-  if (typeof msg === 'string' && msg !== '') return msg
-  if (status >= 500) return 'Der Server ist gerade nicht erreichbar. Bitte versuche es später erneut.'
-  return 'Die Aktion ist fehlgeschlagen. Bitte versuche es erneut.'
-}
-
-async function request(path: string, init: RequestInit): Promise<unknown> {
-  let res: Response
-  try {
-    res = await fetch(path, init)
-  } catch {
-    throw new ApiError(0, 'Verbindung zum Server fehlgeschlagen. Bitte prüfe deine Internetverbindung.')
-  }
-  const body = await res.json().catch(() => null)
-  if (!res.ok) {
-    throw new ApiError(res.status, extractMessage(res.status, body))
-  }
-  return body
-}
-
-function authTokenHeaders(): HeadersInit {
-  const token = localStorage.getItem('gear.session_token')
-  return {
-    'Content-Type': 'application/json',
-    ...(token ? { Authorization: `Bearer ${token}` } : {}),
-  }
-}
 
 // listUsers fetches every user (id, names, email, status), ordered by name.
 // An optional status filter (active | pending_approval | deactivated) is passed

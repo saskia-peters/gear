@@ -78,8 +78,9 @@ func (h *Handler) AdminRoutes() http.Handler {
 	// Organisational user-group surface (Story 2.6, AD-12): a dedicated
 	// user-groups sub-mount gated by `user_groups.manage` (the same code the
 	// base series defines), so a caller without it gets the uniform 403 with no
-	// admin hint (FR-19). User groups are ORGANISATIONAL ONLY — membership
-	// grants no permission; the resolution query never joins user_groups.
+	// admin hint (FR-19). User groups are ORGANISATIONAL ONLY — bare membership
+	// grants no permission; a team may hold roles whose permissions its members
+	// inherit via the three-way resolution (Spec 2.9).
 	userGroups := chi.NewRouter()
 	userGroups.NotFound(httpapi.NotFoundHandler())
 	userGroups.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
