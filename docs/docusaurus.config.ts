@@ -41,6 +41,11 @@ const config: Config = {
           sidebarPath: './sidebars.ts',
           routeBasePath: 'docs',
           editUrl: `https://github.com/${organizationName}/${projectName}/tree/main/docs/`,
+          // Required by docusaurus-theme-openapi-docs: API pages render through
+          // @theme/ApiItem, not the default DocItem (which reads a docs-theme
+          // store that is null for API items -> "Cannot destructure property
+          // 'store' of ... as it is null").
+          docItemComponent: '@theme/ApiItem',
         },
         blog: false,
         theme: {
