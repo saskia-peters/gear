@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-04-2026 19:40
-last_updated: 09-09-2026 23:10
+last_updated: 09-09-2026 23:25
 project: gear
 project_key: NOKEY
 tracking_system: file-system
@@ -156,12 +156,12 @@ action_items:
     action: "Extract shared web request() and authTokenHeaders into a single web/src/auth/http.ts
       used by roles/qualifications/users"
     owner: "dev loop"
-    status: open
+    status: done
     ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-2-retro-2026-09-09.md"
   - id: "epic-2-retro-item-10-refresh-stale-never-joins-user_groups-co"
     epic: 2
     action: "Refresh stale never-joins-user_groups comments in queries.sql and core
       to reflect the Spec 2.9 team-role UNION branch"
     owner: "dev loop"
-    status: open
+    status: done
     ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-2-retro-2026-09-09.md"
