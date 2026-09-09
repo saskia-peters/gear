@@ -61,17 +61,18 @@ func (h *Handler) ListAdminQualifications(w http.ResponseWriter, r *http.Request
 }
 
 // CreateAdminQualification handles POST /api/v1/admin/qualifications (Story
-// 2.7): it creates a qualification with a unique (case-insensitive) name and
-// either no expiry (unbegrenzt gültig) or a fixed validity period. The response
-// carries the server-authoritative German confirmation plus the created
-// qualification with its derived status.
+// 2.7): it creates a qualification with a unique (case-insensitive) name and an
+// expiry kind — unlimited (unbegrenzt gültig, never expires) or fixed (a
+// per-user valid-until is set at assignment, Spec 2.9). A qualification itself
+// has NO valid-until date (2026-09-08 rework). The response carries the
+// server-authoritative German confirmation plus the created qualification with
+// its derived status.
 //
 // Error mapping (uniform envelope):
 //   - 403 forbidden when the caller lacks `qualifications.manage`
 //   - 409 conflict when the name is already taken (case-insensitive)
 //   - 400 invalid_request when the name is empty/too long, the description is
-//     too long, the expiry kind is invalid, a fixed qualification lacks a
-//     future expires_at, or the JSON is malformed
+//     too long, the expiry kind is invalid, or the JSON is malformed
 //   - 401 unauthorized when the caller is not authenticated
 func (h *Handler) CreateAdminQualification(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFrom(r.Context())
@@ -97,7 +98,7 @@ func (h *Handler) CreateAdminQualification(w http.ResponseWriter, r *http.Reques
 			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", core.MsgQualificationNameRequired)
 		case errors.Is(err, core.ErrQualificationDescriptionTooLong):
 			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", core.MsgQualificationDescriptionTooLong)
-		case errors.Is(err, core.ErrQualificationInvalidExpiryKind), errors.Is(err, core.ErrQualificationInvalidExpiresAt):
+		case errors.Is(err, core.ErrQualificationInvalidExpiryKind):
 			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", core.MsgQualificationInvalidExpiry)
 		case errors.Is(err, core.ErrInvalidCredentials):
 			httpapi.WriteError(w, http.StatusUnauthorized, "unauthorized", "Authentifizierung erforderlich.")
@@ -113,20 +114,18 @@ func (h *Handler) CreateAdminQualification(w http.ResponseWriter, r *http.Reques
 }
 
 // UpdateAdminQualification handles PUT /api/v1/admin/qualifications/{id}
-// (Story 2.7): it replaces the qualification's name/description/expiry model
-// atomically. Editing the expiry model never rewrites existing assignments —
-// each assignment inherits the qualification's current expiry model on read, so
-// every assignment's status changes immediately (live resolution, AD-7/FR-22).
-// The response carries the server-authoritative German confirmation plus the
-// replaced qualification.
+// (Story 2.7): it replaces the qualification's name/description/expiry kind
+// atomically. Editing the expiry kind never rewrites existing assignments —
+// each assignment keeps its per-user valid-until (Spec 2.9). The response
+// carries the server-authoritative German confirmation plus the replaced
+// qualification.
 //
 // Error mapping (uniform envelope):
 //   - 403 forbidden when the caller lacks `qualifications.manage`
 //   - 404 not_found when the id is unknown or malformed
 //   - 409 conflict when the name is already taken by ANOTHER qualification
 //   - 400 invalid_request when the name is empty/too long, the description is
-//     too long, the expiry kind is invalid, a fixed qualification lacks a
-//     future expires_at, or the JSON is malformed
+//     too long, the expiry kind is invalid, or the JSON is malformed
 //   - 401 unauthorized when the caller is not authenticated
 func (h *Handler) UpdateAdminQualification(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFrom(r.Context())
@@ -156,7 +155,7 @@ func (h *Handler) UpdateAdminQualification(w http.ResponseWriter, r *http.Reques
 			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", core.MsgQualificationNameRequired)
 		case errors.Is(err, core.ErrQualificationDescriptionTooLong):
 			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", core.MsgQualificationDescriptionTooLong)
-		case errors.Is(err, core.ErrQualificationInvalidExpiryKind), errors.Is(err, core.ErrQualificationInvalidExpiresAt):
+		case errors.Is(err, core.ErrQualificationInvalidExpiryKind):
 			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", core.MsgQualificationInvalidExpiry)
 		case errors.Is(err, core.ErrInvalidCredentials):
 			httpapi.WriteError(w, http.StatusUnauthorized, "unauthorized", "Authentifizierung erforderlich.")

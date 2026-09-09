@@ -107,8 +107,7 @@ func TestPostgresAdminRework(t *testing.T) {
 	if err != nil {
 		t.Fatalf("CreateGroup failed: %v", err)
 	}
-	fixedExpiry := time.Now().UTC().Add(90 * 24 * time.Hour)
-	qual, err := repo.CreateQualification(ctx, qualName, "Fixed-validity qual", core.QualificationExpiryFixed, &fixedExpiry)
+	qual, err := repo.CreateQualification(ctx, qualName, "Fixed-validity qual", core.QualificationExpiryFixed)
 	if err != nil {
 		t.Fatalf("CreateQualification failed: %v", err)
 	}

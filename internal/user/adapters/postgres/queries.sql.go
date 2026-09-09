@@ -492,24 +492,22 @@ func (q *Queries) CreatePermissionGroup(ctx context.Context, arg CreatePermissio
 
 const createQualification = `-- name: CreateQualification :one
 
-INSERT INTO qualifications (name, description, expiry_kind, expires_at)
-VALUES ($1, $2, $3, $4)
-RETURNING id, name, description, expiry_kind, expires_at
+INSERT INTO qualifications (name, description, expiry_kind)
+VALUES ($1, $2, $3)
+RETURNING id, name, description, expiry_kind
 `
 
 type CreateQualificationParams struct {
-	Name        string             `json:"name"`
-	Description string             `json:"description"`
-	ExpiryKind  string             `json:"expiry_kind"`
-	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	ExpiryKind  string `json:"expiry_kind"`
 }
 
 type CreateQualificationRow struct {
-	ID          pgtype.UUID        `json:"id"`
-	Name        string             `json:"name"`
-	Description string             `json:"description"`
-	ExpiryKind  string             `json:"expiry_kind"`
-	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+	ID          pgtype.UUID `json:"id"`
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
+	ExpiryKind  string      `json:"expiry_kind"`
 }
 
 // ============================================================================
@@ -518,21 +516,16 @@ type CreateQualificationRow struct {
 // Create a qualification vocabulary row (Story 2.7, AD-7/FR-22). The name is
 // unique case-insensitively (the repository pre-checks QualificationNameExists
 // and the schema UNIQUE constraint is the belt-and-suspenders backstop).
-// `unlimited` qualifications store a NULL expires_at; `fixed` carry one.
+// `unlimited` qualifications never expire; `fixed` ones carry no vocabulary
+// date — a per-user valid-until is required at assignment (Spec 2.9).
 func (q *Queries) CreateQualification(ctx context.Context, arg CreateQualificationParams) (CreateQualificationRow, error) {
-	row := q.db.QueryRow(ctx, createQualification,
-		arg.Name,
-		arg.Description,
-		arg.ExpiryKind,
-		arg.ExpiresAt,
-	)
+	row := q.db.QueryRow(ctx, createQualification, arg.Name, arg.Description, arg.ExpiryKind)
 	var i CreateQualificationRow
 	err := row.Scan(
 		&i.ID,
 		&i.Name,
 		&i.Description,
 		&i.ExpiryKind,
-		&i.ExpiresAt,
 	)
 	return i, err
 }
@@ -1897,23 +1890,25 @@ func (q *Queries) ListQualificationAssignees(ctx context.Context, qualificationI
 }
 
 const listQualifications = `-- name: ListQualifications :many
-SELECT id, name, description, expiry_kind, expires_at
+SELECT id, name, description, expiry_kind
 FROM qualifications
 ORDER BY name
 `
 
 type ListQualificationsRow struct {
-	ID          pgtype.UUID        `json:"id"`
-	Name        string             `json:"name"`
-	Description string             `json:"description"`
-	ExpiryKind  string             `json:"expiry_kind"`
-	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+	ID          pgtype.UUID `json:"id"`
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
+	ExpiryKind  string      `json:"expiry_kind"`
 }
 
 // The full qualification vocabulary (Story 2.6, AD-7/FR-22): every
-// qualification with its expiry model, ordered by name. The qualification
-// management surface (Story 2.7) edits these; Story 2.6 only needs the list for
-// the user-detail qualification view (via ListUserQualifications).
+// qualification with its expiry model, ordered by name. A qualification itself
+// has NO valid-until date (2026-09-08 rework) — only its expiry_kind
+// (unlimited/fixed); a per-user valid-until exists solely on assignments
+// (user_qualifications.expires_at, Spec 2.9). The qualification management
+// surface (Story 2.7) edits these; Story 2.6 only needs the list for the
+// user-detail qualification view (via ListUserQualifications).
 func (q *Queries) ListQualifications(ctx context.Context) ([]ListQualificationsRow, error) {
 	rows, err := q.db.Query(ctx, listQualifications)
 	if err != nil {
@@ -1928,7 +1923,6 @@ func (q *Queries) ListQualifications(ctx context.Context) ([]ListQualificationsR
 			&i.Name,
 			&i.Description,
 			&i.ExpiryKind,
-			&i.ExpiresAt,
 		); err != nil {
 			return nil, err
 		}
@@ -2214,7 +2208,7 @@ func (q *Queries) ListUserGroups(ctx context.Context) ([]ListUserGroupsRow, erro
 }
 
 const listUserQualifications = `-- name: ListUserQualifications :many
-SELECT q.id, q.name, q.description, q.expiry_kind, q.expires_at AS vocab_expires_at, uq.expires_at AS assigned_expires_at, uq.assigned_at
+SELECT q.id, q.name, q.description, q.expiry_kind, uq.expires_at AS assigned_expires_at, uq.assigned_at
 FROM user_qualifications uq
 JOIN qualifications q ON q.id = uq.qualification_id
 WHERE uq.user_id = $1
@@ -2226,17 +2220,16 @@ type ListUserQualificationsRow struct {
 	Name              string             `json:"name"`
 	Description       string             `json:"description"`
 	ExpiryKind        string             `json:"expiry_kind"`
-	VocabExpiresAt    pgtype.Timestamptz `json:"vocab_expires_at"`
 	AssignedExpiresAt pgtype.Timestamptz `json:"assigned_expires_at"`
 	AssignedAt        pgtype.Timestamptz `json:"assigned_at"`
 }
 
 // The qualification assignments of a user (Story 2.6, AD-7/FR-22): the
-// vocabulary row, the assignment timestamp and the PER-ASSIGNMENT expires_at
-// (Spec 2.9, nullable — overrides the vocabulary expiry when set). The core
-// derives the per-assignment display status (Gültig / Bald ablaufend /
-// Abgelaufen / Unbegrenzt) from the per-assignment expires_at first, then the
-// vocabulary expires_at. Ordered by qualification name.
+// vocabulary row and the PER-ASSIGNMENT expires_at (Spec 2.9, nullable — NULL
+// for an unlimited assignment, never expires). The core derives the
+// per-assignment display status (Gültig / Bald ablaufend / Abgelaufen /
+// Unbegrenzt) from the per-assignment expires_at. Ordered by qualification
+// name.
 func (q *Queries) ListUserQualifications(ctx context.Context, userID pgtype.UUID) ([]ListUserQualificationsRow, error) {
 	rows, err := q.db.Query(ctx, listUserQualifications, userID)
 	if err != nil {
@@ -2251,7 +2244,6 @@ func (q *Queries) ListUserQualifications(ctx context.Context, userID pgtype.UUID
 			&i.Name,
 			&i.Description,
 			&i.ExpiryKind,
-			&i.VocabExpiresAt,
 			&i.AssignedExpiresAt,
 			&i.AssignedAt,
 		); err != nil {
@@ -2796,31 +2788,28 @@ func (q *Queries) UpdatePermissionGroup(ctx context.Context, arg UpdatePermissio
 
 const updateQualification = `-- name: UpdateQualification :one
 UPDATE qualifications
-SET name = $2, description = $3, expiry_kind = $4, expires_at = $5, updated_at = now()
+SET name = $2, description = $3, expiry_kind = $4, updated_at = now()
 WHERE id = $1
-RETURNING id, name, description, expiry_kind, expires_at
+RETURNING id, name, description, expiry_kind
 `
 
 type UpdateQualificationParams struct {
-	ID          pgtype.UUID        `json:"id"`
-	Name        string             `json:"name"`
-	Description string             `json:"description"`
-	ExpiryKind  string             `json:"expiry_kind"`
-	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+	ID          pgtype.UUID `json:"id"`
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
+	ExpiryKind  string      `json:"expiry_kind"`
 }
 
 type UpdateQualificationRow struct {
-	ID          pgtype.UUID        `json:"id"`
-	Name        string             `json:"name"`
-	Description string             `json:"description"`
-	ExpiryKind  string             `json:"expiry_kind"`
-	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
+	ID          pgtype.UUID `json:"id"`
+	Name        string      `json:"name"`
+	Description string      `json:"description"`
+	ExpiryKind  string      `json:"expiry_kind"`
 }
 
-// Replace a qualification's name/description/expiry model atomically (Story
+// Replace a qualification's name/description/expiry_kind atomically (Story
 // 2.7). Editing the expiry model never rewrites existing assignments — each
-// assignment inherits the qualification's current expiry model on read (status
-// derives from expires_at, not a per-assignment copy). A zero-row update
+// assignment keeps its per-user expires_at (Spec 2.9). A zero-row update
 // (unknown id) maps to the uniform not-found in the repository.
 func (q *Queries) UpdateQualification(ctx context.Context, arg UpdateQualificationParams) (UpdateQualificationRow, error) {
 	row := q.db.QueryRow(ctx, updateQualification,
@@ -2828,7 +2817,6 @@ func (q *Queries) UpdateQualification(ctx context.Context, arg UpdateQualificati
 		arg.Name,
 		arg.Description,
 		arg.ExpiryKind,
-		arg.ExpiresAt,
 	)
 	var i UpdateQualificationRow
 	err := row.Scan(
@@ -2836,7 +2824,6 @@ func (q *Queries) UpdateQualification(ctx context.Context, arg UpdateQualificati
 		&i.Name,
 		&i.Description,
 		&i.ExpiryKind,
-		&i.ExpiresAt,
 	)
 	return i, err
 }

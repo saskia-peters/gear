@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"time"
 )
 
 // Qualification Management (Story 2.7, AD-6/FR-19/FR-22/AD-7): the admin
@@ -37,28 +36,30 @@ const (
 )
 
 // Qualification is one vocabulary entry (Story 2.7, AD-7/FR-22): the name,
-// description and the expiry model (expiry_kind + optional expires_at). The
-// status indicator is derived from the expiry model and the current time — see
-// QualificationWithStatus.
+// description and the expiry KIND (unlimited/fixed). A qualification itself has
+// NO valid-until date (2026-09-08 rework) — a per-user valid-until exists only
+// on an assignment (user_qualifications.expires_at, Spec 2.9). The status
+// indicator for the vocabulary is derived from the expiry kind; per-assignment
+// status derives from the per-user date — see QualificationWithStatus and
+// qualificationStatus.
 type Qualification struct {
-	ID          string     `json:"id"`
-	Name        string     `json:"name"`
-	Description string     `json:"description"`
-	ExpiryKind  string     `json:"expiry_kind"`
-	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	ExpiryKind  string `json:"expiry_kind"`
 }
 
 // QualificationWithStatus is a vocabulary entry with its server-derived status
 // indicator (FR-22/AD-7): Unbegrenzt for never-expiring qualifications, and
-// Gültig / Bald ablaufend / Abgelaufen for fixed ones (the wire value is the
-// stable English code from Story 2.6; the SPA owns the German display strings).
+// Befristet for fixed ones (a fixed qualification has no date of its own — the
+// per-user valid-until is set at assignment). The wire value is the stable
+// English code; the SPA owns the German display strings.
 type QualificationWithStatus struct {
-	ID          string     `json:"id"`
-	Name        string     `json:"name"`
-	Description string     `json:"description"`
-	ExpiryKind  string     `json:"expiry_kind"`
-	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
-	Status      string     `json:"status"`
+	ID          string `json:"id"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	ExpiryKind  string `json:"expiry_kind"`
+	Status      string `json:"status"`
 }
 
 // QualificationWriteResult is the payload returned by create/update (Story 2.7,
@@ -100,24 +101,22 @@ type QualificationAssignResult struct {
 }
 
 // CreateQualificationInput is the POST /qualifications body (Story 2.7):
-// name, description and the expiry model. `unlimited` requires no expires_at;
-// `fixed` requires a future expires_at.
+// name, description and the expiry kind. `unlimited` never expires; `fixed`
+// means a per-user valid-until is required at assignment (no date here).
 type CreateQualificationInput struct {
-	Name        string     `json:"name"`
-	Description string     `json:"description"`
-	ExpiryKind  string     `json:"expiry_kind"`
-	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	ExpiryKind  string `json:"expiry_kind"`
 }
 
 // UpdateQualificationInput is the PUT /qualifications/{id} body — the same
-// shape as create; the name/description/expiry model are replaced atomically.
-// Editing the expiry model never rewrites existing assignments (each assignment
-// inherits the qualification's current expiry model on read).
+// shape as create; the name/description/expiry kind are replaced atomically.
+// Editing the expiry kind never rewrites existing assignments (each assignment
+// keeps its per-user expires_at).
 type UpdateQualificationInput struct {
-	Name        string     `json:"name"`
-	Description string     `json:"description"`
-	ExpiryKind  string     `json:"expiry_kind"`
-	ExpiresAt   *time.Time `json:"expires_at,omitempty"`
+	Name        string `json:"name"`
+	Description string `json:"description"`
+	ExpiryKind  string `json:"expiry_kind"`
 }
 
 // Qualification-management sentinel errors. Handlers map them to the uniform
@@ -141,8 +140,9 @@ var (
 	// ErrQualificationInvalidExpiryKind is returned when expiry_kind is not one
 	// of unlimited/fixed (400 invalid_request).
 	ErrQualificationInvalidExpiryKind = errors.New("qualification expiry kind is invalid")
-	// ErrQualificationInvalidExpiresAt is returned when a `fixed` qualification
-	// lacks an expires_at or carries a non-future one (400 invalid_request).
+	// ErrQualificationInvalidExpiresAt is returned on a per-user assignment when
+	// an `unlimited` qualification is assigned WITH a per-user expires_at (400
+	// invalid — an unlimited assignment never expires, Spec 2.9).
 	ErrQualificationInvalidExpiresAt = errors.New("qualification expires_at is invalid")
 	// ErrQualificationAssigneeUnknown is returned when an assigned user id does
 	// not exist (400 invalid).
@@ -174,8 +174,8 @@ const (
 	// over-long description.
 	MsgQualificationDescriptionTooLong = "Bitte gib eine kürzere Beschreibung an (maximal 500 Zeichen)."
 	// MsgQualificationInvalidExpiry is the uniform 400 message for a bad expiry
-	// kind or a missing/past expiry date.
-	MsgQualificationInvalidExpiry = "Bitte wähle ein gültiges Ablaufdatum in der Zukunft."
+	// kind on the vocabulary.
+	MsgQualificationInvalidExpiry = "Bitte wähle eine gültige Gültigkeitsdauer aus."
 	// MsgQualificationAssigneesUpdated confirms a successful assignee-set
 	// replacement.
 	MsgQualificationAssigneesUpdated = "Zugewiesene Personen aktualisiert. Änderungen gelten ab sofort."
@@ -237,7 +237,6 @@ func (s *Service) ListQualifications(ctx context.Context, actor *User) (*Qualifi
 		return nil, fmt.Errorf("user core: failed to list roster users: %w", err)
 	}
 
-	now := time.Now().UTC()
 	out := make([]*QualificationWithStatus, 0, len(quals))
 	for _, q := range quals {
 		out = append(out, &QualificationWithStatus{
@@ -245,8 +244,7 @@ func (s *Service) ListQualifications(ctx context.Context, actor *User) (*Qualifi
 			Name:        q.Name,
 			Description: q.Description,
 			ExpiryKind:  q.ExpiryKind,
-			ExpiresAt:   q.ExpiresAt,
-			Status:      qualificationStatusFor(q, now),
+			Status:      qualificationStatusFor(q),
 		})
 	}
 	roster := make([]*QualificationRosterUser, 0, len(users))
@@ -267,12 +265,12 @@ func (s *Service) ListQualifications(ctx context.Context, actor *User) (*Qualifi
 // CreateQualification creates a qualification vocabulary entry (Story 2.7,
 // FR-22/AD-7). The name is unique case-insensitively (a duplicate maps to
 // ErrQualificationNameTaken → 409); an empty/too-long name, an over-long
-// description, a bad expiry_kind or a fixed qualification without a future
-// expires_at map to the uniform 400s. `unlimited` never expires — an expires_at
-// on an unlimited qualification is ignored/cleared. Gated by
-// `qualifications.manage` (defense-in-depth). The creation is audited (NFR-O1).
-// The result carries the server-authoritative confirmation plus the derived
-// status.
+// description or a bad expiry_kind map to the uniform 400s. A qualification
+// itself has NO valid-until date (2026-09-08 rework) — `unlimited` never
+// expires; `fixed` requires a per-user valid-until at assignment (Spec 2.9).
+// Gated by `qualifications.manage` (defense-in-depth). The creation is audited
+// (NFR-O1). The result carries the server-authoritative confirmation plus the
+// derived status.
 func (s *Service) CreateQualification(ctx context.Context, actor *User, input CreateQualificationInput) (*QualificationWriteResult, error) {
 	if actor == nil {
 		return nil, ErrInvalidCredentials
@@ -284,12 +282,12 @@ func (s *Service) CreateQualification(ctx context.Context, actor *User, input Cr
 		return nil, err
 	}
 
-	name, description, expiryKind, expiresAt, err := validateQualificationInput(input.Name, input.Description, input.ExpiryKind, input.ExpiresAt)
+	name, description, expiryKind, err := validateQualificationInput(input.Name, input.Description, input.ExpiryKind)
 	if err != nil {
 		return nil, err
 	}
 
-	q, err := s.repo.CreateQualification(ctx, name, description, expiryKind, expiresAt)
+	q, err := s.repo.CreateQualification(ctx, name, description, expiryKind)
 	if err != nil {
 		if errors.Is(err, ErrQualificationNameTaken) {
 			return nil, ErrQualificationNameTaken
@@ -307,22 +305,20 @@ func (s *Service) CreateQualification(ctx context.Context, actor *User, input Cr
 		Name:        q.Name,
 		Description: q.Description,
 		ExpiryKind:  q.ExpiryKind,
-		ExpiresAt:   q.ExpiresAt,
-		Status:      qualificationStatusFor(q, time.Now().UTC()),
+		Status:      qualificationStatusFor(q),
 	}}, nil
 }
 
-// UpdateQualification replaces a qualification's name/description/expiry model
+// UpdateQualification replaces a qualification's name/description/expiry kind
 // atomically (Story 2.7). An unknown id maps to ErrQualificationNotFound →
 // 404 (checked BEFORE the duplicate-name guard, so updating an unknown id whose
 // requested name is held by another qualification never answers 409); a name
 // held by ANOTHER qualification maps to ErrQualificationNameTaken → 409.
-// Editing the expiry model does not rewrite existing assignments — each
-// assignment inherits the qualification's current expiry model on read, so the
-// status of every assignment changes immediately (live resolution, AD-7/FR-22).
-// Gated by `qualifications.manage` (defense-in-depth). The update is audited
-// (NFR-O1). The result carries the server-authoritative confirmation plus the
-// derived status.
+// Editing the expiry kind does not rewrite existing assignments — each
+// assignment keeps its per-user expires_at (Spec 2.9). Gated by
+// `qualifications.manage` (defense-in-depth). The update is audited (NFR-O1).
+// The result carries the server-authoritative confirmation plus the derived
+// status.
 func (s *Service) UpdateQualification(ctx context.Context, actor *User, id string, input UpdateQualificationInput) (*QualificationWriteResult, error) {
 	if actor == nil {
 		return nil, ErrInvalidCredentials
@@ -334,12 +330,12 @@ func (s *Service) UpdateQualification(ctx context.Context, actor *User, id strin
 		return nil, err
 	}
 
-	name, description, expiryKind, expiresAt, err := validateQualificationInput(input.Name, input.Description, input.ExpiryKind, input.ExpiresAt)
+	name, description, expiryKind, err := validateQualificationInput(input.Name, input.Description, input.ExpiryKind)
 	if err != nil {
 		return nil, err
 	}
 
-	q, err := s.repo.UpdateQualification(ctx, id, name, description, expiryKind, expiresAt)
+	q, err := s.repo.UpdateQualification(ctx, id, name, description, expiryKind)
 	if err != nil {
 		if errors.Is(err, ErrQualificationNotFound) {
 			return nil, ErrQualificationNotFound
@@ -360,8 +356,7 @@ func (s *Service) UpdateQualification(ctx context.Context, actor *User, id strin
 		Name:        q.Name,
 		Description: q.Description,
 		ExpiryKind:  q.ExpiryKind,
-		ExpiresAt:   q.ExpiresAt,
-		Status:      qualificationStatusFor(q, time.Now().UTC()),
+		Status:      qualificationStatusFor(q),
 	}}, nil
 }
 
@@ -433,43 +428,37 @@ func (s *Service) AssignQualificationUsers(ctx context.Context, actor *User, id 
 }
 
 // validateQualificationInput trims the name/description and enforces the
-// expiry-model rules (Story 2.7): the name must be non-empty and ≤120 runes,
-// the description ≤500 runes; expiry_kind must be one of unlimited/fixed; a
-// `fixed` qualification requires a FUTURE expires_at, an `unlimited` one
-// ignores/clears any supplied expires_at (so switching a qualification to
-// unlimited clears the stored date). Returns the normalized fields. Validation
-// errors are the uniform 400 sentinels.
-func validateQualificationInput(name, description, expiryKind string, expiresAt *time.Time) (string, string, string, *time.Time, error) {
+// expiry-kind rule (Story 2.7): the name must be non-empty and ≤120 runes, the
+// description ≤500 runes; expiry_kind must be one of unlimited/fixed. There is
+// NO vocabulary-level valid-until date (2026-09-08 rework) — a per-user
+// valid-until exists only on assignments (Spec 2.9). Returns the normalized
+// fields. Validation errors are the uniform 400 sentinels.
+func validateQualificationInput(name, description, expiryKind string) (string, string, string, error) {
 	name = strings.TrimSpace(name)
 	description = strings.TrimSpace(description)
 	if name == "" || len([]rune(name)) > QualificationNameMaxLength {
-		return "", "", "", nil, ErrQualificationInvalidName
+		return "", "", "", ErrQualificationInvalidName
 	}
 	if len([]rune(description)) > QualificationDescriptionMaxLength {
-		return "", "", "", nil, ErrQualificationDescriptionTooLong
+		return "", "", "", ErrQualificationDescriptionTooLong
 	}
 	switch expiryKind {
-	case QualificationExpiryUnlimited:
-		return name, description, expiryKind, nil, nil
-	case QualificationExpiryFixed:
-		if expiresAt == nil || !expiresAt.After(time.Now().UTC()) {
-			return "", "", "", nil, ErrQualificationInvalidExpiresAt
-		}
-		return name, description, expiryKind, expiresAt, nil
+	case QualificationExpiryUnlimited, QualificationExpiryFixed:
+		return name, description, expiryKind, nil
 	default:
-		return "", "", "", nil, ErrQualificationInvalidExpiryKind
+		return "", "", "", ErrQualificationInvalidExpiryKind
 	}
 }
 
-// qualificationStatusFor derives the display status of a qualification from its
-// expiry model and now (Story 2.7). It REUSES the Story 2.6 `qualificationStatus`
-// derivation (single source of truth, FR-22) — an `unlimited` qualification is
-// always Unbegrenzt and never enters Bald ablaufend/Abgelaufen.
-func qualificationStatusFor(q *Qualification, now time.Time) string {
-	return qualificationStatus(QualificationAssignment{
-		ExpiryKind: q.ExpiryKind,
-		ExpiresAt:  q.ExpiresAt,
-	}, now)
+// qualificationStatusFor derives the vocabulary display status of a
+// qualification from its expiry kind (Story 2.7, FR-22/AD-7): 'unlimited' is
+// always Unbegrenzt; 'fixed' is Befristet (a fixed qualification has no date of
+// its own — the per-user valid-until is set at assignment, Spec 2.9).
+func qualificationStatusFor(q *Qualification) string {
+	if q.ExpiryKind == QualificationExpiryUnlimited {
+		return QualificationStatusUnlimited
+	}
+	return QualificationStatusFixed
 }
 
 // requireQualificationsManagePermission re-verifies (defense-in-depth) that the

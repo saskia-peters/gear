@@ -63,7 +63,6 @@ type Qualification struct {
 	Name        string             `json:"name"`
 	Description string             `json:"description"`
 	ExpiryKind  string             `json:"expiry_kind"`
-	ExpiresAt   pgtype.Timestamptz `json:"expires_at"`
 	CreatedAt   pgtype.Timestamptz `json:"created_at"`
 	UpdatedAt   pgtype.Timestamptz `json:"updated_at"`
 }

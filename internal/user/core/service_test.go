@@ -1196,7 +1196,7 @@ func (m *mockRepo) ReplaceUserGroupMemberships(_ context.Context, userID string,
 func (m *mockRepo) ListQualificationVocabulary(_ context.Context) ([]*Qualification, error) {
 	out := make([]*Qualification, 0, len(m.qualifications))
 	for _, q := range m.qualifications {
-		out = append(out, &Qualification{ID: q.ID, Name: q.Name, Description: q.Description, ExpiryKind: q.ExpiryKind, ExpiresAt: q.ExpiresAt})
+		out = append(out, &Qualification{ID: q.ID, Name: q.Name, Description: q.Description, ExpiryKind: q.ExpiryKind})
 	}
 	sort.SliceStable(out, func(i, j int) bool { return out[i].Name < out[j].Name })
 	return out, nil
@@ -1204,7 +1204,7 @@ func (m *mockRepo) ListQualificationVocabulary(_ context.Context) ([]*Qualificat
 
 // CreateQualification creates a qualification vocabulary row (Story 2.7). A
 // case-insensitive duplicate name maps to ErrQualificationNameTaken.
-func (m *mockRepo) CreateQualification(_ context.Context, name, description, expiryKind string, expiresAt *time.Time) (*Qualification, error) {
+func (m *mockRepo) CreateQualification(_ context.Context, name, description, expiryKind string) (*Qualification, error) {
 	for _, q := range m.qualifications {
 		if strings.EqualFold(q.Name, name) {
 			return nil, ErrQualificationNameTaken
@@ -1216,15 +1216,15 @@ func (m *mockRepo) CreateQualification(_ context.Context, name, description, exp
 		m.qualificationNextID++
 		id = fmt.Sprintf("q-%d", m.qualificationNextID)
 	}
-	q := &QualificationAssignment{ID: id, Name: name, Description: description, ExpiryKind: expiryKind, ExpiresAt: expiresAt}
+	q := &QualificationAssignment{ID: id, Name: name, Description: description, ExpiryKind: expiryKind}
 	m.qualifications[id] = q
-	return &Qualification{ID: q.ID, Name: q.Name, Description: q.Description, ExpiryKind: q.ExpiryKind, ExpiresAt: q.ExpiresAt}, nil
+	return &Qualification{ID: q.ID, Name: q.Name, Description: q.Description, ExpiryKind: q.ExpiryKind}, nil
 }
 
-// UpdateQualification replaces a qualification's name/description/expiry model
+// UpdateQualification replaces a qualification's name/description/expiry kind
 // (Story 2.7). An unknown id maps to ErrQualificationNotFound; a name held by
 // ANOTHER qualification maps to ErrQualificationNameTaken.
-func (m *mockRepo) UpdateQualification(_ context.Context, id, name, description, expiryKind string, expiresAt *time.Time) (*Qualification, error) {
+func (m *mockRepo) UpdateQualification(_ context.Context, id, name, description, expiryKind string) (*Qualification, error) {
 	q := m.qualifications[id]
 	if q == nil {
 		return nil, ErrQualificationNotFound
@@ -1237,8 +1237,7 @@ func (m *mockRepo) UpdateQualification(_ context.Context, id, name, description,
 	q.Name = name
 	q.Description = description
 	q.ExpiryKind = expiryKind
-	q.ExpiresAt = expiresAt
-	return &Qualification{ID: q.ID, Name: q.Name, Description: q.Description, ExpiryKind: q.ExpiryKind, ExpiresAt: q.ExpiresAt}, nil
+	return &Qualification{ID: q.ID, Name: q.Name, Description: q.Description, ExpiryKind: q.ExpiryKind}, nil
 }
 
 // ListQualificationAssignees returns the users currently assigned a

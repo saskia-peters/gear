@@ -86,9 +86,9 @@
   gap: var(--gear-space-2);
 }
 
-.radioRow {
+.checkRow {
   display: flex;
-  align-items: center;
+  align-items: flex-start;
   gap: var(--gear-space-3);
   min-height: 48px;
   padding: var(--gear-space-2) var(--gear-space-3);
@@ -97,16 +97,20 @@
   cursor: pointer;
 }
 
-.radio {
+.checkbox {
   width: 24px;
   height: 24px;
   accent-color: var(--gear-color-brand);
+  margin-top: var(--gear-space-1);
 }
 
-.radioLabel {
+.checkLabel {
   font-size: var(--gear-font-body-size);
   color: var(--gear-color-ink-primary);
   line-height: var(--gear-font-body-line-height);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-1);
 }
 
 .stickyActions {

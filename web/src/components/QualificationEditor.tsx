@@ -17,24 +17,15 @@ type Feedback =
   | { kind: 'success'; message: string }
   | null
 
-// toDateInputValue converts an ISO timestamp (server) to a local YYYY-MM-DD
-// value for the date picker.
-function toDateInputValue(iso: string | null): string {
-  if (!iso) return ''
-  const d = new Date(iso)
-  const y = d.getFullYear()
-  const m = String(d.getMonth() + 1).padStart(2, '0')
-  const day = String(d.getDate()).padStart(2, '0')
-  return `${y}-${m}-${day}`
-}
-
 // QualificationEditor is the create/edit form for a qualification (Story 2.7,
 // UX-DR6/UX-DR8/UX-DR9). It captures a name, an optional description and the
-// expiry model: either unbegrenzt (never expires, FR-22) or a fixed validity
-// period with an expires_at date picker. Saving a new qualification POSTs;
-// editing an existing one PUTs with the same body. Inline German feedback
-// (validation, errors, success), ≥48px targets, keyboard/focus/SR
-// (role="alert"/"status").
+// expiry model via a single checkbox: "Unbegrenzt gültig" (never expires,
+// FR-22). A qualification itself has NO valid-until date (2026-09-08 rework) —
+// for a non-unlimited (fixed) qualification the per-user valid-until is set
+// when it is assigned to a user (Spec 2.9), not here. Saving a new
+// qualification POSTs; editing an existing one PUTs with the same body. Inline
+// German feedback (validation, errors, success), ≥48px targets,
+// keyboard/focus/SR (role="alert"/"status").
 //
 // The editor is mounted only when the caller may act on the qualification: both
 // "Neue Qualifikation" and "Bearbeiten" require qualifications.manage (matching
@@ -43,8 +34,7 @@ export function QualificationEditor({ qualification, onSaved, onCancel, onForbid
   const isEdit = qualification !== null
   const [name, setName] = useState(qualification?.name ?? '')
   const [description, setDescription] = useState(qualification?.description ?? '')
-  const [expiryKind, setExpiryKind] = useState<QualificationExpiryKind>(qualification?.expiry_kind ?? 'unlimited')
-  const [expiresAt, setExpiresAt] = useState(() => toDateInputValue(qualification?.expires_at ?? null))
+  const [unlimited, setUnlimited] = useState(qualification ? qualification.expiry_kind === 'unlimited' : true)
   const [busy, setBusy] = useState(false)
   const [feedback, setFeedback] = useState<Feedback>(null)
 
@@ -54,27 +44,14 @@ export function QualificationEditor({ qualification, onSaved, onCancel, onForbid
       setFeedback({ kind: 'error', message: 'Bitte gib einen Namen für die Qualifikation an.' })
       return
     }
-    if (expiryKind === 'fixed') {
-      if (expiresAt === '') {
-        setFeedback({ kind: 'error', message: 'Bitte wähle ein Ablaufdatum aus.' })
-        return
-      }
-      // Finding 10: validate against END-of-day (T23:59:59 local) — the same
-      // instant that is serialized for the server — so client and server agree
-      // that a qualification expiring "today" is still valid.
-      if (new Date(`${expiresAt}T23:59:59`).getTime() <= Date.now()) {
-        setFeedback({ kind: 'error', message: 'Bitte wähle ein Ablaufdatum in der Zukunft.' })
-        return
-      }
-    }
 
     setBusy(true)
     setFeedback(null)
+    const expiryKind: QualificationExpiryKind = unlimited ? 'unlimited' : 'fixed'
     const input = {
       name: trimmed,
       description: description.trim(),
       expiry_kind: expiryKind,
-      expires_at: expiryKind === 'fixed' ? new Date(`${expiresAt}T23:59:59`).toISOString() : null,
     }
     void (async () => {
       try {
@@ -164,55 +141,25 @@ export function QualificationEditor({ qualification, onSaved, onCancel, onForbid
         />
       </div>
 
-      <fieldset className={styles.expiryGroup}>
-        <legend className={styles.label}>Gültigkeit</legend>
-        <label className={styles.radioRow}>
+      <div className={styles.expiryGroup}>
+        <label className={styles.checkRow}>
           <input
-            type="radio"
-            name="expiry-kind"
-            className={styles.radio}
-            checked={expiryKind === 'unlimited'}
-            onChange={() => {
-              setExpiryKind('unlimited')
+            type="checkbox"
+            className={styles.checkbox}
+            checked={unlimited}
+            onChange={(e) => {
+              setUnlimited(e.target.checked)
               setFeedback(null)
             }}
           />
-          <span className={styles.radioLabel}>
+          <span className={styles.checkLabel}>
             Unbegrenzt gültig
-            <span className={styles.hint}>Läuft nie ab.</span>
+            <span className={styles.hint}>
+              Läuft nie ab. Ohne diese Markierung wird das Ablaufdatum bei der Zuweisung an einen Benutzer festgelegt.
+            </span>
           </span>
         </label>
-        <label className={styles.radioRow}>
-          <input
-            type="radio"
-            name="expiry-kind"
-            className={styles.radio}
-            checked={expiryKind === 'fixed'}
-            onChange={() => {
-              setExpiryKind('fixed')
-              setFeedback(null)
-            }}
-          />
-          <span className={styles.radioLabel}>Gültig bis</span>
-        </label>
-        {expiryKind === 'fixed' && (
-          <div className={styles.field}>
-            <label className={styles.label} htmlFor="qualification-expires-at">
-              Ablaufdatum
-            </label>
-            <input
-              id="qualification-expires-at"
-              type="date"
-              className={styles.input}
-              value={expiresAt}
-              onChange={(e) => {
-                setExpiresAt(e.target.value)
-                setFeedback(null)
-              }}
-            />
-          </div>
-        )}
-      </fieldset>
+      </div>
     </form>
   )
 }

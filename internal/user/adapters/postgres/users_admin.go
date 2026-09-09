@@ -159,16 +159,12 @@ func (r *Repository) GetUserDetail(ctx context.Context, userID string) (*core.Ad
 			AssignedAt:  row.AssignedAt.Time,
 		}
 		// Per-assignment valid-until (Spec 2.9): the per-assignment expires_at
-		// OVERRIDES the vocabulary expiry for the display status. The core's
-		// qualificationStatus reads ExpiresAt first, then falls back to the
-		// vocabulary expiry — so here we prefer the assignment override and
-		// carry the vocabulary date as the fallback.
-		effective := row.VocabExpiresAt
+		// IS the only valid-until (the vocabulary has no date, 2026-09-08
+		// rework). NULL = an unlimited assignment, never expires. The core's
+		// qualificationStatus derives the display status from ExpiryKind +
+		// ExpiresAt.
 		if row.AssignedExpiresAt.Valid {
-			effective = row.AssignedExpiresAt
-		}
-		if effective.Valid {
-			t := effective.Time
+			t := row.AssignedExpiresAt.Time
 			a.ExpiresAt = &t
 		}
 		detail.Qualifications = append(detail.Qualifications, a)

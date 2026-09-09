@@ -145,6 +145,11 @@ const (
 	QualificationStatusExpiringSoon = "expiring_soon"
 	QualificationStatusExpired      = "expired"
 	QualificationStatusUnlimited    = "unlimited"
+	// QualificationStatusFixed is the VOCABULARY display status of a fixed
+	// qualification (2026-09-08 rework): a fixed qualification has no date of
+	// its own, so the vocabulary badge reads "Befristet"; the per-user
+	// valid-until is set at assignment and drives the per-assignment status.
+	QualificationStatusFixed = "fixed"
 )
 
 // qualificationExpiringSoonWindow is how close to the expiry date an assignment

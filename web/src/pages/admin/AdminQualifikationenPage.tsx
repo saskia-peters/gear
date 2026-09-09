@@ -224,11 +224,6 @@ export function AdminQualifikationenPage() {
                         {qualification.description !== '' && (
                           <span className={styles.qualDescription}>{qualification.description}</span>
                         )}
-                        {qualification.expiry_kind === 'fixed' && qualification.expires_at && (
-                          <span className={styles.qualExpiry}>
-                            Gültig bis {new Date(qualification.expires_at).toLocaleDateString('de-DE')}
-                          </span>
-                        )}
                       </div>
                       <div className={styles.rowActions}>
                         {canManage && (

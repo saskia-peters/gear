@@ -25,11 +25,12 @@ func usersAdminRepo() *mockRepo {
 	repo.seedRoleGroup("g-schirr", "schirrmeister", "Base role: tool caretaker", true,
 		[]string{"dashboard.view", "inspection.submit", "tools.manage", "tool_types.manage"})
 
-	// A qualification vocabulary entry (Story 2.6 display: expiry model + status).
-	expiry := time.Now().UTC().Add(90 * 24 * time.Hour)
+	// A qualification vocabulary entry (Story 2.6 display: expiry kind + status).
+	// The vocabulary has NO valid-until date (2026-09-08 rework); a per-user
+	// valid-until lives only on assignments.
 	repo.qualifications["q-ketten"] = &QualificationAssignment{
 		ID: "q-ketten", Name: "Kettensäge", Description: "Kettensägen-Führerschein",
-		ExpiryKind: QualificationExpiryFixed, ExpiresAt: &expiry,
+		ExpiryKind: QualificationExpiryFixed,
 	}
 	repo.userQualifications["u-helfende"] = []string{"q-ketten"}
 

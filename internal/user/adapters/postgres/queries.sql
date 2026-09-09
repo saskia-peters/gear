@@ -693,12 +693,12 @@ ORDER BY p.code;
 
 -- name: ListUserQualifications :many
 -- The qualification assignments of a user (Story 2.6, AD-7/FR-22): the
--- vocabulary row, the assignment timestamp and the PER-ASSIGNMENT expires_at
--- (Spec 2.9, nullable — overrides the vocabulary expiry when set). The core
--- derives the per-assignment display status (Gültig / Bald ablaufend /
--- Abgelaufen / Unbegrenzt) from the per-assignment expires_at first, then the
--- vocabulary expires_at. Ordered by qualification name.
-SELECT q.id, q.name, q.description, q.expiry_kind, q.expires_at AS vocab_expires_at, uq.expires_at AS assigned_expires_at, uq.assigned_at
+-- vocabulary row and the PER-ASSIGNMENT expires_at (Spec 2.9, nullable — NULL
+-- for an unlimited assignment, never expires). The core derives the
+-- per-assignment display status (Gültig / Bald ablaufend / Abgelaufen /
+-- Unbegrenzt) from the per-assignment expires_at. Ordered by qualification
+-- name.
+SELECT q.id, q.name, q.description, q.expiry_kind, uq.expires_at AS assigned_expires_at, uq.assigned_at
 FROM user_qualifications uq
 JOIN qualifications q ON q.id = uq.qualification_id
 WHERE uq.user_id = $1
@@ -981,10 +981,13 @@ ORDER BY 1;
 
 -- name: ListQualifications :many
 -- The full qualification vocabulary (Story 2.6, AD-7/FR-22): every
--- qualification with its expiry model, ordered by name. The qualification
--- management surface (Story 2.7) edits these; Story 2.6 only needs the list for
--- the user-detail qualification view (via ListUserQualifications).
-SELECT id, name, description, expiry_kind, expires_at
+-- qualification with its expiry model, ordered by name. A qualification itself
+-- has NO valid-until date (2026-09-08 rework) — only its expiry_kind
+-- (unlimited/fixed); a per-user valid-until exists solely on assignments
+-- (user_qualifications.expires_at, Spec 2.9). The qualification management
+-- surface (Story 2.7) edits these; Story 2.6 only needs the list for the
+-- user-detail qualification view (via ListUserQualifications).
+SELECT id, name, description, expiry_kind
 FROM qualifications
 ORDER BY name;
 
@@ -1034,21 +1037,21 @@ WHERE id = $1;
 -- Create a qualification vocabulary row (Story 2.7, AD-7/FR-22). The name is
 -- unique case-insensitively (the repository pre-checks QualificationNameExists
 -- and the schema UNIQUE constraint is the belt-and-suspenders backstop).
--- `unlimited` qualifications store a NULL expires_at; `fixed` carry one.
-INSERT INTO qualifications (name, description, expiry_kind, expires_at)
-VALUES ($1, $2, $3, $4)
-RETURNING id, name, description, expiry_kind, expires_at;
+-- `unlimited` qualifications never expire; `fixed` ones carry no vocabulary
+-- date — a per-user valid-until is required at assignment (Spec 2.9).
+INSERT INTO qualifications (name, description, expiry_kind)
+VALUES ($1, $2, $3)
+RETURNING id, name, description, expiry_kind;
 
 -- name: UpdateQualification :one
--- Replace a qualification's name/description/expiry model atomically (Story
+-- Replace a qualification's name/description/expiry_kind atomically (Story
 -- 2.7). Editing the expiry model never rewrites existing assignments — each
--- assignment inherits the qualification's current expiry model on read (status
--- derives from expires_at, not a per-assignment copy). A zero-row update
+-- assignment keeps its per-user expires_at (Spec 2.9). A zero-row update
 -- (unknown id) maps to the uniform not-found in the repository.
 UPDATE qualifications
-SET name = $2, description = $3, expiry_kind = $4, expires_at = $5, updated_at = now()
+SET name = $2, description = $3, expiry_kind = $4, updated_at = now()
 WHERE id = $1
-RETURNING id, name, description, expiry_kind, expires_at;
+RETURNING id, name, description, expiry_kind;
 
 -- name: QualificationNameExists :one
 -- Case-insensitive duplicate-name guard for a qualification (Story 2.7): the

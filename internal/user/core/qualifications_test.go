@@ -5,7 +5,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
 )
 
 // qualificationsRepo seeds the Story 2.7 I/O matrix: an active admin holding
@@ -35,9 +34,11 @@ func TestListQualificationsValid(t *testing.T) {
 	if len(res.Qualifications) != 1 || res.Qualifications[0].Name != "Kettensäge" {
 		t.Fatalf("qualifications = %+v, want the Kettensäge entry", res.Qualifications)
 	}
-	// The fixed 90-day-out qualification shows "Gültig" (FR-22/AD-7).
-	if res.Qualifications[0].Status != QualificationStatusValid {
-		t.Errorf("status = %q, want %q", res.Qualifications[0].Status, QualificationStatusValid)
+	// The fixed qualification shows the vocabulary badge "Befristet"
+	// (2026-09-08 rework: the vocabulary has no date; a per-user valid-until is
+	// set at assignment, Spec 2.9).
+	if res.Qualifications[0].Status != QualificationStatusFixed {
+		t.Errorf("status = %q, want %q", res.Qualifications[0].Status, QualificationStatusFixed)
 	}
 	// The roster carries id + display name for the assignment editor.
 	if len(res.Users) != 2 {
@@ -136,7 +137,6 @@ func TestQualificationWritesUsersQualsManageForbidden(t *testing.T) {
 	repo.perms["u-schirr"] = []string{"users.view", "users.qualifications.manage"}
 	svc := usersAdminService(t, repo)
 	actor := repo.users["schirr@gear.local"]
-	future := time.Now().UTC().Add(90 * 24 * time.Hour)
 
 	if _, err := svc.CreateQualification(context.Background(), actor, CreateQualificationInput{
 		Name: "Neue Quali", ExpiryKind: QualificationExpiryUnlimited,
@@ -144,7 +144,7 @@ func TestQualificationWritesUsersQualsManageForbidden(t *testing.T) {
 		t.Errorf("CreateQualification (users.qualifications.manage holder) err = %v, want ErrForbidden", err)
 	}
 	if _, err := svc.UpdateQualification(context.Background(), actor, "q-ketten", UpdateQualificationInput{
-		Name: "Kettensäge umbenannt", ExpiryKind: QualificationExpiryFixed, ExpiresAt: &future,
+		Name: "Kettensäge umbenannt", ExpiryKind: QualificationExpiryFixed,
 	}); !errors.Is(err, ErrForbidden) {
 		t.Errorf("UpdateQualification (users.qualifications.manage holder) err = %v, want ErrForbidden", err)
 	}
@@ -165,8 +165,8 @@ func TestCreateQualificationUnlimited(t *testing.T) {
 	if q.Message != MsgQualificationCreated {
 		t.Errorf("message = %q, want %q (server-authoritative success text)", q.Message, MsgQualificationCreated)
 	}
-	if q.Qualification.ExpiryKind != QualificationExpiryUnlimited || q.Qualification.ExpiresAt != nil {
-		t.Errorf("expiry model = kind %q at %v, want unlimited with no date", q.Qualification.ExpiryKind, q.Qualification.ExpiresAt)
+	if q.Qualification.ExpiryKind != QualificationExpiryUnlimited {
+		t.Errorf("expiry kind = %q, want unlimited", q.Qualification.ExpiryKind)
 	}
 	if q.Qualification.Status != QualificationStatusUnlimited {
 		t.Errorf("status = %q, want %q", q.Qualification.Status, QualificationStatusUnlimited)
@@ -174,45 +174,20 @@ func TestCreateQualificationUnlimited(t *testing.T) {
 }
 
 func TestCreateQualificationFixed(t *testing.T) {
-	// CREATE_FIXED: {name, expiry_kind:fixed, expires_at future} creates a
-	// qualification whose status derives from expires_at.
+	// CREATE_FIXED: {name, expiry_kind:fixed} creates a qualification whose
+	// vocabulary status is Befristet (2026-09-08 rework) — the per-user
+	// valid-until is set at assignment, not here.
 	repo := qualificationsRepo()
 	svc := usersAdminService(t, repo)
-	future := time.Now().UTC().Add(90 * 24 * time.Hour)
 
 	q, err := svc.CreateQualification(context.Background(), qualificationsAdmin(repo), CreateQualificationInput{
-		Name: "Seilwinde", Description: "Seilwinden-Führerschein", ExpiryKind: QualificationExpiryFixed, ExpiresAt: &future,
+		Name: "Seilwinde", Description: "Seilwinden-Führerschein", ExpiryKind: QualificationExpiryFixed,
 	})
 	if err != nil {
 		t.Fatalf("CreateQualification failed: %v", err)
 	}
-	if q.Qualification.Status != QualificationStatusValid {
-		t.Errorf("status = %q, want %q", q.Qualification.Status, QualificationStatusValid)
-	}
-}
-
-func TestCreateQualificationSameDayExpiry(t *testing.T) {
-	// CREATE_FIXED_SAME_DAY (finding 10): a qualification expiring LATER today
-	// (end-of-day local serializes to a strictly-future instant) is accepted —
-	// client and server agree that "today" is a valid expiry.
-	repo := qualificationsRepo()
-	svc := usersAdminService(t, repo)
-	now := time.Now().UTC()
-	// End of the current UTC day (a "later today" expiry); guard the
-	// midnight-rollover window so the test never flakes.
-	endOfToday := now.Truncate(24 * time.Hour).Add(24*time.Hour).Add(-time.Second)
-	if !endOfToday.After(now) {
-		endOfToday = now.Add(30 * time.Minute)
-	}
-
-	q, err := svc.CreateQualification(context.Background(), qualificationsAdmin(repo), CreateQualificationInput{
-		Name: "Noch Heute", Description: "", ExpiryKind: QualificationExpiryFixed, ExpiresAt: &endOfToday,
-	})
-	if err != nil {
-		t.Fatalf("CreateQualification(later today) failed: %v", err)
-	}
-	if q.Qualification.Status != QualificationStatusExpiringSoon && q.Qualification.Status != QualificationStatusValid {
-		t.Errorf("status = %q, want a non-expired indicator for a later-today expiry", q.Qualification.Status)
+	if q.Qualification.Status != QualificationStatusFixed {
+		t.Errorf("status = %q, want %q", q.Qualification.Status, QualificationStatusFixed)
 	}
 }
 
@@ -231,11 +206,12 @@ func TestCreateQualificationDupName(t *testing.T) {
 }
 
 func TestCreateQualificationInvalid(t *testing.T) {
-	// CREATE_INVALID: empty name, bad expiry kind, fixed without a future
-	// expires_at all map to the uniform 400 sentinels.
+	// CREATE_INVALID: empty name, bad expiry kind and over-long description map
+	// to the uniform 400 sentinels. There is no vocabulary-level date to
+	// validate anymore (2026-09-08 rework) — a fixed qualification is valid
+	// without one; the per-user valid-until is required at assignment.
 	repo := qualificationsRepo()
 	svc := usersAdminService(t, repo)
-	now := time.Now().UTC()
 
 	cases := []struct {
 		name  string
@@ -244,8 +220,6 @@ func TestCreateQualificationInvalid(t *testing.T) {
 	}{
 		{"empty name", CreateQualificationInput{Name: "  ", ExpiryKind: QualificationExpiryUnlimited}, ErrQualificationInvalidName},
 		{"bad expiry kind", CreateQualificationInput{Name: "X", ExpiryKind: "sometimes"}, ErrQualificationInvalidExpiryKind},
-		{"fixed without date", CreateQualificationInput{Name: "X", ExpiryKind: QualificationExpiryFixed}, ErrQualificationInvalidExpiresAt},
-		{"fixed with past date", CreateQualificationInput{Name: "X", ExpiryKind: QualificationExpiryFixed, ExpiresAt: &now}, ErrQualificationInvalidExpiresAt},
 		{"long description", CreateQualificationInput{Name: "X", Description: strings.Repeat("x", QualificationDescriptionMaxLength+1), ExpiryKind: QualificationExpiryUnlimited}, ErrQualificationDescriptionTooLong},
 	}
 	for _, tc := range cases {
@@ -259,13 +233,13 @@ func TestCreateQualificationInvalid(t *testing.T) {
 }
 
 func TestUpdateQualificationValid(t *testing.T) {
-	// UPDATE_VALID: editing name/description/expiry replaces the row atomically.
+	// UPDATE_VALID: editing name/description/expiry kind replaces the row
+	// atomically.
 	repo := qualificationsRepo()
 	svc := usersAdminService(t, repo)
-	future := time.Now().UTC().Add(7 * 24 * time.Hour)
 
 	q, err := svc.UpdateQualification(context.Background(), qualificationsAdmin(repo), "q-ketten", UpdateQualificationInput{
-		Name: "Kettensäge neu", Description: "Neue Beschreibung", ExpiryKind: QualificationExpiryFixed, ExpiresAt: &future,
+		Name: "Kettensäge neu", Description: "Neue Beschreibung", ExpiryKind: QualificationExpiryFixed,
 	})
 	if err != nil {
 		t.Fatalf("UpdateQualification failed: %v", err)
@@ -276,15 +250,14 @@ func TestUpdateQualificationValid(t *testing.T) {
 	if q.Qualification.Name != "Kettensäge neu" || q.Qualification.Description != "Neue Beschreibung" {
 		t.Errorf("updated = %+v, want the new name/description", q.Qualification)
 	}
-	if q.Qualification.Status != QualificationStatusExpiringSoon {
-		t.Errorf("status = %q, want %q (7 days out)", q.Qualification.Status, QualificationStatusExpiringSoon)
+	if q.Qualification.Status != QualificationStatusFixed {
+		t.Errorf("status = %q, want %q (fixed vocabulary badge)", q.Qualification.Status, QualificationStatusFixed)
 	}
 }
 
-func TestUpdateQualificationSwitchesToUnlimitedClearsExpiry(t *testing.T) {
-	// UPDATE_EXPIRY_MODEL: switching a fixed qualification to unlimited clears
-	// the stored expires_at (never-expiring; the Bald ablaufend/Abgelaufen
-	// states never apply, FR-22).
+func TestUpdateQualificationSwitchesToUnlimited(t *testing.T) {
+	// UPDATE_EXPIRY_KIND: switching a fixed qualification to unlimited flips the
+	// vocabulary badge to Unbegrenzt (never-expiring, FR-22).
 	repo := qualificationsRepo()
 	svc := usersAdminService(t, repo)
 
@@ -294,8 +267,8 @@ func TestUpdateQualificationSwitchesToUnlimitedClearsExpiry(t *testing.T) {
 	if err != nil {
 		t.Fatalf("UpdateQualification failed: %v", err)
 	}
-	if q.Qualification.ExpiresAt != nil {
-		t.Errorf("expires_at = %v, want cleared on unlimited", q.Qualification.ExpiresAt)
+	if q.Qualification.ExpiryKind != QualificationExpiryUnlimited {
+		t.Errorf("expiry kind = %q, want unlimited", q.Qualification.ExpiryKind)
 	}
 	if q.Qualification.Status != QualificationStatusUnlimited {
 		t.Errorf("status = %q, want %q", q.Qualification.Status, QualificationStatusUnlimited)
@@ -455,20 +428,16 @@ func TestListQualificationAssignees(t *testing.T) {
 }
 
 func TestQualificationStatusDerivation(t *testing.T) {
-	// STATUS_UNLIMITED / STATUS_FIXED_EXPIRED / STATUS_FIXED_SOON: the list
-	// surface derives the correct status for unlimited, expired and soon-to-
-	// expire qualifications (FR-22/AD-7, reusing the Story 2.6 derivation).
-	now := time.Now().UTC()
+	// STATUS_UNLIMITED / STATUS_FIXED: the vocabulary list derives the badge
+	// from the expiry kind only (2026-09-08 rework) — unlimited → Unbegrenzt,
+	// fixed → Befristet. The per-assignment date-driven status (Gültig / Bald
+	// ablaufend / Abgelaufen) is covered by the assignment tests in
+	// users_admin_test.go.
 	repo := qualificationsRepo()
 	svc := usersAdminService(t, repo)
 
-	far := now.Add(90 * 24 * time.Hour)
-	soon := now.Add(7 * 24 * time.Hour)
-	past := now.Add(-1 * 24 * time.Hour)
 	repo.qualifications["q-unlim"] = &QualificationAssignment{ID: "q-unlim", Name: "Unbegrenzt", ExpiryKind: QualificationExpiryUnlimited}
-	repo.qualifications["q-far"] = &QualificationAssignment{ID: "q-far", Name: "Gültig", ExpiryKind: QualificationExpiryFixed, ExpiresAt: &far}
-	repo.qualifications["q-soon"] = &QualificationAssignment{ID: "q-soon", Name: "Bald", ExpiryKind: QualificationExpiryFixed, ExpiresAt: &soon}
-	repo.qualifications["q-past"] = &QualificationAssignment{ID: "q-past", Name: "Abgelaufen", ExpiryKind: QualificationExpiryFixed, ExpiresAt: &past}
+	repo.qualifications["q-fixed"] = &QualificationAssignment{ID: "q-fixed", Name: "Befristet", ExpiryKind: QualificationExpiryFixed}
 
 	res, err := svc.ListQualifications(context.Background(), qualificationsAdmin(repo))
 	if err != nil {
@@ -481,13 +450,7 @@ func TestQualificationStatusDerivation(t *testing.T) {
 	if got["Unbegrenzt"] != QualificationStatusUnlimited {
 		t.Errorf("Unbegrenzt status = %q, want %q (never expires)", got["Unbegrenzt"], QualificationStatusUnlimited)
 	}
-	if got["Gültig"] != QualificationStatusValid {
-		t.Errorf("Gültig status = %q, want %q", got["Gültig"], QualificationStatusValid)
-	}
-	if got["Bald"] != QualificationStatusExpiringSoon {
-		t.Errorf("Bald status = %q, want %q", got["Bald"], QualificationStatusExpiringSoon)
-	}
-	if got["Abgelaufen"] != QualificationStatusExpired {
-		t.Errorf("Abgelaufen status = %q, want %q", got["Abgelaufen"], QualificationStatusExpired)
+	if got["Befristet"] != QualificationStatusFixed {
+		t.Errorf("Befristet status = %q, want %q (fixed vocabulary badge)", got["Befristet"], QualificationStatusFixed)
 	}
 }

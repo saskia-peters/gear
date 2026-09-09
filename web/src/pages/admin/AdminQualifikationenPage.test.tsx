@@ -11,8 +11,8 @@ const QUALS_URL = '/api/v1/admin/qualifications'
 function qualsFixture() {
   return {
     qualifications: [
-      { id: 'q-1', name: 'Kettensäge', description: 'Führerschein', expiry_kind: 'unlimited', expires_at: null, status: 'unlimited' },
-      { id: 'q-2', name: 'Erste Hilfe', description: '', expiry_kind: 'fixed', expires_at: '2027-01-01T00:00:00.000Z', status: 'expiring_soon' },
+      { id: 'q-1', name: 'Kettensäge', description: 'Führerschein', expiry_kind: 'unlimited', status: 'unlimited' },
+      { id: 'q-2', name: 'Erste Hilfe', description: '', expiry_kind: 'fixed', status: 'fixed' },
     ],
     users: [
       { id: 'u-1', name: 'Frei Willig' },
@@ -74,7 +74,7 @@ describe('AdminQualifikationenPage', () => {
 
     expect(await screen.findByText('Kettensäge')).toBeInTheDocument()
     expect(screen.getByText('Unbegrenzt')).toBeInTheDocument()
-    expect(screen.getByText('Bald ablaufend')).toBeInTheDocument()
+    expect(screen.getByText('Befristet')).toBeInTheDocument()
     expect(screen.getByText('Erste Hilfe')).toBeInTheDocument()
     expect(screen.getByText('Führerschein')).toBeInTheDocument()
     expect(screen.getAllByRole('button', { name: 'Bearbeiten' })).toHaveLength(2)
@@ -104,12 +104,12 @@ describe('AdminQualifikationenPage', () => {
           ok: true, status: 200,
           body: listCalls === 1
             ? qualsFixture()
-            : { ...qualsFixture(), qualifications: [...qualsFixture().qualifications, { id: 'q-9', name: 'Seilwinde', description: '', expiry_kind: 'unlimited', expires_at: null, status: 'unlimited' }] },
+            : { ...qualsFixture(), qualifications: [...qualsFixture().qualifications, { id: 'q-9', name: 'Seilwinde', description: '', expiry_kind: 'unlimited', status: 'unlimited' }] },
         },
       },
       {
         matcher: (url, init) => url === QUALS_URL && init?.method === 'POST',
-        response: { ok: true, status: 201, body: { message: 'Qualifikation erstellt.', qualification: { id: 'q-9', name: 'Seilwinde', description: '', expiry_kind: 'unlimited', expires_at: null, status: 'unlimited' } } },
+        response: { ok: true, status: 201, body: { message: 'Qualifikation erstellt.', qualification: { id: 'q-9', name: 'Seilwinde', description: '', expiry_kind: 'unlimited', status: 'unlimited' } } },
       },
     ])
     const user = userEvent.setup()
@@ -131,7 +131,7 @@ describe('AdminQualifikationenPage', () => {
       stubList(qualsFixture()),
       {
         matcher: (url, init) => init?.method === 'PUT' && url === `${QUALS_URL}/q-1`,
-        response: { ok: true, status: 200, body: { message: 'Qualifikation gespeichert.', qualification: { id: 'q-1', name: 'Kettensäge', description: 'Neu', expiry_kind: 'unlimited', expires_at: null, status: 'unlimited' } } },
+        response: { ok: true, status: 200, body: { message: 'Qualifikation gespeichert.', qualification: { id: 'q-1', name: 'Kettensäge', description: 'Neu', expiry_kind: 'unlimited', status: 'unlimited' } } },
       },
       stubList(qualsFixture()),
     ])
@@ -278,12 +278,12 @@ describe('AdminQualifikationenPage', () => {
           ? { ok: false, status: 500, body: { error: { code: 'internal_error', message: 'Ein interner Fehler ist aufgetreten.' } } }
           : {
               ok: true, status: 200,
-              body: { ...qualsFixture(), qualifications: [...qualsFixture().qualifications, { id: 'q-9', name: 'Seilwinde', description: '', expiry_kind: 'unlimited', expires_at: null, status: 'unlimited' }] },
+              body: { ...qualsFixture(), qualifications: [...qualsFixture().qualifications, { id: 'q-9', name: 'Seilwinde', description: '', expiry_kind: 'unlimited', status: 'unlimited' }] },
             }),
       },
       {
         matcher: (url, init) => init?.method === 'POST' && url === QUALS_URL,
-        response: { ok: true, status: 201, body: { message: 'Qualifikation erstellt.', qualification: { id: 'q-9', name: 'Seilwinde', description: '', expiry_kind: 'unlimited', expires_at: null, status: 'unlimited' } } },
+        response: { ok: true, status: 201, body: { message: 'Qualifikation erstellt.', qualification: { id: 'q-9', name: 'Seilwinde', description: '', expiry_kind: 'unlimited', status: 'unlimited' } } },
       },
     ])
     const user = userEvent.setup()

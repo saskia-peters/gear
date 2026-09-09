@@ -62,25 +62,25 @@ func TestPostgresQualificationManagement(t *testing.T) {
 		t.Fatalf("CreateAdminUser failed: %v", err)
 	}
 
-	// CREATE_UNLIMITED: an unlimited qualification (no expires_at).
-	created, err := repo.CreateQualification(ctx, qualName, "Unbegrenzt gültig", core.QualificationExpiryUnlimited, nil)
+	// CREATE_UNLIMITED: an unlimited qualification (never expires).
+	created, err := repo.CreateQualification(ctx, qualName, "Unbegrenzt gültig", core.QualificationExpiryUnlimited)
 	if err != nil {
 		t.Fatalf("CreateQualification failed: %v", err)
 	}
-	if created.ExpiryKind != core.QualificationExpiryUnlimited || created.ExpiresAt != nil {
-		t.Errorf("created = %+v, want unlimited with no date", created)
+	if created.ExpiryKind != core.QualificationExpiryUnlimited {
+		t.Errorf("created = %+v, want unlimited", created)
 	}
 
 	// CREATE_DUP_NAME: the same name in a DIFFERENT case is a uniform 409.
-	if _, err := repo.CreateQualification(ctx, strings.ToUpper(qualName), "", core.QualificationExpiryUnlimited, nil); !errors.Is(err, core.ErrQualificationNameTaken) {
+	if _, err := repo.CreateQualification(ctx, strings.ToUpper(qualName), "", core.QualificationExpiryUnlimited); !errors.Is(err, core.ErrQualificationNameTaken) {
 		t.Errorf("CreateQualification(dup, case variant) err = %v, want ErrQualificationNameTaken", err)
 	}
 
-	// CREATE_FIXED: a fixed qualification with a future expires_at persists the
-	// expiry date.
-	future := time.Now().UTC().Add(90 * 24 * time.Hour)
+	// CREATE_FIXED: a fixed qualification persists WITHOUT any date — the
+	// vocabulary has no valid-until (2026-09-08 rework); a per-user valid-until
+	// is set at assignment (Spec 2.9).
 	fixedName := qualName + ".fixed"
-	fixed, err := repo.CreateQualification(ctx, fixedName, "Befristet", core.QualificationExpiryFixed, &future)
+	fixed, err := repo.CreateQualification(ctx, fixedName, "Befristet", core.QualificationExpiryFixed)
 	if err != nil {
 		t.Fatalf("CreateQualification(fixed) failed: %v", err)
 	}
@@ -89,29 +89,25 @@ func TestPostgresQualificationManagement(t *testing.T) {
 			t.Errorf("cleaning up fixed qualification failed: %v", err)
 		}
 	})
-	if fixed.ExpiresAt == nil {
-		t.Fatalf("fixed qualification expires_at = nil, want the future date")
-	}
-	if !fixed.ExpiresAt.Truncate(time.Microsecond).Equal(future.Truncate(time.Microsecond)) {
-		t.Errorf("expires_at = %v, want %v", fixed.ExpiresAt, future)
+	if fixed.ExpiryKind != core.QualificationExpiryFixed {
+		t.Errorf("fixed qualification expiry kind = %q, want fixed", fixed.ExpiryKind)
 	}
 
-	// UPDATE_VALID: replace name/description/expiry atomically; switching to
-	// unlimited clears the stored date (never-expiring, FR-22).
+	// UPDATE_VALID: replace name/description/expiry kind atomically.
 	renamedName := qualName + ".renamed"
-	updated, err := repo.UpdateQualification(ctx, fixed.ID, renamedName, "Neu beschrieben", core.QualificationExpiryUnlimited, nil)
+	updated, err := repo.UpdateQualification(ctx, fixed.ID, renamedName, "Neu beschrieben", core.QualificationExpiryUnlimited)
 	if err != nil {
 		t.Fatalf("UpdateQualification failed: %v", err)
 	}
 	if updated.Name != renamedName || updated.Description != "Neu beschrieben" {
 		t.Errorf("updated = %+v, want the new name/description", updated)
 	}
-	if updated.ExpiryKind != core.QualificationExpiryUnlimited || updated.ExpiresAt != nil {
-		t.Errorf("updated expiry model = kind %q at %v, want unlimited with no date", updated.ExpiryKind, updated.ExpiresAt)
+	if updated.ExpiryKind != core.QualificationExpiryUnlimited {
+		t.Errorf("updated expiry kind = %q, want unlimited", updated.ExpiryKind)
 	}
 
 	// UPDATE_UNKNOWN: a nonexistent id maps to the uniform 404 sentinel.
-	if _, err := repo.UpdateQualification(ctx, "00000000-0000-0000-0000-000000000001", "X", "", core.QualificationExpiryUnlimited, nil); !errors.Is(err, core.ErrQualificationNotFound) {
+	if _, err := repo.UpdateQualification(ctx, "00000000-0000-0000-0000-000000000001", "X", "", core.QualificationExpiryUnlimited); !errors.Is(err, core.ErrQualificationNotFound) {
 		t.Errorf("UpdateQualification(unknown) err = %v, want ErrQualificationNotFound", err)
 	}
 
@@ -166,9 +162,9 @@ func TestPostgresQualificationManagement(t *testing.T) {
 		t.Errorf("ListQualificationAssignees = %+v, want []", got)
 	}
 
-	// STATUS_* via the REAL core service (FR-22/AD-7): an unlimited
-	// qualification never expires, a fixed one in the past is Abgelaufen, one
-	// within the 30-day window is Bald ablaufend. The seeded admin group
+	// STATUS_* via the REAL core service (FR-22/AD-7): the vocabulary list
+	// derives the badge from the expiry kind only (2026-09-08 rework) —
+	// unlimited → Unbegrenzt, fixed → Befristet. The seeded admin group
 	// carries `qualifications.manage` (000010), so admin.1 can list.
 	admin, err := repo.GetUserByEmail(ctx, "admin.1@gear.local")
 	if err != nil || admin == nil {
@@ -178,26 +174,16 @@ func TestPostgresQualificationManagement(t *testing.T) {
 	sm := core.NewSessionManager(repo, time.Hour)
 	svc := core.NewService(repo, hasher, sm, nil, discardLogger())
 
-	pastName := qualName + ".past"
-	soonName := qualName + ".soon"
-	past := time.Now().UTC().Add(-24 * time.Hour)
-	soon := time.Now().UTC().Add(7 * 24 * time.Hour)
-	pastQual, err := repo.CreateQualification(ctx, pastName, "Abgelaufen", core.QualificationExpiryFixed, &past)
+	// A fixed qualification kept fixed, to pin the "Befristet" vocabulary badge
+	// (the `fixed` row above was renamed to unlimited).
+	badgeFixedName := qualName + ".badge-fixed"
+	badgeFixed, err := repo.CreateQualification(ctx, badgeFixedName, "Befristet", core.QualificationExpiryFixed)
 	if err != nil {
-		t.Fatalf("CreateQualification(past) failed: %v", err)
+		t.Fatalf("CreateQualification(badge-fixed) failed: %v", err)
 	}
 	t.Cleanup(func() {
-		if _, err := cleanupPool.Exec(context.Background(), "DELETE FROM qualifications WHERE id = $1", pastQual.ID); err != nil {
-			t.Errorf("cleaning up past qualification failed: %v", err)
-		}
-	})
-	soonQual, err := repo.CreateQualification(ctx, soonName, "Bald ablaufend", core.QualificationExpiryFixed, &soon)
-	if err != nil {
-		t.Fatalf("CreateQualification(soon) failed: %v", err)
-	}
-	t.Cleanup(func() {
-		if _, err := cleanupPool.Exec(context.Background(), "DELETE FROM qualifications WHERE id = $1", soonQual.ID); err != nil {
-			t.Errorf("cleaning up soon qualification failed: %v", err)
+		if _, err := cleanupPool.Exec(context.Background(), "DELETE FROM qualifications WHERE id = $1", badgeFixed.ID); err != nil {
+			t.Errorf("cleaning up badge-fixed qualification failed: %v", err)
 		}
 	})
 
@@ -212,11 +198,8 @@ func TestPostgresQualificationManagement(t *testing.T) {
 	if statusByName[created.Name] != core.QualificationStatusUnlimited {
 		t.Errorf("unlimited status = %q, want %q", statusByName[created.Name], core.QualificationStatusUnlimited)
 	}
-	if statusByName[pastName] != core.QualificationStatusExpired {
-		t.Errorf("past status = %q, want %q", statusByName[pastName], core.QualificationStatusExpired)
-	}
-	if statusByName[soonName] != core.QualificationStatusExpiringSoon {
-		t.Errorf("soon status = %q, want %q", statusByName[soonName], core.QualificationStatusExpiringSoon)
+	if statusByName[badgeFixedName] != core.QualificationStatusFixed {
+		t.Errorf("fixed status = %q, want %q (vocabulary badge, no date)", statusByName[badgeFixedName], core.QualificationStatusFixed)
 	}
 	// The roster comes back so the assignment editor needs one round-trip.
 	if len(res.Users) == 0 {
@@ -228,7 +211,7 @@ func TestPostgresQualificationManagement(t *testing.T) {
 	// qualification's OWN name (including a case variant) stays legal. The
 	// `created` row still holds `qualName`; `fixed` was renamed to renamedName.
 	otherName := qualName + ".other"
-	if _, err := repo.CreateQualification(ctx, otherName, "Andere", core.QualificationExpiryUnlimited, nil); err != nil {
+	if _, err := repo.CreateQualification(ctx, otherName, "Andere", core.QualificationExpiryUnlimited); err != nil {
 		t.Fatalf("CreateQualification(other) failed: %v", err)
 	}
 	t.Cleanup(func() {
@@ -236,17 +219,17 @@ func TestPostgresQualificationManagement(t *testing.T) {
 			t.Errorf("cleaning up other qualification failed: %v", err)
 		}
 	})
-	if _, err := repo.UpdateQualification(ctx, created.ID, otherName, "", core.QualificationExpiryUnlimited, nil); !errors.Is(err, core.ErrQualificationNameTaken) {
+	if _, err := repo.UpdateQualification(ctx, created.ID, otherName, "", core.QualificationExpiryUnlimited); !errors.Is(err, core.ErrQualificationNameTaken) {
 		t.Errorf("UpdateQualification(onto other's name) err = %v, want ErrQualificationNameTaken", err)
 	}
-	if _, err := repo.UpdateQualification(ctx, created.ID, strings.ToUpper(qualName), "", core.QualificationExpiryUnlimited, nil); err != nil {
+	if _, err := repo.UpdateQualification(ctx, created.ID, strings.ToUpper(qualName), "", core.QualificationExpiryUnlimited); err != nil {
 		t.Errorf("UpdateQualification(own name, case variant) failed: %v", err)
 	}
 
 	// UPDATE_UNKNOWN_TAKEN_NAME (finding 6): an unknown id whose requested name
 	// is held by another qualification maps to the uniform 404 — never 409
 	// (existence checked first inside the transaction).
-	if _, err := repo.UpdateQualification(ctx, "00000000-0000-0000-0000-000000000004", otherName, "", core.QualificationExpiryUnlimited, nil); !errors.Is(err, core.ErrQualificationNotFound) {
+	if _, err := repo.UpdateQualification(ctx, "00000000-0000-0000-0000-000000000004", otherName, "", core.QualificationExpiryUnlimited); !errors.Is(err, core.ErrQualificationNotFound) {
 		t.Errorf("UpdateQualification(unknown id, taken name) err = %v, want ErrQualificationNotFound (never 409)", err)
 	}
 }

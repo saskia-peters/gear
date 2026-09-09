@@ -32,16 +32,17 @@ func (r *Repository) ListQualificationVocabulary(ctx context.Context) ([]*core.Q
 	}
 	out := make([]*core.Qualification, 0, len(rows))
 	for _, row := range rows {
-		out = append(out, qualificationFromRow(row.ID, row.Name, row.Description, row.ExpiryKind, row.ExpiresAt))
+		out = append(out, qualificationFromRow(row.ID, row.Name, row.Description, row.ExpiryKind))
 	}
 	return out, nil
 }
 
 // CreateQualification creates a qualification vocabulary row (Story 2.7). The
 // name is unique case-insensitively (a duplicate maps to
-// core.ErrQualificationNameTaken → 409). `unlimited` qualifications store a
-// NULL expires_at; `fixed` carry one.
-func (r *Repository) CreateQualification(ctx context.Context, name, description, expiryKind string, expiresAt *time.Time) (*core.Qualification, error) {
+// core.ErrQualificationNameTaken → 409). The expiry model is only the
+// expiry_kind (unlimited/fixed) — a qualification itself has NO valid-until
+// date (2026-09-08 rework); per-user valid-until lives on assignments.
+func (r *Repository) CreateQualification(ctx context.Context, name, description, expiryKind string) (*core.Qualification, error) {
 	taken, err := r.queries.QualificationNameExists(ctx, name)
 	if err != nil {
 		return nil, err
@@ -53,7 +54,6 @@ func (r *Repository) CreateQualification(ctx context.Context, name, description,
 		Name:        name,
 		Description: description,
 		ExpiryKind:  expiryKind,
-		ExpiresAt:   timestamptzFromPtr(expiresAt),
 	})
 	if err != nil {
 		if isPgUniqueViolation(err) {
@@ -61,16 +61,16 @@ func (r *Repository) CreateQualification(ctx context.Context, name, description,
 		}
 		return nil, err
 	}
-	return qualificationFromRow(row.ID, row.Name, row.Description, row.ExpiryKind, row.ExpiresAt), nil
+	return qualificationFromRow(row.ID, row.Name, row.Description, row.ExpiryKind), nil
 }
 
-// UpdateQualification replaces a qualification's name/description/expiry model
+// UpdateQualification replaces a qualification's name/description/expiry_kind
 // atomically (Story 2.7). Editing the expiry model never rewrites existing
-// assignments — each assignment inherits the qualification's current expiry
-// model on read. An unknown id maps to core.ErrQualificationNotFound → 404
-// (checked FIRST, so it never answers 409 "name taken"); renaming onto a name
-// held by ANOTHER qualification maps to core.ErrQualificationNameTaken → 409.
-func (r *Repository) UpdateQualification(ctx context.Context, id, name, description, expiryKind string, expiresAt *time.Time) (*core.Qualification, error) {
+// assignments — each assignment keeps its per-user valid-until (Spec 2.9). An
+// unknown id maps to core.ErrQualificationNotFound → 404 (checked FIRST, so it
+// never answers 409 "name taken"); renaming onto a name held by ANOTHER
+// qualification maps to core.ErrQualificationNameTaken → 409.
+func (r *Repository) UpdateQualification(ctx context.Context, id, name, description, expiryKind string) (*core.Qualification, error) {
 	uid, err := uuidFromString(id)
 	if err != nil {
 		return nil, core.ErrQualificationNotFound
@@ -112,7 +112,6 @@ func (r *Repository) UpdateQualification(ctx context.Context, id, name, descript
 		Name:        name,
 		Description: description,
 		ExpiryKind:  expiryKind,
-		ExpiresAt:   timestamptzFromPtr(expiresAt),
 	})
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
@@ -126,7 +125,7 @@ func (r *Repository) UpdateQualification(ctx context.Context, id, name, descript
 	if err := tx.Commit(ctx); err != nil {
 		return nil, err
 	}
-	return qualificationFromRow(row.ID, row.Name, row.Description, row.ExpiryKind, row.ExpiresAt), nil
+	return qualificationFromRow(row.ID, row.Name, row.Description, row.ExpiryKind), nil
 }
 
 // ListQualificationAssignees returns the users currently assigned a
@@ -404,18 +403,13 @@ func (r *Repository) RevokeQualificationFromUser(ctx context.Context, userID, qu
 }
 
 // qualificationFromRow maps an sqlc qualification row to the core domain value.
-func qualificationFromRow(id pgtype.UUID, name, description, expiryKind string, expiresAt pgtype.Timestamptz) *core.Qualification {
-	q := &core.Qualification{
+func qualificationFromRow(id pgtype.UUID, name, description, expiryKind string) *core.Qualification {
+	return &core.Qualification{
 		ID:          uuidToString(id.Bytes),
 		Name:        name,
 		Description: description,
 		ExpiryKind:  expiryKind,
 	}
-	if expiresAt.Valid {
-		t := expiresAt.Time
-		q.ExpiresAt = &t
-	}
-	return q
 }
 
 // timestamptzFromPtr converts an optional time to a pgtype.Timestamptz (nil →

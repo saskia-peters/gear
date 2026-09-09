@@ -235,8 +235,8 @@ type Repository interface {
 	ReplaceUserGroupRoles(ctx context.Context, groupID string, roleIDs []string) ([]*core.RoleGroupRef, error)
 	// Qualification Management persistence (Story 2.7, AD-7/FR-22).
 	ListQualificationVocabulary(ctx context.Context) ([]*core.Qualification, error)
-	CreateQualification(ctx context.Context, name, description, expiryKind string, expiresAt *time.Time) (*core.Qualification, error)
-	UpdateQualification(ctx context.Context, id, name, description, expiryKind string, expiresAt *time.Time) (*core.Qualification, error)
+	CreateQualification(ctx context.Context, name, description, expiryKind string) (*core.Qualification, error)
+	UpdateQualification(ctx context.Context, id, name, description, expiryKind string) (*core.Qualification, error)
 	ListQualificationAssignees(ctx context.Context, id string) ([]*core.QualificationAssignee, error)
 	ReplaceQualificationAssignees(ctx context.Context, id string, userIDs []string) ([]*core.QualificationAssignee, error)
 	// Per-user qualification persistence (Spec 2.9): AssignQualificationToUser

@@ -155,8 +155,8 @@ type Repository interface {
 	// assignee set atomically (delete-then-insert in one transaction, Story 2.5
 	// lesson) — unknown member → ErrQualificationAssigneeUnknown.
 	ListQualificationVocabulary(ctx context.Context) ([]*Qualification, error)
-	CreateQualification(ctx context.Context, name, description, expiryKind string, expiresAt *time.Time) (*Qualification, error)
-	UpdateQualification(ctx context.Context, id, name, description, expiryKind string, expiresAt *time.Time) (*Qualification, error)
+	CreateQualification(ctx context.Context, name, description, expiryKind string) (*Qualification, error)
+	UpdateQualification(ctx context.Context, id, name, description, expiryKind string) (*Qualification, error)
 	ListQualificationAssignees(ctx context.Context, id string) ([]*QualificationAssignee, error)
 	ReplaceQualificationAssignees(ctx context.Context, id string, userIDs []string) ([]*QualificationAssignee, error)
 	// Admin Rework Effort 1 (Spec 2.9): ListUserGroupRoles returns the roles

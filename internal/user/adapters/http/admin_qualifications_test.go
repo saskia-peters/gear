@@ -206,14 +206,15 @@ func TestQualificationWritesUsersQualsManageForbidden(t *testing.T) {
 func TestCreateAdminQualificationOK(t *testing.T) {
 	// CREATE_FIXED: a valid create answers 201 with the server-authoritative
 	// confirmation plus the created qualification (finding: the SPA never
-	// hardcodes its own success text).
+	// hardcodes its own success text). The body carries only the expiry kind —
+	// a qualification itself has NO valid-until date (2026-09-08 rework).
 	svc := qualificationsSvc(nil, func(_ context.Context, in core.CreateQualificationInput) (*core.QualificationWriteResult, error) {
-		return &core.QualificationWriteResult{Message: core.MsgQualificationCreated, Qualification: &core.QualificationWithStatus{ID: "q-9", Name: in.Name, Description: in.Description, ExpiryKind: in.ExpiryKind, Status: core.QualificationStatusValid}}, nil
+		return &core.QualificationWriteResult{Message: core.MsgQualificationCreated, Qualification: &core.QualificationWithStatus{ID: "q-9", Name: in.Name, Description: in.Description, ExpiryKind: in.ExpiryKind, Status: core.QualificationStatusFixed}}, nil
 	}, nil, nil, nil)
 	h := newAdminQualificationsSurface(t, svc, &stubValidator{})
 
 	rec := doAdminQualifications(http.MethodPost, "/qualifications", "token",
-		[]byte(`{"name":"Seilwinde","description":"Führerschein","expiry_kind":"fixed","expires_at":"2099-01-01T00:00:00Z"}`), h)
+		[]byte(`{"name":"Seilwinde","description":"Führerschein","expiry_kind":"fixed"}`), h)
 	if rec.Code != http.StatusCreated {
 		t.Fatalf("status = %d, want 201 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -245,8 +246,6 @@ func TestCreateAdminQualificationErrors(t *testing.T) {
 			return nil, core.ErrQualificationInvalidName
 		case "BadKind":
 			return nil, core.ErrQualificationInvalidExpiryKind
-		case "BadDate":
-			return nil, core.ErrQualificationInvalidExpiresAt
 		}
 		return nil, core.ErrQualificationDescriptionTooLong
 	}, nil, nil, nil)
@@ -272,11 +271,6 @@ func TestCreateAdminQualificationErrors(t *testing.T) {
 		[]byte(`{"name":"BadKind","expiry_kind":"sometimes"}`), h)
 	if badKind.Code != http.StatusBadRequest {
 		t.Fatalf("bad kind status = %d, want 400", badKind.Code)
-	}
-	badDate := doAdminQualifications(http.MethodPost, "/qualifications", "token",
-		[]byte(`{"name":"BadDate","expiry_kind":"fixed"}`), h)
-	if badDate.Code != http.StatusBadRequest {
-		t.Fatalf("bad date status = %d, want 400", badDate.Code)
 	}
 	// Over-long description → 400 invalid_request with the German message.
 	longDesc := doAdminQualifications(http.MethodPost, "/qualifications", "token",

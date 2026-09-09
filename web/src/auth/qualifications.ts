@@ -1,25 +1,27 @@
 // Qualification Management data module (Story 2.7). It holds the API types and
 // calls for the "Qualifikationen" surface: vocabulary list / create / update,
 // plus the per-qualification assignee list / replacement. The server is the
-// source of truth for the status indicator (Unbegrenzt / Gültig / Bald
-// ablaufend / Abgelaufen, FR-22/AD-7) and the user roster — the SPA only maps
-// the status codes to German badges.
+// source of truth for the status indicator (Unbegrenzt / Befristet for the
+// vocabulary; Gültig / Bald ablaufend / Abgelaufen / Unbegrenzt per assignment,
+// FR-22/AD-7) and the user roster — the SPA only maps the status codes to
+// German badges.
 
 import { authHeaders } from './authState.ts'
 import { ApiError } from './roles.ts'
 import type { PermissionCatalogEntry } from './roles.ts'
 
 export type QualificationExpiryKind = 'unlimited' | 'fixed'
-export type QualificationStatus = 'unlimited' | 'valid' | 'expiring_soon' | 'expired'
+export type QualificationStatus = 'unlimited' | 'valid' | 'expiring_soon' | 'expired' | 'fixed'
 
 // Qualification is one vocabulary entry with its server-derived status
-// indicator (Story 2.7).
+// indicator (Story 2.7). A qualification itself has NO valid-until date
+// (2026-09-08 rework) — only its expiry kind; a per-user valid-until lives on
+// assignments (Spec 2.9).
 export interface Qualification {
   id: string
   name: string
   description: string
   expiry_kind: QualificationExpiryKind
-  expires_at: string | null
   status: QualificationStatus
 }
 
@@ -37,12 +39,12 @@ export interface QualificationList {
   users: QualificationRosterUser[]
 }
 
-// QualificationInput is the create/edit body (name, description, expiry model).
+// QualificationInput is the create/edit body (name, description, expiry kind).
+// There is no valid-until date on a qualification itself (2026-09-08 rework).
 export interface QualificationInput {
   name: string
   description: string
   expiry_kind: QualificationExpiryKind
-  expires_at: string | null
 }
 
 // QualificationWriteResult is the create/update response (finding: the
@@ -70,6 +72,7 @@ export interface QualificationAssignResult {
 // server sends the raw status code; the client renders the badge.
 export const QUALIFICATION_STATUS_LABELS: Record<QualificationStatus, string> = {
   unlimited: 'Unbegrenzt',
+  fixed: 'Befristet',
   valid: 'Gültig',
   expiring_soon: 'Bald ablaufend',
   expired: 'Abgelaufen',

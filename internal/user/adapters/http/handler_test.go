@@ -376,14 +376,14 @@ func (m *mockService) CreateQualification(ctx context.Context, actor *core.User,
 	if m.createQualificationFunc != nil {
 		return m.createQualificationFunc(ctx, actor, input)
 	}
-	return &core.QualificationWriteResult{Message: core.MsgQualificationCreated, Qualification: &core.QualificationWithStatus{ID: "q-1", Name: input.Name, Description: input.Description, ExpiryKind: input.ExpiryKind, ExpiresAt: input.ExpiresAt}}, nil
+	return &core.QualificationWriteResult{Message: core.MsgQualificationCreated, Qualification: &core.QualificationWithStatus{ID: "q-1", Name: input.Name, Description: input.Description, ExpiryKind: input.ExpiryKind}}, nil
 }
 
 func (m *mockService) UpdateQualification(ctx context.Context, actor *core.User, id string, input core.UpdateQualificationInput) (*core.QualificationWriteResult, error) {
 	if m.updateQualificationFunc != nil {
 		return m.updateQualificationFunc(ctx, actor, id, input)
 	}
-	return &core.QualificationWriteResult{Message: core.MsgQualificationUpdated, Qualification: &core.QualificationWithStatus{ID: id, Name: input.Name, Description: input.Description, ExpiryKind: input.ExpiryKind, ExpiresAt: input.ExpiresAt}}, nil
+	return &core.QualificationWriteResult{Message: core.MsgQualificationUpdated, Qualification: &core.QualificationWithStatus{ID: id, Name: input.Name, Description: input.Description, ExpiryKind: input.ExpiryKind}}, nil
 }
 
 func (m *mockService) ListQualificationAssignees(ctx context.Context, actor *core.User, id string) ([]*core.QualificationAssignee, error) {
@@ -1931,10 +1931,10 @@ func (r *changePasswordRepo) ReplaceUserGroupMemberships(_ context.Context, _ st
 func (r *changePasswordRepo) ListQualificationVocabulary(_ context.Context) ([]*core.Qualification, error) {
 	return nil, nil
 }
-func (r *changePasswordRepo) CreateQualification(_ context.Context, _, _, _ string, _ *time.Time) (*core.Qualification, error) {
+func (r *changePasswordRepo) CreateQualification(_ context.Context, _, _, _ string) (*core.Qualification, error) {
 	return nil, nil
 }
-func (r *changePasswordRepo) UpdateQualification(_ context.Context, _, _, _, _ string, _ *time.Time) (*core.Qualification, error) {
+func (r *changePasswordRepo) UpdateQualification(_ context.Context, _, _, _, _ string) (*core.Qualification, error) {
 	return nil, nil
 }
 func (r *changePasswordRepo) ListQualificationAssignees(_ context.Context, _ string) ([]*core.QualificationAssignee, error) {
