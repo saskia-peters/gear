@@ -58,7 +58,7 @@ export const PERMISSION_LABELS: Record<string, string> = {
   'user.account.approve': 'Benutzerkonten freigeben',
   'admin.settings.email': 'E-Mail-Einstellungen verwalten',
   'admin.settings.backup': 'Sicherungen verwalten',
-  'schedules.manage': 'Dienstpläne verwalten',
+  'schedules.manage': 'Zeitpläne verwalten',
 }
 
 // The full 23-code base series (AD-12). Used to sort/validate the local fallback

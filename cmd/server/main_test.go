@@ -148,6 +148,22 @@ func (s *compSettingsService) TestBackupDestination(_ context.Context, _, _ stri
 	return &admcore.BackupTestResult{Ok: true, Message: admcore.MsgBackupTestOK}, nil
 }
 
+func (s *compSettingsService) ListSchedules(_ context.Context, _ string) ([]*admcore.Schedule, error) {
+	return []*admcore.Schedule{}, nil
+}
+
+func (s *compSettingsService) CreateSchedule(_ context.Context, _ string, input admcore.ScheduleInput) (*admcore.Schedule, error) {
+	return &admcore.Schedule{ID: "id", Name: input.Name, IntervalUnit: input.IntervalUnit, IntervalMagnitude: input.IntervalMagnitude}, nil
+}
+
+func (s *compSettingsService) UpdateSchedule(_ context.Context, _, _ string, _ admcore.ScheduleInput) (*admcore.Schedule, error) {
+	return &admcore.Schedule{ID: "id", Name: "x"}, nil
+}
+
+func (s *compSettingsService) ArchiveSchedule(_ context.Context, _, _ string) (*admcore.Schedule, error) {
+	return &admcore.Schedule{ID: "id", Name: "x"}, nil
+}
+
 var _ adminports.Service = (*compSettingsService)(nil)
 
 // activeUser builds a session carrying an active user.
@@ -317,5 +333,171 @@ func TestCompositionBackupMountGating(t *testing.T) {
 	}
 	if strings.TrimSpace(rec.Body.String()) != "[]" {
 		t.Errorf("backup response = %s, want empty JSON array", rec.Body.String())
+	}
+}
+
+// newCompositionScheduleRouter mirrors the main() mounts exactly for the Story
+// 4.1 schedule-catalog surface: /api/v1/admin, /api/v1/admin/settings (SMTP
+// gate), /api/v1/admin/settings/backup (backup gate) and
+// /api/v1/admin/settings/schedules (its OWN schedules.manage gate), all through
+// the REAL RequireAnyPermission middleware and router.New. This pins the
+// one-permission-per-surface mount ordering (AD-6): the more-specific schedule
+// sub-mount must win for /api/v1/admin/settings/schedules/*, a caller holding
+// only admin.settings.email or admin.settings.backup must NOT reach it, and a
+// caller holding ONLY schedules.manage reaches it (the SMTP/backup gates are
+// NOT widened).
+func newCompositionScheduleRouter(perms []string, session *usercore.Session) http.Handler {
+	log := discardLogger()
+	validator := &compValidator{session: session}
+	resolver := &compResolver{perms: perms}
+
+	settingsHandler := adminhttp.NewHandler(&compSettingsService{}, log)
+	settingsSurface := auth.RequireAnyPermission(validator, resolver, []string{admcore.SmtpSettingsPermission}, "admin.settings.email access denied", log)(settingsHandler.Routes())
+	backupSurface := auth.RequireAnyPermission(validator, resolver, []string{admcore.BackupSettingsPermission}, "admin.settings.backup access denied", log)(settingsHandler.BackupRoutes())
+	schedulesSurface := auth.RequireAnyPermission(validator, resolver, []string{admcore.SchedulesPermission}, "schedules.manage access denied", log)(settingsHandler.ScheduleRoutes())
+
+	outer := chi.NewRouter()
+	outer.Get("/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"module":"admin","status":"ok"}`))
+	})
+	outerSurface := auth.RequireAnyPermission(validator, resolver, usercore.AdminModuleAccessCodes(), "admin access denied", log)(outer)
+
+	return router.New(stubPinger{}, log,
+		router.WithMount("/api/v1/admin", outerSurface),
+		router.WithMount("/api/v1/admin/settings", settingsSurface),
+		router.WithMount("/api/v1/admin/settings/backup", backupSurface),
+		router.WithMount("/api/v1/admin/settings/schedules", schedulesSurface),
+	)
+}
+
+func doScheduleComposedRequest(h http.Handler, token string) *httptest.ResponseRecorder {
+	return doComposedJSONRequest(h, token, http.MethodGet, "/api/v1/admin/settings/schedules", "")
+}
+
+// doComposedJSONRequest issues an authenticated JSON request through the REAL
+// composed router, mirroring how the SPA calls the API.
+func doComposedJSONRequest(h http.Handler, token, method, path, body string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	req.Header.Set("Content-Type", "application/json")
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestCompositionScheduleMountGating verifies the Story 4.1 composition-root
+// wiring: /api/v1/admin/settings/schedules is gated by ITS OWN schedules.manage
+// permission (AD-6/AD-16) — a caller holding only admin.settings.email or
+// admin.settings.backup gets the uniform 403 (the SMTP/backup gates are NOT
+// widened), while a schedules.manage holder reaches the surface (and, via the
+// outer gate, the admin module root). The reverse is also pinned: a
+// schedules-only holder is denied BOTH the SMTP and backup surfaces (its code
+// opens only the schedules mount, not the sibling gates).
+func TestCompositionScheduleMountGating(t *testing.T) {
+	// 401: no token.
+	if rec := doScheduleComposedRequest(newCompositionScheduleRouter([]string{}, nil), ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no token: status = %d, want 401", rec.Code)
+	}
+
+	// 403: a caller holding ONLY admin.settings.email must NOT reach the
+	// schedule surface — the gates are separate (one permission per surface).
+	rec := doScheduleComposedRequest(newCompositionScheduleRouter([]string{admcore.SmtpSettingsPermission}, activeUser("u-mail", "mail@gear.local")), "tok")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("admin.settings.email holder: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// 403: a caller holding ONLY admin.settings.backup is also denied.
+	rec = doScheduleComposedRequest(newCompositionScheduleRouter([]string{admcore.BackupSettingsPermission}, activeUser("u-backup", "backup@gear.local")), "tok")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("admin.settings.backup holder: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// 403: a caller holding an unrelated admin code is denied with no schedule
+	// data exposed.
+	rec = doScheduleComposedRequest(newCompositionScheduleRouter([]string{"dashboard.view"}, activeUser("u-vol", "vol@gear.local")), "tok")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("non-admin holder: status = %d, want 403", rec.Code)
+	}
+
+	// 200: a caller holding ONLY schedules.manage reaches the schedule surface
+	// (empty list from the in-memory service) — proves the schedules sub-mount
+	// is chosen over the outer admin-module mount (mount ordering correct).
+	schedRouter := newCompositionScheduleRouter([]string{admcore.SchedulesPermission}, activeUser("u-sched", "sched@gear.local"))
+	rec = doScheduleComposedRequest(schedRouter, "tok")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("schedules.manage holder: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if strings.TrimSpace(rec.Body.String()) != "[]" {
+		t.Errorf("schedule response = %s, want empty JSON array", rec.Body.String())
+	}
+
+	// REVERSE: the schedules-only holder must NOT reach the SMTP surface (the
+	// schedule gate does not widen the admin.settings.email gate).
+	if rec := doComposedJSONRequest(schedRouter, "tok", http.MethodGet, "/api/v1/admin/settings/smtp", ""); rec.Code != http.StatusForbidden {
+		t.Errorf("schedules-only holder on SMTP: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// REVERSE: the schedules-only holder must NOT reach the backup surface (the
+	// schedule gate does not widen the admin.settings.backup gate).
+	if rec := doComposedJSONRequest(schedRouter, "tok", http.MethodGet, "/api/v1/admin/settings/backup", ""); rec.Code != http.StatusForbidden {
+		t.Errorf("schedules-only holder on backup: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// 200: the same holder reaches the outer admin-module root (schedules.manage
+	// is part of AdminModuleAccessCodes).
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rootRec := httptest.NewRecorder()
+	newCompositionScheduleRouter([]string{admcore.SchedulesPermission}, activeUser("u-sched", "sched@gear.local")).ServeHTTP(rootRec, req)
+	if rootRec.Code != http.StatusOK {
+		t.Errorf("admin root: status = %d, want 200", rootRec.Code)
+	}
+}
+
+// TestCompositionScheduleWriteVerbs verifies the Story 4.1 write verbs through
+// the REAL RequireAnyPermission mount: a schedules.manage holder can POST
+// (create) and POST /{id}/archive on the composed schedules surface, while a
+// non-holder (email-only) is denied both with the uniform 403.
+func TestCompositionScheduleWriteVerbs(t *testing.T) {
+	// POST create as a schedules-only holder → 201.
+	holder := newCompositionScheduleRouter([]string{admcore.SchedulesPermission}, activeUser("u-sched", "sched@gear.local"))
+	rec := doComposedJSONRequest(holder, "tok", http.MethodPost, "/api/v1/admin/settings/schedules",
+		`{"name":"1 year","interval_unit":"year","interval_magnitude":1}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("holder POST create: status = %d, want 201 (body %s)", rec.Code, rec.Body.String())
+	}
+	var createBody map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &createBody); err != nil {
+		t.Fatalf("decoding create response err = %v", err)
+	}
+	if createBody["message"] != admcore.MsgScheduleSaved {
+		t.Errorf("create message = %v, want %q", createBody["message"], admcore.MsgScheduleSaved)
+	}
+
+	// POST /{id}/archive as a schedules-only holder → 200.
+	rec = doComposedJSONRequest(holder, "tok", http.MethodPost, "/api/v1/admin/settings/schedules/id-a/archive", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("holder POST archive: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var archiveBody map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &archiveBody); err != nil {
+		t.Fatalf("decoding archive response err = %v", err)
+	}
+	if archiveBody["message"] != admcore.MsgScheduleArchived {
+		t.Errorf("archive message = %v, want %q", archiveBody["message"], admcore.MsgScheduleArchived)
+	}
+
+	// Non-holder (email-only) is denied the write verbs with the uniform 403.
+	nonHolder := newCompositionScheduleRouter([]string{admcore.SmtpSettingsPermission}, activeUser("u-mail", "mail@gear.local"))
+	rec = doComposedJSONRequest(nonHolder, "tok", http.MethodPost, "/api/v1/admin/settings/schedules",
+		`{"name":"1 year","interval_unit":"year","interval_magnitude":1}`)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("email-only POST create: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	rec = doComposedJSONRequest(nonHolder, "tok", http.MethodPost, "/api/v1/admin/settings/schedules/id-a/archive", "")
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("email-only POST archive: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
 	}
 }

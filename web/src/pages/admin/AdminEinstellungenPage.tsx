@@ -7,6 +7,7 @@ import { filteredAdminNav } from '../../auth/permissions.ts'
 import {
   BACKUP_SETTINGS_PERMISSION,
   SMTP_SETTINGS_PERMISSION,
+  SCHEDULES_PERMISSION,
   getSmtpSettings,
   testSmtpEmail,
   updateSmtpSettings,
@@ -15,6 +16,10 @@ import {
   updateBackupDestination,
   deleteBackupDestination,
   testBackupDestination,
+  listSchedules,
+  createSchedule,
+  updateSchedule,
+  archiveSchedule,
 } from '../../auth/settings.ts'
 import type {
   SmtpSecurity,
@@ -22,6 +27,9 @@ import type {
   BackupMechanism,
   BackupDestination,
   BackupDestinationInput,
+  Schedule,
+  ScheduleInput,
+  ScheduleIntervalUnit,
 } from '../../auth/settings.ts'
 import styles from './AdminEinstellungenPage.module.css'
 
@@ -38,28 +46,50 @@ const MECHANISM_OPTIONS: ReadonlyArray<{ value: BackupMechanism; label: string }
   { value: 'sftp', label: 'SFTP' },
 ]
 
+// Interval units of the schedule catalog (FR-30/AD-16). `label` is the dropdown
+// option text; `display` is the row's German descriptor ("Jährlich", "Monatlich",
+// … — unit-only, never varying by magnitude), and `singular`/`plural` give the
+// correctly pluralized German unit rendered as e.g. "Jährlich − 1 Jahr" or
+// "Wöchentlich − 2 Wochen".
+const INTERVAL_OPTIONS: ReadonlyArray<{ value: ScheduleIntervalUnit; label: string; display: string; singular: string; plural: string }> = [
+  { value: 'year', label: 'Jahr', display: 'Jährlich', singular: 'Jahr', plural: 'Jahre' },
+  { value: 'quarter', label: 'Quartal', display: 'Vierteljährlich', singular: 'Quartal', plural: 'Quartale' },
+  { value: 'month', label: 'Monat', display: 'Monatlich', singular: 'Monat', plural: 'Monate' },
+  { value: 'week', label: 'Woche', display: 'Wöchentlich', singular: 'Woche', plural: 'Wochen' },
+  { value: 'day', label: 'Tag', display: 'Täglich', singular: 'Tag', plural: 'Tage' },
+]
+
 type Feedback = { kind: 'success' | 'error'; message: string } | null
-type Tab = 'email' | 'backup'
+type Tab = 'email' | 'backup' | 'schedules'
 
 function mechanismLabel(m: BackupMechanism): string {
   return MECHANISM_OPTIONS.find((o) => o.value === m)?.label ?? m
 }
 
-// AdminEinstellungenPage is the Einstellungen surface (Story 3.1 + 3.2,
-// FR-28/FR-29/UX-DR6/UX-DR8/UX-DR9): a tab bar over the E-Mail and Backup
-// settings surfaces. Each tab is gated by its OWN permission code (AD-6) —
-// E-Mail by admin.settings.email, Backup by admin.settings.backup — so a
-// holder of only one code sees only that surface. Credentials are write-only:
-// GET exposes only *configured booleans and saving with an empty credential
-// omits it so the server keeps the existing encrypted one (NFR-S4). Inline
-// German feedback, sticky actions, ≥48px targets, 401→login, 403→leave the
-// admin module. The server remains the source of truth.
+function scheduleDisplay(s: Schedule): string {
+  const option = INTERVAL_OPTIONS.find((o) => o.value === s.interval_unit)
+  if (!option) return `${s.interval_magnitude} ${s.interval_unit}`
+  const unit = s.interval_magnitude === 1 ? option.singular : option.plural
+  return `${option.display} − ${s.interval_magnitude} ${unit}`
+}
+
+// AdminEinstellungenPage is the Einstellungen surface (Story 3.1 + 3.2 + 4.1,
+// FR-28/FR-29/FR-30/UX-DR6/UX-DR8/UX-DR9): a tab bar over the E-Mail, Backup
+// and Zeitpläne settings surfaces. Each tab is gated by its OWN permission code
+// (AD-6) — E-Mail by admin.settings.email, Backup by admin.settings.backup,
+// Zeitpläne by schedules.manage — so a holder of only one code sees only that
+// surface. Credentials are write-only: GET exposes only *configured booleans
+// and saving with an empty credential omits it so the server keeps the existing
+// encrypted one (NFR-S4). Inline German feedback, sticky actions, ≥48px
+// targets, 401→login, 403→leave the admin module. The server remains the
+// source of truth.
 export function AdminEinstellungenPage() {
   const navigate = useNavigate()
   const perms = getPermissions()
   const canEmail = perms.includes(SMTP_SETTINGS_PERMISSION)
   const canBackup = perms.includes(BACKUP_SETTINGS_PERMISSION)
-  const [activeTab, setActiveTab] = useState<Tab>(canEmail ? 'email' : 'backup')
+  const canSchedules = perms.includes(SCHEDULES_PERMISSION)
+  const [activeTab, setActiveTab] = useState<Tab>(canEmail ? 'email' : canBackup ? 'backup' : 'schedules')
 
   // handleApiError inspects an API error: a 403 clears the cached admin flag
   // and leaves the admin module; a 401 (expired/revoked session) clears the
@@ -91,7 +121,7 @@ export function AdminEinstellungenPage() {
         <main className={styles.main}>
           <h2 className={styles.title}>Einstellungen</h2>
           <p className={styles.description}>
-            E-Mail-Versand und Backup-Ziele. Änderungen gelten sofort, ohne Neubereitstellung.
+            E-Mail-Versand, Backup-Ziele und Zeitpläne. Änderungen gelten sofort, ohne Neubereitstellung.
           </p>
 
           <div className={styles.tabs} role="tablist" aria-label="Einstellungen">
@@ -117,12 +147,25 @@ export function AdminEinstellungenPage() {
                 Backup
               </button>
             )}
+            {canSchedules && (
+              <button
+                type="button"
+                role="tab"
+                aria-selected={activeTab === 'schedules'}
+                className={activeTab === 'schedules' ? styles.tabActive : styles.tab}
+                onClick={() => setActiveTab('schedules')}
+              >
+                Zeitpläne
+              </button>
+            )}
           </div>
 
           {activeTab === 'email' && canEmail ? (
             <EmailSettingsTab onApiError={handleApiError} />
           ) : activeTab === 'backup' && canBackup ? (
             <BackupSettingsTab onApiError={handleApiError} />
+          ) : activeTab === 'schedules' && canSchedules ? (
+            <ScheduleSettingsTab onApiError={handleApiError} />
           ) : null}
         </main>
       </div>
@@ -802,6 +845,250 @@ function BackupSettingsTab({ onApiError }: { onApiError: (err: unknown) => boole
                 maxLength={255}
                 autoComplete="off"
               />
+            </div>
+
+            <div className={styles.stickyActions}>
+              <button type="submit" className={styles.saveButton} disabled={busy}>
+                {busy ? 'Wird gespeichert...' : editingId ? 'Änderungen speichern' : 'Speichern'}
+              </button>
+              {editingId && (
+                <button type="button" className={styles.testButton} disabled={busy} onClick={resetForm}>
+                  Abbrechen
+                </button>
+              )}
+            </div>
+          </form>
+        </>
+      )}
+    </>
+  )
+}
+
+// ScheduleSettingsTab is the Zeitpläne surface (Story 4.1, FR-30/AD-16): the
+// active schedule-catalog list (name + "Jährlich − 1 year" interval display)
+// with a create/edit form (name, interval unit dropdown, magnitude number
+// input) and a per-row archive action with a confirm. Archive is SOFT — the
+// row leaves the active list and is never hard-deleted; archived schedules are
+// not shown (the server filters them). Inline German feedback.
+function ScheduleSettingsTab({ onApiError }: { onApiError: (err: unknown) => boolean }) {
+  const [loaded, setLoaded] = useState(false)
+  const [loadError, setLoadError] = useState('')
+  const [schedules, setSchedules] = useState<Schedule[]>([])
+  const [busy, setBusy] = useState(false)
+  const [feedback, setFeedback] = useState<Feedback>(null)
+
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [name, setName] = useState('')
+  const [intervalUnit, setIntervalUnit] = useState<ScheduleIntervalUnit>('year')
+  const [magnitude, setMagnitude] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    async function run() {
+      try {
+        const scheds = await listSchedules()
+        if (cancelled) return
+        setSchedules(scheds)
+      } catch (err) {
+        if (cancelled) return
+        if (!onApiError(err)) {
+          setLoadError('Die Zeitpläne konnten nicht geladen werden.')
+        }
+      } finally {
+        if (!cancelled) setLoaded(true)
+      }
+    }
+    void run()
+    return () => {
+      cancelled = true
+    }
+  }, [onApiError])
+
+  function resetForm() {
+    setEditingId(null)
+    setName('')
+    setIntervalUnit('year')
+    setMagnitude('')
+  }
+
+  function startEdit(s: Schedule) {
+    setEditingId(s.id)
+    setName(s.name)
+    setIntervalUnit(s.interval_unit)
+    setMagnitude(String(s.interval_magnitude))
+    setFeedback(null)
+  }
+
+  async function save() {
+    setBusy(true)
+    setFeedback(null)
+    const input: ScheduleInput = {
+      name: name.trim(),
+      interval_unit: intervalUnit,
+      interval_magnitude: Number(magnitude),
+    }
+    try {
+      if (editingId) {
+        const saved = await updateSchedule(editingId, input)
+        setSchedules((prev) => prev.map((s) => (s.id === editingId ? saved : s)))
+        setFeedback({ kind: 'success', message: saved.message })
+        resetForm()
+      } else {
+        const created = await createSchedule(input)
+        setSchedules((prev) => [...prev, created])
+        setFeedback({ kind: 'success', message: created.message })
+        resetForm()
+      }
+    } catch (err) {
+      if (onApiError(err)) return
+      setFeedback({
+        kind: 'error',
+        message: err instanceof Error ? err.message : 'Der Zeitplan konnte nicht gespeichert werden.',
+      })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function archive(s: Schedule) {
+    const ok = window.confirm(`Zeitplan „${s.name}“ wirklich archivieren? Archivierte Zeitpläne können nicht mehr bearbeitet werden.`)
+    if (!ok) return
+    setBusy(true)
+    setFeedback(null)
+    try {
+      const result = await archiveSchedule(s.id)
+      setSchedules((prev) => prev.filter((x) => x.id !== s.id))
+      setFeedback({ kind: 'success', message: result.message })
+      if (editingId === s.id) resetForm()
+    } catch (err) {
+      if (onApiError(err)) return
+      setFeedback({
+        kind: 'error',
+        message: err instanceof Error ? err.message : 'Der Zeitplan konnte nicht archiviert werden.',
+      })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <>
+      {feedback && (
+        <p
+          role={feedback.kind === 'error' ? 'alert' : 'status'}
+          className={feedback.kind === 'error' ? styles.feedbackError : styles.feedbackSuccess}
+        >
+          {feedback.message}
+        </p>
+      )}
+      {loadError && (
+        <p role="alert" className={styles.feedbackError}>
+          {loadError}
+        </p>
+      )}
+
+      {!loaded ? (
+        <div className={styles.skeleton} aria-busy="true" aria-label="Zeitpläne werden geladen">
+          <div className={styles.skeletonRow} aria-hidden="true" />
+          <div className={styles.skeletonRow} aria-hidden="true" />
+        </div>
+      ) : (
+        <>
+          {schedules.length > 0 && (
+            <ul className={styles.list} aria-label="Zeitpläne">
+              {schedules.map((s) => (
+                <li key={s.id} className={styles.row}>
+                  <div className={styles.rowInfo}>
+                    <span className={styles.rowName}>{s.name}</span>
+                    <span className={styles.rowMeta}>{scheduleDisplay(s)}</span>
+                  </div>
+                  <div className={styles.rowActions}>
+                    <button
+                      type="button"
+                      className={styles.rowButton}
+                      disabled={busy}
+                      onClick={() => startEdit(s)}
+                    >
+                      Bearbeiten
+                    </button>
+                    <button
+                      type="button"
+                      className={styles.dangerButton}
+                      disabled={busy}
+                      onClick={() => void archive(s)}
+                    >
+                      Archivieren
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+
+          <form
+            className={styles.editor}
+            onSubmit={(e) => {
+              e.preventDefault()
+              void save()
+            }}
+          >
+            <h3 className={styles.formTitle}>{editingId ? 'Zeitplan bearbeiten' : 'Neuer Zeitplan'}</h3>
+
+            <div className={styles.field}>
+              <label className={styles.label} htmlFor="schedule-name">
+                Name
+              </label>
+              <input
+                id="schedule-name"
+                className={styles.input}
+                value={name}
+                onChange={(e) => {
+                  setName(e.target.value)
+                  setFeedback(null)
+                }}
+                maxLength={255}
+                autoComplete="off"
+              />
+            </div>
+
+            <div className={styles.fieldRow}>
+              <div className={styles.field}>
+                <label className={styles.label} htmlFor="schedule-unit">
+                  Zeiteinheit
+                </label>
+                <select
+                  id="schedule-unit"
+                  className={styles.select}
+                  value={intervalUnit}
+                  onChange={(e) => {
+                    setIntervalUnit(e.target.value as ScheduleIntervalUnit)
+                    setFeedback(null)
+                  }}
+                >
+                  {INTERVAL_OPTIONS.map((option) => (
+                    <option key={option.value} value={option.value}>
+                      {option.label}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className={styles.field}>
+                <label className={styles.label} htmlFor="schedule-magnitude">
+                  Intervallgröße
+                </label>
+                <input
+                  id="schedule-magnitude"
+                  className={styles.input}
+                  type="number"
+                  min={1}
+                  max={1000000}
+                  value={magnitude}
+                  onChange={(e) => {
+                    setMagnitude(e.target.value)
+                    setFeedback(null)
+                  }}
+                />
+              </div>
             </div>
 
             <div className={styles.stickyActions}>

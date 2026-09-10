@@ -64,15 +64,15 @@ development_status:
   2-10-admin-rework-effort-2-spreadsheet-ui: done
   epic-2-retrospective: done
 
-  epic-3: in-progress
+  epic-3: paused
   3-1-smtp-configuration-admin-settings-email: done
   3-2-backup-destination-configuration-admin-settings-backup: done
   3-3-dsgvo-data-access-report: backlog
   3-4-dsgvo-account-deletion: backlog
   epic-3-retrospective: optional
 
-  epic-4: backlog
-  4-1-schedule-catalog-management: backlog
+  epic-4: in-progress
+  4-1-schedule-catalog-management: done
   4-2-tool-type-management: backlog
   4-3-tool-management: backlog
   4-4-flexible-attributes-on-tools-tool-types: backlog

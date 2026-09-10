@@ -68,16 +68,16 @@ func main() {
 	sessionManager := usercore.NewSessionManager(userRepo, cfg.SessionIdle)
 	userService := usercore.NewService(userRepo, hasher, sessionManager, secretCipher, log)
 
-	// Story 3.1 + 3.2 — materialized Admin hexagon for the settings surfaces
-	// (FR-28/FR-29/AD-1): the Admin-owned smtp_settings + backup_destinations
-	// stores (AD-11/AD-15), the settings core and the settings HTTP handlers.
-	// The core consumes the User module's repository READ-ONLY for the
-	// permission re-check (AD-12) and the audit trail (NFR-O1/NFR-O2,
-	// audit_log is User-owned) — the Admin module never authors another
-	// module's SQL (AD-8/AD-11).
+	// Story 3.1 + 3.2 + 4.1 — materialized Admin hexagon for the settings
+	// surfaces (FR-28/FR-29/FR-30/AD-1): the Admin-owned smtp_settings +
+	// backup_destinations + schedules stores (AD-11/AD-14/AD-15/AD-16), the
+	// settings core and the settings HTTP handlers. The core consumes the User
+	// module's repository READ-ONLY for the permission re-check (AD-12) and
+	// the audit trail (NFR-O1/NFR-O2, audit_log is User-owned) — the Admin
+	// module never authors another module's SQL (AD-8/AD-11).
 	adminStore := adminpostgres.New(pool)
 	adminRepo := adminpostgres.NewRepository(adminStore)
-	adminSettingsService := admcore.NewService(adminRepo, adminRepo, secretCipher, userRepo, userRepo, admsmtp.Client{}, admbck.NewTester(), log)
+	adminSettingsService := admcore.NewService(adminRepo, adminRepo, adminRepo, secretCipher, userRepo, userRepo, admsmtp.Client{}, admbck.NewTester(), log)
 	adminSettingsHandler := adminhttp.NewHandler(adminSettingsService, log)
 
 	// Password reset email delivery (FR-26/AD-14): Story 3.1 wires the REAL
@@ -113,6 +113,13 @@ func main() {
 	// defense-in-depth. It deliberately does NOT widen the SMTP gate above.
 	backupSurface := auth.RequireAnyPermission(sessionManager, userRepo, []string{admcore.BackupSettingsPermission}, "admin.settings.backup access denied", log)(adminSettingsHandler.BackupRoutes())
 
+	// The schedule-catalog surface mounts under
+	// /api/v1/admin/settings/schedules with its OWN gate — one permission per
+	// surface (AD-6/AD-16): only holders of `schedules.manage` reach it. The
+	// core re-checks the same code defense-in-depth. It deliberately does NOT
+	// widen the SMTP/backup gates above.
+	schedulesSurface := auth.RequireAnyPermission(sessionManager, userRepo, []string{admcore.SchedulesPermission}, "schedules.manage access denied", log)(adminSettingsHandler.ScheduleRoutes())
+
 	// Demo route for the gateway composition tests: any active user holding
 	// `dashboard.view` (all base roles) can reach /api/v1/protected/me.
 	protectedRoute := auth.Route(sessionManager, userRepo, "dashboard.view")
@@ -125,6 +132,7 @@ func main() {
 		router.WithMount("/api/v1/admin", adminSurface),
 		router.WithMount("/api/v1/admin/settings", settingsSurface),
 		router.WithMount("/api/v1/admin/settings/backup", backupSurface),
+		router.WithMount("/api/v1/admin/settings/schedules", schedulesSurface),
 	)
 
 	srv := &http.Server{

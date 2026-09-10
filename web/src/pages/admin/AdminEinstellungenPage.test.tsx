@@ -9,6 +9,18 @@ import { ThemeProvider } from '../../context/ThemeContext.tsx'
 const SMTP_URL = '/api/v1/admin/settings/smtp'
 const SMTP_TEST_URL = '/api/v1/admin/settings/smtp/test'
 const BACKUP_URL = '/api/v1/admin/settings/backup'
+const SCHEDULES_URL = '/api/v1/admin/settings/schedules'
+
+function scheduleFixture() {
+  return {
+    id: 'id-s1',
+    name: '1 year',
+    interval_unit: 'year',
+    interval_magnitude: 1,
+    created_at: '2026-09-10T10:00:00Z',
+    updated_at: '2026-09-10T10:00:00Z',
+  }
+}
 
 function backupFixture() {
   return {
@@ -488,6 +500,201 @@ describe('AdminEinstellungenPage Backup tab', () => {
     localStorage.setItem('gear.is_admin', 'true')
     stubFetchRoutes([
       { matcher: (url) => url === BACKUP_URL, response: { ok: false, status: 401, body: { error: { code: 'unauthorized', message: 'Authentifizierung erforderlich.' } } } },
+    ])
+    renderPage()
+
+    expect(await screen.findByText('Anmeldung')).toBeInTheDocument()
+    expect(localStorage.getItem('gear.session_token')).toBeNull()
+  })
+})
+
+describe('AdminEinstellungenPage Zeitpläne tab', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    localStorage.setItem('gear.session_token', 'sesstoken123')
+    localStorage.setItem('gear.permissions', JSON.stringify(['schedules.manage']))
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    cleanup()
+    vi.restoreAllMocks()
+  })
+
+  const stubSchedulesList = (body: unknown) => ({
+    matcher: (url: string, init?: RequestInit) => url === SCHEDULES_URL && !init?.method,
+    response: { ok: true, status: 200, body },
+  })
+
+  it('TAB_GATING_SCHEDULES: with only schedules.manage the E-Mail/Backup tabs are hidden and Zeitpläne renders', async () => {
+    stubFetchRoutes([stubSchedulesList([])])
+    renderPage()
+
+    expect(await screen.findByLabelText('Name')).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'Zeitpläne' })).toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'E-Mail' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'Backup' })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('SMTP-Host')).not.toBeInTheDocument()
+  })
+
+  it('TAB_GATING_EMAIL: with only admin.settings.email the Zeitpläne tab is hidden', async () => {
+    localStorage.setItem('gear.permissions', JSON.stringify(['admin.settings.email']))
+    stubFetchRoutes([stubGet(settingsFixture())])
+    renderPage()
+
+    expect(await screen.findByLabelText('SMTP-Host')).toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'Zeitpläne' })).not.toBeInTheDocument()
+  })
+
+  it('EMPTY_LIST: no schedules renders an empty list without error', async () => {
+    stubFetchRoutes([stubSchedulesList([])])
+    renderPage()
+    expect(await screen.findByRole('button', { name: 'Speichern' })).toBeInTheDocument()
+    expect(screen.queryByRole('list', { name: 'Zeitpläne' })).not.toBeInTheDocument()
+  })
+
+  it('LIST: schedules render with the "Jährlich − 1 Jahr" interval display', async () => {
+    stubFetchRoutes([
+      stubSchedulesList([
+        scheduleFixture(),
+        { ...scheduleFixture(), id: 'id-s2', name: '2 weeks', interval_unit: 'week', interval_magnitude: 2 },
+      ]),
+    ])
+    renderPage()
+
+    expect(await screen.findByText('1 year')).toBeInTheDocument()
+    expect(screen.getByText('Jährlich − 1 Jahr')).toBeInTheDocument()
+    expect(screen.getByText('Wöchentlich − 2 Wochen')).toBeInTheDocument()
+    expect(screen.getAllByRole('button', { name: 'Archivieren' })).toHaveLength(2)
+  })
+
+  it('CREATE: the form POSTs and adds the row inline', async () => {
+    const fetchMock = stubFetchRoutes([
+      stubSchedulesList([]),
+      {
+        matcher: (url, init) => url === SCHEDULES_URL && init?.method === 'POST',
+        response: { ok: true, status: 201, body: { ...scheduleFixture(), message: 'Zeitplan gespeichert.' } },
+      },
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByRole('button', { name: 'Speichern' })
+    await user.type(screen.getByLabelText('Name'), '1 year')
+    await user.selectOptions(screen.getByLabelText('Zeiteinheit'), 'year')
+    await user.clear(screen.getByLabelText('Intervallgröße'))
+    await user.type(screen.getByLabelText('Intervallgröße'), '1')
+    await user.click(screen.getByRole('button', { name: 'Speichern' }))
+
+    expect(await screen.findByText('Zeitplan gespeichert.')).toBeInTheDocument()
+    const postCall = fetchMock.mock.calls.find(([url, init]) => url === SCHEDULES_URL && init?.method === 'POST')
+    expect(postCall).toBeTruthy()
+    const body = JSON.parse((postCall![1] as RequestInit).body as string)
+    expect(body.name).toBe('1 year')
+    expect(body.interval_unit).toBe('year')
+    expect(body.interval_magnitude).toBe(1)
+    expect(await screen.findByText('1 year')).toBeInTheDocument()
+  })
+
+  it('EDIT: Bearbeiten loads the row, PUT persists the changed interval', async () => {
+    const fetchMock = stubFetchRoutes([
+      stubSchedulesList([scheduleFixture()]),
+      {
+        matcher: (url, init) => url === `${SCHEDULES_URL}/id-s1` && init?.method === 'PUT',
+        response: { ok: true, status: 200, body: { ...scheduleFixture(), name: '2 years', interval_magnitude: 2, message: 'Zeitplan gespeichert.' } },
+      },
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByText('1 year')
+    await user.click(screen.getByRole('button', { name: 'Bearbeiten' }))
+    expect(screen.getByRole('heading', { name: 'Zeitplan bearbeiten' })).toBeInTheDocument()
+    expect(screen.getByLabelText('Name')).toHaveValue('1 year')
+    expect(screen.getByLabelText('Zeiteinheit')).toHaveValue('year')
+
+    await user.clear(screen.getByLabelText('Name'))
+    await user.type(screen.getByLabelText('Name'), '2 years')
+    await user.clear(screen.getByLabelText('Intervallgröße'))
+    await user.type(screen.getByLabelText('Intervallgröße'), '2')
+    await user.click(screen.getByRole('button', { name: 'Änderungen speichern' }))
+
+    expect(await screen.findByText('Zeitplan gespeichert.')).toBeInTheDocument()
+    const putCall = fetchMock.mock.calls.find(([url, init]) => url === `${SCHEDULES_URL}/id-s1` && init?.method === 'PUT')
+    expect(putCall).toBeTruthy()
+    const body = JSON.parse((putCall![1] as RequestInit).body as string)
+    expect(body.name).toBe('2 years')
+    expect(body.interval_magnitude).toBe(2)
+    expect(await screen.findByText('2 years')).toBeInTheDocument()
+  })
+
+  it('ARCHIVE: confirming the prompt archives the row and removes it inline', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(true)
+    const fetchMock = stubFetchRoutes([
+      stubSchedulesList([scheduleFixture()]),
+      {
+        matcher: (url, init) => url === `${SCHEDULES_URL}/id-s1/archive` && init?.method === 'POST',
+        response: { ok: true, status: 200, body: { ...scheduleFixture(), message: 'Zeitplan archiviert.' } },
+      },
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByText('1 year')
+    await user.click(screen.getByRole('button', { name: 'Archivieren' }))
+
+    expect(await screen.findByText('Zeitplan archiviert.')).toBeInTheDocument()
+    expect(screen.queryByText('1 year')).not.toBeInTheDocument()
+    const archiveCall = fetchMock.mock.calls.find(([url, init]) => url === `${SCHEDULES_URL}/id-s1/archive` && init?.method === 'POST')
+    expect(archiveCall).toBeTruthy()
+  })
+
+  it('ARCHIVE_CANCEL: declining the prompt does not call the archive endpoint', async () => {
+    vi.spyOn(window, 'confirm').mockReturnValue(false)
+    const fetchMock = stubFetchRoutes([stubSchedulesList([scheduleFixture()])])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByText('1 year')
+    await user.click(screen.getByRole('button', { name: 'Archivieren' }))
+
+    const archiveCall = fetchMock.mock.calls.find(([url, init]) => url === `${SCHEDULES_URL}/id-s1/archive` && init?.method === 'POST')
+    expect(archiveCall).toBeUndefined()
+    expect(screen.getByText('1 year')).toBeInTheDocument()
+  })
+
+  it('FORM_ERROR: a 400 shows the server German message inline', async () => {
+    stubFetchRoutes([
+      stubSchedulesList([]),
+      {
+        matcher: (url, init) => url === SCHEDULES_URL && init?.method === 'POST',
+        response: { ok: false, status: 400, body: { error: { code: 'invalid_request', message: 'Bitte gib einen Namen für den Zeitplan an.' } } },
+      },
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByRole('button', { name: 'Speichern' })
+    await user.click(screen.getByRole('button', { name: 'Speichern' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Bitte gib einen Namen für den Zeitplan an.')
+  })
+
+  it('FORBIDDEN: a 403 on load clears the admin flag and leaves the module', async () => {
+    localStorage.setItem('gear.is_admin', 'true')
+    stubFetchRoutes([
+      { matcher: (url) => url === SCHEDULES_URL, response: { ok: false, status: 403, body: { error: { code: 'forbidden', message: 'Keine Berechtigung.' } } } },
+    ])
+    renderPage()
+
+    expect(await screen.findByText('Dashboard')).toBeInTheDocument()
+    expect(localStorage.getItem('gear.is_admin')).toBeNull()
+  })
+
+  it('UNAUTHORIZED: a 401 on load clears auth state and redirects to /login', async () => {
+    localStorage.setItem('gear.is_admin', 'true')
+    stubFetchRoutes([
+      { matcher: (url) => url === SCHEDULES_URL, response: { ok: false, status: 401, body: { error: { code: 'unauthorized', message: 'Authentifizierung erforderlich.' } } } },
     ])
     renderPage()
 

@@ -68,6 +68,8 @@ func TestAdminModuleAccessCodesCoversSubMountGates(t *testing.T) {
 		// tool + settings + dsgvo surfaces
 		"tools.manage", "tool_types.manage",
 		"admin.settings.email", "admin.settings.backup",
+		// schedule-catalog surface (Story 4.1, AD-16)
+		"schedules.manage",
 		"dsgvo.access_report", "dsgvo.delete",
 	}
 	got := make(map[string]bool)

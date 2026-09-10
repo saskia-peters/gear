@@ -21,6 +21,18 @@ type BackupDestination struct {
 	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
 }
 
+type Schedule struct {
+	ID                pgtype.UUID        `json:"id"`
+	Name              string             `json:"name"`
+	IntervalUnit      string             `json:"interval_unit"`
+	IntervalMagnitude int32              `json:"interval_magnitude"`
+	WeekdaySet        []string           `json:"weekday_set"`
+	TimeOfDay         pgtype.Time        `json:"time_of_day"`
+	ArchivedAt        pgtype.Timestamptz `json:"archived_at"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+}
+
 type SmtpSetting struct {
 	ID                pgtype.UUID        `json:"id"`
 	Host              string             `json:"host"`

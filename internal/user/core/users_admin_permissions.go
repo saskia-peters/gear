@@ -52,6 +52,7 @@ func AdminModuleAccessCodes() []string {
 		"tool_types.manage",
 		"admin.settings.email",
 		"admin.settings.backup",
+		"schedules.manage",
 		"dsgvo.access_report",
 		"dsgvo.delete",
 		"admin.recovery.approve",

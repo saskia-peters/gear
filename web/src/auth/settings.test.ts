@@ -9,10 +9,15 @@ import {
   updateBackupDestination,
   deleteBackupDestination,
   testBackupDestination,
+  listSchedules,
+  createSchedule,
+  updateSchedule,
+  archiveSchedule,
 } from './settings.ts'
 
 const SMTP_URL = '/api/v1/admin/settings/smtp'
 const BACKUP_URL = '/api/v1/admin/settings/backup'
+const SCHEDULES_URL = '/api/v1/admin/settings/schedules'
 
 function stubOk(body: unknown) {
   const mock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => body })
@@ -187,6 +192,68 @@ describe('settings client', () => {
     const result = await testBackupDestination('id-a')
     expect(result.ok).toBe(false)
     expect(mock).toHaveBeenCalledWith(`${BACKUP_URL}/id-a/test`, {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer sesstoken123',
+      },
+    })
+  })
+})
+
+describe('schedule catalog client', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    localStorage.setItem('gear.session_token', 'sesstoken123')
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('listSchedules GETs /schedules with the bearer token', async () => {
+    const mock = stubOk([{ id: 'id-a', name: '1 year', interval_unit: 'year', interval_magnitude: 1 }])
+    const schedules = await listSchedules()
+    expect(schedules).toHaveLength(1)
+    expect(schedules[0].interval_unit).toBe('year')
+    expect(schedules[0].interval_magnitude).toBe(1)
+    expect(mock).toHaveBeenCalledWith(SCHEDULES_URL, {
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer sesstoken123',
+      },
+    })
+  })
+
+  it('createSchedule POSTs the name + interval body', async () => {
+    const mock = stubOk({ id: 'id-a', name: '1 year', interval_unit: 'year', interval_magnitude: 1, message: 'Zeitplan gespeichert.' })
+    const created = await createSchedule({ name: '1 year', interval_unit: 'year', interval_magnitude: 1 })
+    expect(created.message).toBe('Zeitplan gespeichert.')
+    const [url, init] = mock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe(SCHEDULES_URL)
+    expect(init.method).toBe('POST')
+    const body = JSON.parse(init.body as string)
+    expect(body.name).toBe('1 year')
+    expect(body.interval_unit).toBe('year')
+    expect(body.interval_magnitude).toBe(1)
+  })
+
+  it('updateSchedule PUTs /schedules/{id} with the interval body', async () => {
+    const mock = stubOk({ id: 'id-a', name: '2 years', interval_unit: 'year', interval_magnitude: 2, message: 'Zeitplan gespeichert.' })
+    await updateSchedule('id-a', { name: '2 years', interval_unit: 'year', interval_magnitude: 2 })
+    const [url, init] = mock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe(`${SCHEDULES_URL}/id-a`)
+    expect(init.method).toBe('PUT')
+    const body = JSON.parse(init.body as string)
+    expect(body.name).toBe('2 years')
+    expect(body.interval_magnitude).toBe(2)
+  })
+
+  it('archiveSchedule POSTs /schedules/{id}/archive and returns the message', async () => {
+    const mock = stubOk({ id: 'id-a', name: '1 year', interval_unit: 'year', interval_magnitude: 1, message: 'Zeitplan archiviert.' })
+    const result = await archiveSchedule('id-a')
+    expect(result.message).toBe('Zeitplan archiviert.')
+    expect(mock).toHaveBeenCalledWith(`${SCHEDULES_URL}/id-a/archive`, {
       method: 'POST',
       headers: {
         'Content-Type': 'application/json',

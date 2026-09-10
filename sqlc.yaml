@@ -45,13 +45,15 @@ sql:
         out: "./internal/user/adapters/postgres"
         sql_package: "pgx/v5"
         emit_json_tags: true
-  # Story 3.1 + 3.2: the Admin hexagon's own store (Epic 3 settings). Schema
-  # scoped to the Admin-owned migrations only — future admin tables (schedules)
-  # are appended here. The user block stays at 000016; 000018 is Admin-owned.
+  # Story 3.1 + 3.2 + 4.1: the Admin hexagon's own store (Epic 3 settings).
+  # Schema scoped to the Admin-owned migrations only. The user block stays at
+  # 000016; 000017/000018/000019 are Admin-owned (schedules appended here per
+  # Story 4.1, AD-16).
   - engine: "postgresql"
     schema:
       - "./migrations/000017_smtp_settings.up.sql"
       - "./migrations/000018_backup_destinations.up.sql"
+      - "./migrations/000019_schedules.up.sql"
     queries: "./internal/admin/adapters/postgres/queries.sql"
     gen:
       go:

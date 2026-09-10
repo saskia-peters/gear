@@ -39,6 +39,7 @@ export const ADMIN_NAV_ENTRIES: readonly AdminNavEntry[] = [
       'tool_types.manage',
       'admin.settings.email',
       'admin.settings.backup',
+      'schedules.manage',
       'dsgvo.access_report',
       'dsgvo.delete',
       'admin.recovery.approve',
@@ -83,8 +84,8 @@ export const ADMIN_NAV_ENTRIES: readonly AdminNavEntry[] = [
     key: 'einstellungen',
     route: '/admin/einstellungen',
     label: 'Einstellungen',
-    description: 'E-Mail- und Sicherungs-Einstellungen.',
-    codes: ['admin.settings.email', 'admin.settings.backup'],
+    description: 'E-Mail-, Sicherungs- und Zeitplan-Einstellungen.',
+    codes: ['admin.settings.email', 'admin.settings.backup', 'schedules.manage'],
   },
   {
     key: 'dsgvo',

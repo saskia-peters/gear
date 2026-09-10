@@ -108,7 +108,7 @@ func newTestService() (*Service, *fakeStore, *fakePerms, *fakeAudit, *fakeMailer
 	perms := &fakePerms{perms: []string{SmtpSettingsPermission}}
 	audit := &fakeAudit{}
 	mailer := &fakeMailer{}
-	svc := NewService(store, nil, &fakeCipher{}, perms, audit, mailer, nil, nil)
+	svc := NewService(store, nil, nil, &fakeCipher{}, perms, audit, mailer, nil, nil)
 	return svc, store, perms, audit, mailer
 }
 

@@ -67,3 +67,14 @@ Triage output of review loops — real, non-story-blocking findings that are not
 - Issuing an OTP does not revoke the target's existing active sessions or any in-flight reset token. An active user mid-recovery (already holding a minted reset token) is not logged out when a recovery credential is issued, so an existing session can silently coexist with the OTP. Real but out of scope for 2.8 (matches the admin surface's existing "no revocation on non-destructive admin writes" pattern); revisit when session/OTP revocation semantics are defined.
 - The OTP persistence/migration contract (columns, CAS single-use SQL, `userFromRow` mapping) is verified only by `TestPostgresOneTimePasswordContract`, which `t.Skipf`s when no DB is reachable — a default `go test` without a live DB skips it. This matches the postgres suite's existing skip-without-DB convention; add a CI/DB-backed gate when the CI story lands.
 - The `000014` down migration drops the OTP columns but does not clear the `must_change_password` flag it helped set — rolling back leaves users flagged for a forced change they can no longer satisfy with an OTP. Edge case for migration rollback hygiene; revisit if down migrations must restore prior user state.
+
+## Deferred from: user decision (2026-09-09)
+
+- source_spec: `_bmad-output/planning-artifacts/epics/epic-03-system-configuration-compliance.md`
+  summary: DSGVO Data-Access Report (Story 3.3) is postponed to AFTER Epic 4 — its inspection-related export data depends on the Tool module's inspection/tool structures, which are not built until Epics 4/5; building the report now would have no real inspection data to orchestrate.
+  evidence: Story 3.3's AC (FR-24) requires exporting "inspection-related records"; the `internal/tools` module is a cold-start seed (core/ports/adapters package boundaries only, no tables) as of Story 3.2. The user explicitly requested the postponement.
+  recommended: schedule 3.3 (and the coupled DSGVO Account Deletion, Story 3.4, which rewrites inspector references in inspection history) after the Tool module's data model exists; revisit in the Epic 3 retrospective.
+- source_spec: `_bmad-output/planning-artifacts/epics/epic-03-system-configuration-compliance.md`
+  summary: DSGVO Account Deletion (Story 3.4) is postponed to AFTER Epic 4 for the same reason as 3.3 — it rewrites inspector references in inspection history to "Deleted User", but no inspection/tool data exists yet; the irreversibility + audit guarantee is safer to build once the real cross-module lifecycle port (AD-8) exists.
+  evidence: Story 3.4 AC (FR-24/FR-18) requires "all inspection records stay fully intact" with the anonymous placeholder — impossible to verify meaningfully before inspection data exists. Deferred with Story 3.3.
+  recommended: schedule 3.4 together with 3.3 after Epic 4; revisit in the Epic 3 retrospective.

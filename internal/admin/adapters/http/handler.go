@@ -1,11 +1,13 @@
-// Package http hosts the HTTP adapter of the Admin hexagon (Story 3.1 + 3.2):
-// the SMTP-settings surface (GET/PUT /smtp, POST /smtp/test) and the
+// Package http hosts the HTTP adapter of the Admin hexagon (Story 3.1 + 3.2 +
+// 4.1): the SMTP-settings surface (GET/PUT /smtp, POST /smtp/test), the
 // backup-destination surface (GET/POST /backup, PUT/DELETE /{id}, POST
-// /{id}/test) under /api/v1/admin/settings, each gated at the composition-root
-// mount by RequireAnyPermission with its OWN permission code
-// (admin.settings.email / admin.settings.backup — one permission per surface,
-// AD-6). The core re-checks the permission defense-in-depth (AD-6). Later Epic
-// 3 stories (DSGVO) add their surfaces here.
+// /{id}/test) and the schedule-catalog surface (GET/POST /schedules, PUT
+// /{id}, POST /{id}/archive) under /api/v1/admin/settings, each gated at the
+// composition-root mount by RequireAnyPermission with its OWN permission code
+// (admin.settings.email / admin.settings.backup / schedules.manage — one
+// permission per surface, AD-6). The core re-checks the permission
+// defense-in-depth (AD-6). Later Epic 3 stories (DSGVO) add their surfaces
+// here.
 package http
 
 import (
@@ -71,6 +73,24 @@ func (h *Handler) BackupRoutes() http.Handler {
 	r.Put("/{id}", h.UpdateBackupDestination)
 	r.Delete("/{id}", h.DeleteBackupDestination)
 	r.Post("/{id}/test", h.TestBackupDestination)
+	return r
+}
+
+// ScheduleRoutes returns the Admin settings schedule-catalog router (Story
+// 4.1, FR-30/AD-16): GET/POST / and PUT /{id}, POST /{id}/archive — soft
+// archive only, NO DELETE endpoint (archived rows keep FK history intact). The
+// whole group is gated by `schedules.manage` at the composition-root mount
+// point — its OWN gate, one permission per surface (AD-6) — so this router
+// carries no gateway itself; 404/405 answer with the uniform JSON envelope so
+// no sub-path can emit a plain-text body.
+func (h *Handler) ScheduleRoutes() http.Handler {
+	r := chi.NewRouter()
+	r.NotFound(httpapi.NotFoundHandler())
+	r.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
+	r.Get("/", h.ListSchedules)
+	r.Post("/", h.CreateSchedule)
+	r.Put("/{id}", h.UpdateSchedule)
+	r.Post("/{id}/archive", h.ArchiveSchedule)
 	return r
 }
 

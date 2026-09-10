@@ -112,7 +112,7 @@ func newBackupService(perms ...string) (*Service, *fakeBackupStore, *fakeAudit, 
 	if len(perms) == 0 {
 		perms = []string{BackupSettingsPermission}
 	}
-	svc := NewService(nil, store, &fakeCipher{}, &fakePerms{perms: perms}, audit, nil, tester, nil)
+	svc := NewService(nil, store, nil, &fakeCipher{}, &fakePerms{perms: perms}, audit, nil, tester, nil)
 	return svc, store, audit, tester
 }
 

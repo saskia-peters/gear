@@ -195,7 +195,7 @@ var permissionLabels = map[string]string{
 	"admin.recovery.approve":  "Kontowiederherstellung freigeben",
 	"admin.settings.email":    "E-Mail-Einstellungen verwalten",
 	"admin.settings.backup":   "Sicherungen verwalten",
-	"schedules.manage":        "Dienstpläne verwalten",
+	"schedules.manage":        "Zeitpläne verwalten",
 }
 
 // permissionLabel returns the German label for a code, falling back to the

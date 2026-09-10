@@ -11,6 +11,35 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const archiveSchedule = `-- name: ArchiveSchedule :one
+UPDATE schedules
+SET archived_at = now(),
+    updated_at = now()
+WHERE id = $1 AND archived_at IS NULL
+RETURNING id, name, interval_unit, interval_magnitude, weekday_set, time_of_day, archived_at, created_at, updated_at
+`
+
+// Soft-archive one schedule: archived_at = now() (never a hard delete — FK
+// references keep history intact, AD-16). The `AND archived_at IS NULL` guard
+// makes archiving an already-archived row affect zero rows →
+// ErrScheduleNotFound (ARCHIVE_ARCHIVED answers the 404 sentinel).
+func (q *Queries) ArchiveSchedule(ctx context.Context, id pgtype.UUID) (Schedule, error) {
+	row := q.db.QueryRow(ctx, archiveSchedule, id)
+	var i Schedule
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.IntervalUnit,
+		&i.IntervalMagnitude,
+		&i.WeekdaySet,
+		&i.TimeOfDay,
+		&i.ArchivedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const createBackupDestination = `-- name: CreateBackupDestination :one
 INSERT INTO backup_destinations (name, mechanism, endpoint, bucket_or_path, username, password_encrypted, schedule)
 VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7::text, ''))
@@ -50,6 +79,37 @@ func (q *Queries) CreateBackupDestination(ctx context.Context, arg CreateBackupD
 		&i.Username,
 		&i.PasswordEncrypted,
 		&i.Schedule,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const createSchedule = `-- name: CreateSchedule :one
+INSERT INTO schedules (name, interval_unit, interval_magnitude)
+VALUES ($1, $2, $3)
+RETURNING id, name, interval_unit, interval_magnitude, weekday_set, time_of_day, archived_at, created_at, updated_at
+`
+
+type CreateScheduleParams struct {
+	Name              string `json:"name"`
+	IntervalUnit      string `json:"interval_unit"`
+	IntervalMagnitude int32  `json:"interval_magnitude"`
+}
+
+// Insert a schedule and return the resulting row. The reserved weekday_set /
+// time_of_day columns stay NULL (stored-but-ignored in V1, AD-16).
+func (q *Queries) CreateSchedule(ctx context.Context, arg CreateScheduleParams) (Schedule, error) {
+	row := q.db.QueryRow(ctx, createSchedule, arg.Name, arg.IntervalUnit, arg.IntervalMagnitude)
+	var i Schedule
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.IntervalUnit,
+		&i.IntervalMagnitude,
+		&i.WeekdaySet,
+		&i.TimeOfDay,
+		&i.ArchivedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)
@@ -105,8 +165,8 @@ LIMIT 1
 // Admin module store (AD-1/AD-11), generated into package postgres by sqlc.
 // Story 3.1 ships the SMTP-settings queries for the Admin-owned
 // `smtp_settings` single-row table (FR-28/AD-14); Story 3.2 adds the
-// `backup_destinations` multi-row table (FR-29/AD-15). Schedules land here too
-// in a later story.
+// `backup_destinations` multi-row table (FR-29/AD-15); Story 4.1 adds the
+// `schedules` named schedule catalog (FR-30/AD-16).
 // The single SMTP-settings row (the partial unique index guarantees at most
 // one). Zero rows = "not configured yet" → the consumer returns zero defaults.
 // The encrypted password column is intentionally selected: decryption happens
@@ -218,6 +278,49 @@ func (q *Queries) ListBackupDestinations(ctx context.Context) ([]BackupDestinati
 	return items, nil
 }
 
+const listSchedules = `-- name: ListSchedules :many
+SELECT id, name, interval_unit, interval_magnitude, weekday_set, time_of_day, archived_at, created_at, updated_at
+FROM schedules
+WHERE archived_at IS NULL
+ORDER BY created_at ASC, name ASC
+`
+
+// The ACTIVE named-schedule catalog (FR-30/AD-16). Archived rows (archived_at
+// NOT NULL) are filtered out — the active surface never shows them. The order
+// is deterministic: created_at ASC with a name tiebreaker, so the seed rows
+// (which share one now() created_at) always render in a stable order. The
+// reserved weekday_set/time_of_day columns are selected so the returned rows
+// carry the full stored row (they are NULL in V1).
+func (q *Queries) ListSchedules(ctx context.Context) ([]Schedule, error) {
+	rows, err := q.db.Query(ctx, listSchedules)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Schedule
+	for rows.Next() {
+		var i Schedule
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.IntervalUnit,
+			&i.IntervalMagnitude,
+			&i.WeekdaySet,
+			&i.TimeOfDay,
+			&i.ArchivedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const updateBackupDestination = `-- name: UpdateBackupDestination :one
 UPDATE backup_destinations
 SET name = $2,
@@ -277,6 +380,50 @@ func (q *Queries) UpdateBackupDestination(ctx context.Context, arg UpdateBackupD
 		&i.Username,
 		&i.PasswordEncrypted,
 		&i.Schedule,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const updateSchedule = `-- name: UpdateSchedule :one
+UPDATE schedules
+SET name = $2,
+    interval_unit = $3,
+    interval_magnitude = $4,
+    updated_at = now()
+WHERE id = $1 AND archived_at IS NULL
+RETURNING id, name, interval_unit, interval_magnitude, weekday_set, time_of_day, archived_at, created_at, updated_at
+`
+
+type UpdateScheduleParams struct {
+	ID                pgtype.UUID `json:"id"`
+	Name              string      `json:"name"`
+	IntervalUnit      string      `json:"interval_unit"`
+	IntervalMagnitude int32       `json:"interval_magnitude"`
+}
+
+// Replace one ACTIVE schedule's name/interval and refresh updated_at. The
+// `AND archived_at IS NULL` guard makes an update against an already-archived
+// row affect zero rows → ErrScheduleNotFound (soft archive is irreversible in
+// V1; the archived row is non-existent to the surface). The reserved
+// weekday/time columns are untouched (NULL in V1).
+func (q *Queries) UpdateSchedule(ctx context.Context, arg UpdateScheduleParams) (Schedule, error) {
+	row := q.db.QueryRow(ctx, updateSchedule,
+		arg.ID,
+		arg.Name,
+		arg.IntervalUnit,
+		arg.IntervalMagnitude,
+	)
+	var i Schedule
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.IntervalUnit,
+		&i.IntervalMagnitude,
+		&i.WeekdaySet,
+		&i.TimeOfDay,
+		&i.ArchivedAt,
 		&i.CreatedAt,
 		&i.UpdatedAt,
 	)

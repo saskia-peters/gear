@@ -1,21 +1,24 @@
-// SMTP + backup settings data module (Story 3.1 + 3.2, FR-28/FR-29). It holds
-// the API types and calls for the Einstellungen → E-Mail and Einstellungen →
-// Backup surfaces: read/save/test SMTP, and list/create/update/delete/test
-// backup destinations. The server is the source of truth for the German
-// microcopy. Credentials are WRITE-ONLY — GET returns only
-// password_configured / credential_configured, and the save bodies omit the
-// credential when it was left blank (so the server keeps the existing
-// encrypted one, NFR-S4).
+// SMTP + backup settings + schedule-catalog data module (Story 3.1 + 3.2 +
+// 4.1, FR-28/FR-29/FR-30). It holds the API types and calls for the
+// Einstellungen → E-Mail, Einstellungen → Backup and Einstellungen → Zeitpläne
+// surfaces: read/save/test SMTP; list/create/update/delete/test backup
+// destinations; list/create/update/archive schedules. The server is the source
+// of truth for the German microcopy. Credentials are WRITE-ONLY — GET returns
+// only password_configured / credential_configured, and the save bodies omit
+// the credential when it was left blank (so the server keeps the existing
+// encrypted one, NFR-S4). Schedule archive is SOFT (server-side archived_at) —
+// the client never hard-deletes.
 
 import { ApiError, request, authTokenHeaders } from './http.ts'
 
 export type SmtpSecurity = 'none' | 'starttls' | 'tls'
 
-// Permission codes gating the two Einstellungen surfaces (AD-6, server-side
+// Permission codes gating the three Einstellungen surfaces (AD-6, server-side
 // source of truth). Kept here so the per-tab gating cannot drift from the
 // server codes.
 export const SMTP_SETTINGS_PERMISSION = 'admin.settings.email'
 export const BACKUP_SETTINGS_PERMISSION = 'admin.settings.backup'
+export const SCHEDULES_PERMISSION = 'schedules.manage'
 
 // SmtpSettings is the GET payload — never a password (only password_configured).
 export interface SmtpSettings {
@@ -202,6 +205,79 @@ function buildBackupBody(input: BackupDestinationInput): Record<string, unknown>
     body.password = input.password
   }
   return body
+}
+
+export type ScheduleIntervalUnit = 'year' | 'quarter' | 'month' | 'week' | 'day'
+
+// Schedule is the GET payload for one active schedule-catalog row (FR-30,
+// AD-16). The reserved weekday/time composite fields never reach the client in
+// V1; archived schedules are filtered server-side.
+export interface Schedule {
+  id: string
+  name: string
+  interval_unit: ScheduleIntervalUnit
+  interval_magnitude: number
+  created_at: string
+  updated_at: string
+}
+
+// ScheduleWriteResult is the POST/PUT/archive payload: the schedule plus the
+// server-authoritative German confirmation.
+export interface ScheduleWriteResult extends Schedule {
+  message: string
+}
+
+// ScheduleInput is the POST/PUT body (name + interval unit/magnitude). The
+// reserved weekday/time fields are NOT part of the input (stored-but-ignored
+// in V1, AD-16).
+export interface ScheduleInput {
+  name: string
+  interval_unit: ScheduleIntervalUnit
+  interval_magnitude: number
+}
+
+const SCHEDULES_URL = '/api/v1/admin/settings/schedules'
+
+// listSchedules fetches the ACTIVE catalog, oldest first (GET_LIST_EMPTY when
+// none exist — the server answers an empty array; archived rows never appear).
+export async function listSchedules(): Promise<Schedule[]> {
+  return (await request(SCHEDULES_URL, { headers: authTokenHeaders() })) as Schedule[]
+}
+
+// createSchedule persists a new schedule (name + interval unit/magnitude).
+export async function createSchedule(input: ScheduleInput): Promise<ScheduleWriteResult> {
+  return (await request(SCHEDULES_URL, {
+    method: 'POST',
+    headers: authTokenHeaders(),
+    body: JSON.stringify(buildScheduleBody(input)),
+  })) as ScheduleWriteResult
+}
+
+// updateSchedule persists a schedule. Updating an archived row answers the 404
+// sentinel server-side.
+export async function updateSchedule(id: string, input: ScheduleInput): Promise<ScheduleWriteResult> {
+  return (await request(`${SCHEDULES_URL}/${id}`, {
+    method: 'PUT',
+    headers: authTokenHeaders(),
+    body: JSON.stringify(buildScheduleBody(input)),
+  })) as ScheduleWriteResult
+}
+
+// archiveSchedule SOFT-archives one schedule (the row leaves the active list;
+// history is preserved server-side).
+export async function archiveSchedule(id: string): Promise<ScheduleWriteResult> {
+  return (await request(`${SCHEDULES_URL}/${id}/archive`, {
+    method: 'POST',
+    headers: authTokenHeaders(),
+  })) as ScheduleWriteResult
+}
+
+function buildScheduleBody(input: ScheduleInput): Record<string, unknown> {
+  return {
+    name: input.name,
+    interval_unit: input.interval_unit,
+    interval_magnitude: input.interval_magnitude,
+  }
 }
 
 export { ApiError }

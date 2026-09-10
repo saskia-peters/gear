@@ -448,7 +448,7 @@ func TestBackupTestEngineErrorNotLeaked(t *testing.T) {
 		Endpoint: "s3.example.com", BucketOrPath: "bucket", Username: "svc", PasswordEncrypted: "enc:pw",
 	}}}
 	engineErr := errors.New("backup tester: s3: PUT answered HTTP 403")
-	svc := core.NewService(nil, store, handlerCipher{},
+	svc := core.NewService(nil, store, nil, handlerCipher{},
 		&gateResolver{perms: []string{core.BackupSettingsPermission}}, handlerAudit{}, nil,
 		handlerTester{err: engineErr}, discardLogger())
 

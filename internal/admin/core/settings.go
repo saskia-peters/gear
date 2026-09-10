@@ -42,6 +42,20 @@ const (
 	AuditOperationBackupSettingsTest   = "admin.settings.backup.test"
 )
 
+// SchedulesPermission is the server-authoritative gate code for the whole
+// named schedule-catalog surface (FR-30/AD-16/AD-6). One Go const so the route
+// mount, the core re-check and the SPA-facing documentation never drift.
+const SchedulesPermission = "schedules.manage"
+
+// Audit-operation tags for the schedule-catalog surface (NFR-O1/NFR-O2):
+// creates, updates and archives are audited with actor, timestamp and
+// operation.
+const (
+	AuditOperationScheduleCreate  = "schedule.create"
+	AuditOperationScheduleUpdate  = "schedule.update"
+	AuditOperationScheduleArchive = "schedule.archive"
+)
+
 // AuditSeverityNormal is the standard audit severity for settings events.
 const AuditSeverityNormal = "normal"
 
@@ -249,27 +263,30 @@ type SmtpMailer interface {
 }
 
 // Service is the Admin module's settings domain service (Story 3.1 SMTP +
-// Story 3.2 backup destinations). It consumes the Admin-owned settings tables
-// through their stores and the User module's repository READ-ONLY for the
-// permission re-check (AD-12) and the audit trail (NFR-O1/NFR-O2).
+// Story 3.2 backup destinations + Story 4.1 schedule catalog). It consumes the
+// Admin-owned settings tables through their stores and the User module's
+// repository READ-ONLY for the permission re-check (AD-12) and the audit trail
+// (NFR-O1/NFR-O2).
 type Service struct {
-	store       SmtpSettingsStore
-	backupStore BackupDestinationsStore
-	cipher      SecretCipher
-	perms       PermissionResolver
-	audit       AuditWriter
-	mailer      SmtpMailer
-	tester      BackupDestinationTester
-	logger      *slog.Logger
+	store          SmtpSettingsStore
+	backupStore    BackupDestinationsStore
+	schedulesStore SchedulesStore
+	cipher         SecretCipher
+	perms          PermissionResolver
+	audit          AuditWriter
+	mailer         SmtpMailer
+	tester         BackupDestinationTester
+	logger         *slog.Logger
 }
 
-// NewService constructs the settings service. backupStore and tester are used
-// only by the backup-destination methods (Story 3.2); they may be nil for an
-// SMTP-only service. logger may be nil (falls back to slog.Default()); it is
-// used for structured logging of audit-write failures and test outcomes
+// NewService constructs the settings service. backupStore/tester are used only
+// by the backup-destination methods (Story 3.2) and schedulesStore only by the
+// schedule-catalog methods (Story 4.1); they may be nil for a service that does
+// not exercise those surfaces. logger may be nil (falls back to slog.Default());
+// it is used for structured logging of audit-write failures and test outcomes
 // (NFR-O1).
-func NewService(store SmtpSettingsStore, backupStore BackupDestinationsStore, cipher SecretCipher, perms PermissionResolver, audit AuditWriter, mailer SmtpMailer, tester BackupDestinationTester, logger *slog.Logger) *Service {
-	return &Service{store: store, backupStore: backupStore, cipher: cipher, perms: perms, audit: audit, mailer: mailer, tester: tester, logger: logger}
+func NewService(store SmtpSettingsStore, backupStore BackupDestinationsStore, schedulesStore SchedulesStore, cipher SecretCipher, perms PermissionResolver, audit AuditWriter, mailer SmtpMailer, tester BackupDestinationTester, logger *slog.Logger) *Service {
+	return &Service{store: store, backupStore: backupStore, schedulesStore: schedulesStore, cipher: cipher, perms: perms, audit: audit, mailer: mailer, tester: tester, logger: logger}
 }
 
 // log returns the configured logger or slog.Default().

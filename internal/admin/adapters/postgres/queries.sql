@@ -1,8 +1,8 @@
 -- Admin module store (AD-1/AD-11), generated into package postgres by sqlc.
 -- Story 3.1 ships the SMTP-settings queries for the Admin-owned
 -- `smtp_settings` single-row table (FR-28/AD-14); Story 3.2 adds the
--- `backup_destinations` multi-row table (FR-29/AD-15). Schedules land here too
--- in a later story.
+-- `backup_destinations` multi-row table (FR-29/AD-15); Story 4.1 adds the
+-- `schedules` named schedule catalog (FR-30/AD-16).
 
 -- name: GetSmtpSettings :many
 -- The single SMTP-settings row (the partial unique index guarantees at most
@@ -93,3 +93,47 @@ RETURNING id, name, mechanism, endpoint, bucket_or_path, username, password_encr
 -- name: DeleteBackupDestination :execrows
 -- Remove one destination. Zero rows = the id did not exist.
 DELETE FROM backup_destinations WHERE id = $1;
+
+-- name: ListSchedules :many
+-- The ACTIVE named-schedule catalog (FR-30/AD-16). Archived rows (archived_at
+-- NOT NULL) are filtered out — the active surface never shows them. The order
+-- is deterministic: created_at ASC with a name tiebreaker, so the seed rows
+-- (which share one now() created_at) always render in a stable order. The
+-- reserved weekday_set/time_of_day columns are selected so the returned rows
+-- carry the full stored row (they are NULL in V1).
+SELECT id, name, interval_unit, interval_magnitude, weekday_set, time_of_day, archived_at, created_at, updated_at
+FROM schedules
+WHERE archived_at IS NULL
+ORDER BY created_at ASC, name ASC;
+
+-- name: CreateSchedule :one
+-- Insert a schedule and return the resulting row. The reserved weekday_set /
+-- time_of_day columns stay NULL (stored-but-ignored in V1, AD-16).
+INSERT INTO schedules (name, interval_unit, interval_magnitude)
+VALUES ($1, $2, $3)
+RETURNING id, name, interval_unit, interval_magnitude, weekday_set, time_of_day, archived_at, created_at, updated_at;
+
+-- name: UpdateSchedule :one
+-- Replace one ACTIVE schedule's name/interval and refresh updated_at. The
+-- `AND archived_at IS NULL` guard makes an update against an already-archived
+-- row affect zero rows → ErrScheduleNotFound (soft archive is irreversible in
+-- V1; the archived row is non-existent to the surface). The reserved
+-- weekday/time columns are untouched (NULL in V1).
+UPDATE schedules
+SET name = $2,
+    interval_unit = $3,
+    interval_magnitude = $4,
+    updated_at = now()
+WHERE id = $1 AND archived_at IS NULL
+RETURNING id, name, interval_unit, interval_magnitude, weekday_set, time_of_day, archived_at, created_at, updated_at;
+
+-- name: ArchiveSchedule :one
+-- Soft-archive one schedule: archived_at = now() (never a hard delete — FK
+-- references keep history intact, AD-16). The `AND archived_at IS NULL` guard
+-- makes archiving an already-archived row affect zero rows →
+-- ErrScheduleNotFound (ARCHIVE_ARCHIVED answers the 404 sentinel).
+UPDATE schedules
+SET archived_at = now(),
+    updated_at = now()
+WHERE id = $1 AND archived_at IS NULL
+RETURNING id, name, interval_unit, interval_magnitude, weekday_set, time_of_day, archived_at, created_at, updated_at;

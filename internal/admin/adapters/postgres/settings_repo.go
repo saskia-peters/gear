@@ -10,9 +10,9 @@ import (
 )
 
 // Repository wraps the sqlc-generated Admin Queries to implement the Admin
-// core's outbound ports: the smtp_settings store (Story 3.1, AD-11) and the
-// backup_destinations store (Story 3.2, AD-15 — see backup_repo.go). Schedules
-// land here in a later story.
+// core's outbound ports: the smtp_settings store (Story 3.1, AD-11), the
+// backup_destinations store (Story 3.2, AD-15 — see backup_repo.go) and the
+// schedules store (Story 4.1, AD-16 — see schedules_repo.go).
 type Repository struct {
 	queries *Queries
 }
