@@ -8,7 +8,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"log/slog"
 	"net/http"
 	"os"
 	"os/signal"
@@ -22,31 +21,18 @@ import (
 	"github.com/saskia-peters/gear/internal/platform/crypto"
 	"github.com/saskia-peters/gear/internal/platform/logger"
 	"github.com/saskia-peters/gear/internal/platform/router"
+	admcore "github.com/saskia-peters/gear/internal/admin/core"
+	adminhttp "github.com/saskia-peters/gear/internal/admin/adapters/http"
+	adminpostgres "github.com/saskia-peters/gear/internal/admin/adapters/postgres"
+	admsmtp "github.com/saskia-peters/gear/internal/admin/adapters/smtp"
 	userhttp "github.com/saskia-peters/gear/internal/user/adapters/http"
 	userpostgres "github.com/saskia-peters/gear/internal/user/adapters/postgres"
 	usercore "github.com/saskia-peters/gear/internal/user/core"
 )
 
-// resetEmailStub is the placeholder ResetEmailSender for Story 1.8 (FR-26).
-// It reports NOT-configured so the SMTP-not-configured branch — flagging the
-// account must_change_password — is the active default (no smtp_settings exist
-// until Story 3.1). Story 3.1 supplies the real SMTP sender; the port contract
-// stays unchanged.
-type resetEmailStub struct {
-	log *slog.Logger
-}
-
-// SendPasswordResetEmail logs that no email can be delivered. It is never
-// called in this story (Configured returns false), but implements the port so
-// a mis-wiring cannot silently drop delivery.
-func (s resetEmailStub) SendPasswordResetEmail(_ context.Context, email, resetLink string) error {
-	s.log.Warn("SMTP not configured; no email sent", "email", email, "reset_link", resetLink)
-	return nil
-}
-
-// Configured reports that no real delivery path exists, keeping the
-// must-change-password fallback active (FR-26).
-func (resetEmailStub) Configured() bool { return false }
+// resetEmailStub was the placeholder ResetEmailSender for Story 1.8 (FR-26).
+// Story 3.1 replaces it with the real SMTP sender built from the Admin
+// settings port (see main); the port contract stays unchanged.
 
 func main() {
 	cfg := config.Load(os.Getenv)
@@ -80,11 +66,24 @@ func main() {
 	secretCipher := crypto.NewSecretCipher(encKey)
 	sessionManager := usercore.NewSessionManager(userRepo, cfg.SessionIdle)
 	userService := usercore.NewService(userRepo, hasher, sessionManager, secretCipher, log)
-	// Password reset email delivery (FR-26/AD-14): this story ships a stub that
-	// reports NOT-configured, so the must-change-password fallback stays the
-	// active default (no smtp_settings exist until Story 3.1). Story 3.1
-	// replaces it with the real SMTP sender.
-	userService.SetResetEmailSender(resetEmailStub{log: log})
+
+	// Story 3.1 — materialized Admin hexagon for SMTP settings (FR-28/AD-1):
+	// the Admin-owned smtp_settings store (AD-11), the settings core and the
+	// settings HTTP handler. The core consumes the User module's repository
+	// READ-ONLY for the permission re-check (AD-12) and the audit trail
+	// (NFR-O1/NFR-O2, audit_log is User-owned) — the Admin module never authors
+	// another module's SQL (AD-8/AD-11).
+	adminStore := adminpostgres.New(pool)
+	adminRepo := adminpostgres.NewRepository(adminStore)
+	adminSettingsService := admcore.NewService(adminRepo, secretCipher, userRepo, userRepo, admsmtp.Client{}, log)
+	adminSettingsHandler := adminhttp.NewHandler(adminSettingsService, log)
+
+	// Password reset email delivery (FR-26/AD-14): Story 3.1 wires the REAL
+	// SMTP sender (built below from the Admin settings port), replacing the
+	// Epic-1 stub. Configured() is true only when a working server is
+	// configured, so the must-change-password fallback stays active otherwise —
+	// no behavioral regression when unconfigured.
+	userService.SetResetEmailSender(admsmtp.NewResetEmailSender(adminSettingsService, secretCipher, log))
 	// Reset links are built from the public app origin (GEAR_APP_ORIGIN, review
 	// finding 1.8-6) so a real sender can deliver a clickable link.
 	userService.SetAppOrigin(cfg.AppOrigin)
@@ -101,6 +100,11 @@ func main() {
 	// `admin.recovery.approve`, user create/edit requires `users.manage`).
 	adminSurface := auth.RequireAnyPermission(sessionManager, userRepo, usercore.AdminModuleAccessCodes(), "admin access denied", log)(userHandler.AdminRoutes())
 
+	// The settings surface is a sibling sub-mount under /api/v1/admin with its
+	// OWN tighter gate: only holders of `admin.settings.email` reach it (AD-6);
+	// the core re-checks the same code defense-in-depth.
+	settingsSurface := auth.RequireAnyPermission(sessionManager, userRepo, []string{admcore.SmtpSettingsPermission}, "admin.settings.email access denied", log)(adminSettingsHandler.Routes())
+
 	// Demo route for the gateway composition tests: any active user holding
 	// `dashboard.view` (all base roles) can reach /api/v1/protected/me.
 	protectedRoute := auth.Route(sessionManager, userRepo, "dashboard.view")
@@ -111,6 +115,7 @@ func main() {
 		router.WithAuth(userHandler.Routes()),
 		router.WithProtected(protectedRoute),
 		router.WithMount("/api/v1/admin", adminSurface),
+		router.WithMount("/api/v1/admin/settings", settingsSurface),
 	)
 
 	srv := &http.Server{

@@ -1,18 +1,60 @@
 # sqlc configuration (v2) — wires the one golang-migrate schema (AD-11) to
 # per-module store generation. Each module's repository adapter is generated
 # from the forward migration files, so the generated Go always matches the
-# shipped schema. Add modules here as their tables and queries land.
+# shipped schema.
+#
+# The schema inputs are SCOPED per module (AD-8/AD-11): the User store is
+# generated only from the User-owned migrations, the Admin store only from the
+# Admin-owned ones. This keeps ownership clean — no module's generated package
+# carries another module's tables (e.g. the Admin store never contains user
+# tables, the User store never contains smtp_settings). The migrations
+# themselves stay in the single golang-migrate set (the schema authority);
+# only the sqlc input lists are partitioned here.
+#
+# IMPORTANT: when a new forward migration lands, append it to ITS owning
+# module's schema list below (in numeric order — sqlc applies the files in
+# order, so ALTERs must follow the CREATEs they extend).
 version: "2"
 sql:
   - engine: "postgresql"
-    # Only the forward migrations: they are the single schema authority.
-    # Glob so future forward migrations are picked up automatically.
+    # User Directory & Auth module — the migrations that build/alter the
+    # User-owned tables (users, sessions, login_attempts, audit_log,
+    # password_reset_tokens, permissions + groups, user_groups,
+    # qualifications, ...). Excludes the Admin-owned smtp_settings (000017).
     schema:
-      - "./migrations/*.up.sql"
+      - "./migrations/000001_cold_start.up.sql"
+      - "./migrations/000002_user_registration.up.sql"
+      - "./migrations/000003_auth_sessions.up.sql"
+      - "./migrations/000004_login_attempts.up.sql"
+      - "./migrations/000005_user_totp.up.sql"
+      - "./migrations/000006_audit_log.up.sql"
+      - "./migrations/000007_user_profile.up.sql"
+      - "./migrations/000008_password_reset.up.sql"
+      - "./migrations/000009_admin_recovery.up.sql"
+      - "./migrations/000010_base_permissions.up.sql"
+      - "./migrations/000011_fuehrende_tools.up.sql"
+      - "./migrations/000012_user_groups_qualifications.up.sql"
+      - "./migrations/000013_admin_rework.up.sql"
+      - "./migrations/000014_admin_otp.up.sql"
+      - "./migrations/000015_drop_qualification_vocab_expiry.up.sql"
+      - "./migrations/000016_user_account_approve_permission.up.sql"
     queries: "./internal/user/adapters/postgres/queries.sql"
     gen:
       go:
         package: "postgres"
         out: "./internal/user/adapters/postgres"
+        sql_package: "pgx/v5"
+        emit_json_tags: true
+  # Story 3.1: the Admin hexagon's own store (Epic 3 settings). Schema scoped
+  # to the Admin-owned migrations only — future admin tables
+  # (backup_destinations, schedules) are appended here.
+  - engine: "postgresql"
+    schema:
+      - "./migrations/000017_smtp_settings.up.sql"
+    queries: "./internal/admin/adapters/postgres/queries.sql"
+    gen:
+      go:
+        package: "postgres"
+        out: "./internal/admin/adapters/postgres"
         sql_package: "pgx/v5"
         emit_json_tags: true

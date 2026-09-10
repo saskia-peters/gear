@@ -8,7 +8,7 @@ import type { Qualification, QualificationAssignee, QualificationRosterUser } fr
 const QUALS_URL = '/api/v1/admin/qualifications'
 
 const QUALIFICATION: Qualification = {
-  id: 'q-1', name: 'Kettensäge', description: '', expiry_kind: 'unlimited', expires_at: null, status: 'unlimited',
+  id: 'q-1', name: 'Kettensäge', description: '', expiry_kind: 'unlimited', status: 'unlimited',
 }
 
 const USERS: QualificationRosterUser[] = [

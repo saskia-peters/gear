@@ -208,6 +208,12 @@ internal/
   user/               # User Directory & Auth hexagon (core, ports, adapters)
   tools/              # Tool Maintenance hexagon
   admin/              # Admin hexagon (configuration + DSGVO operations)
+                      # — materialized in Story 3.1: core/ports/adapters with its
+                      #   own sqlc store (internal/admin/adapters/postgres,
+                      #   migration 000017 `smtp_settings`) and HTTP surface
+                      #   (/api/v1/admin/settings, gated by admin.settings.email);
+                      #   the User reset sender consumes settings read-only via
+                      #   the Admin settings port (AD-14)
   platform/           # cross-cutting: logger, config, migrate, middleware (NOT business)
 web/                  # React + Vite + TS SPA (frontend UI; no business logic)
 migrations/           # golang-migrate versioned SQL (NFR-R2)
