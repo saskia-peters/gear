@@ -219,3 +219,170 @@
     flex-direction: row;
   }
 }
+
+/* Tab bar for the two Einstellungen surfaces (Story 3.2). */
+.tabs {
+  display: flex;
+  gap: var(--gear-space-2);
+  border-bottom: 1px solid var(--gear-color-border-hairline);
+  margin-bottom: var(--gear-space-4);
+}
+
+.tab,
+.tabActive {
+  min-height: 48px;
+  padding: var(--gear-space-2) var(--gear-space-4);
+  border: none;
+  border-bottom: 2px solid transparent;
+  background: none;
+  font-family: var(--gear-font-family);
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  color: var(--gear-color-ink-secondary);
+  cursor: pointer;
+}
+
+.tab:hover {
+  color: var(--gear-color-ink-primary);
+}
+
+.tabActive {
+  color: var(--gear-color-ink-primary);
+  border-bottom-color: var(--gear-color-brand-hover);
+}
+
+.tab:focus-visible,
+.tabActive:focus-visible {
+  outline: 2px solid var(--gear-focus-ring-color);
+  outline-offset: 2px;
+}
+
+/* Backup destination list. */
+.warning {
+  margin: 0;
+  padding: var(--gear-space-3) var(--gear-space-4);
+  border-radius: var(--gear-radius-md);
+  background-color: var(--gear-color-status-amber-soft);
+  border: 1px solid var(--gear-color-status-amber);
+  color: var(--gear-color-ink-primary);
+  font-size: var(--gear-font-label-size);
+  line-height: var(--gear-font-label-line-height);
+}
+
+.list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-3);
+  width: 100%;
+}
+
+.row {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-3);
+  padding: var(--gear-space-4) var(--gear-space-5);
+  background-color: var(--gear-color-surface-raised);
+  border: 1px solid var(--gear-color-border-hairline);
+  border-radius: var(--gear-radius-md);
+  box-sizing: border-box;
+}
+
+.rowInfo {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-1);
+}
+
+.rowName {
+  font-size: var(--gear-font-body-size);
+  font-weight: var(--gear-font-display-weight);
+  color: var(--gear-color-ink-primary);
+}
+
+.rowMeta {
+  font-size: var(--gear-font-meta-size);
+  line-height: var(--gear-font-meta-line-height);
+  color: var(--gear-color-ink-secondary);
+  word-break: break-word;
+}
+
+.rowActions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gear-space-2);
+}
+
+.rowButton,
+.dangerButton {
+  min-height: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--gear-space-3) var(--gear-space-5);
+  border-radius: var(--gear-radius-md);
+  font-family: var(--gear-font-family);
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.rowButton {
+  background-color: transparent;
+  color: var(--gear-color-ink-primary);
+  border: 1px solid var(--gear-color-border-hairline);
+}
+
+.rowButton:hover:not(:disabled) {
+  background-color: var(--gear-color-surface-base);
+}
+
+.dangerButton {
+  background-color: transparent;
+  color: var(--gear-color-status-red);
+  border: 1px solid var(--gear-color-status-red);
+}
+
+.dangerButton:hover:not(:disabled) {
+  background-color: var(--gear-color-status-red-soft);
+}
+
+.rowButton:focus-visible,
+.dangerButton:focus-visible {
+  outline: 2px solid var(--gear-focus-ring-color);
+  outline-offset: 2px;
+}
+
+.rowButton:disabled,
+.dangerButton:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.formTitle {
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-display-weight);
+  color: var(--gear-color-ink-primary);
+  margin: 0;
+}
+
+.removeCredential {
+  display: flex;
+  align-items: flex-start;
+  gap: var(--gear-space-2);
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  line-height: var(--gear-font-label-line-height);
+  color: var(--gear-color-ink-primary);
+  cursor: pointer;
+}
+
+.removeCredential input[type='checkbox'] {
+  width: 20px;
+  height: 20px;
+  margin-top: 2px;
+  accent-color: var(--gear-color-status-red);
+}

@@ -10,8 +10,9 @@ import (
 )
 
 // Repository wraps the sqlc-generated Admin Queries to implement the Admin
-// core's outbound ports (Story 3.1): the smtp_settings store (AD-11). Later
-// Epic 3 stories add the backup-destination and schedule stores here.
+// core's outbound ports: the smtp_settings store (Story 3.1, AD-11) and the
+// backup_destinations store (Story 3.2, AD-15 — see backup_repo.go). Schedules
+// land here in a later story.
 type Repository struct {
 	queries *Queries
 }

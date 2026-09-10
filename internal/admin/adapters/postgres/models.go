@@ -8,6 +8,19 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type BackupDestination struct {
+	ID                pgtype.UUID        `json:"id"`
+	Name              string             `json:"name"`
+	Mechanism         string             `json:"mechanism"`
+	Endpoint          string             `json:"endpoint"`
+	BucketOrPath      string             `json:"bucket_or_path"`
+	Username          string             `json:"username"`
+	PasswordEncrypted string             `json:"password_encrypted"`
+	Schedule          pgtype.Text        `json:"schedule"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
+}
+
 type SmtpSetting struct {
 	ID                pgtype.UUID        `json:"id"`
 	Host              string             `json:"host"`

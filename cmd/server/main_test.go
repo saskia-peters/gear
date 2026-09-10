@@ -128,6 +128,26 @@ func (s *compSettingsService) TestSmtpSettings(_ context.Context, _, _ string) (
 	return &admcore.SmtpTestResult{Ok: true, Message: admcore.MsgSmtpTestSent}, nil
 }
 
+func (s *compSettingsService) ListBackupDestinations(_ context.Context, _ string) ([]*admcore.BackupDestination, error) {
+	return []*admcore.BackupDestination{}, nil
+}
+
+func (s *compSettingsService) CreateBackupDestination(_ context.Context, _ string, _ admcore.BackupDestinationInput) (*admcore.BackupDestination, error) {
+	return &admcore.BackupDestination{ID: "id", Name: "x"}, nil
+}
+
+func (s *compSettingsService) UpdateBackupDestination(_ context.Context, _, _ string, _ admcore.BackupDestinationInput) (*admcore.BackupDestination, error) {
+	return &admcore.BackupDestination{ID: "id", Name: "x"}, nil
+}
+
+func (s *compSettingsService) DeleteBackupDestination(_ context.Context, _, _ string) error {
+	return nil
+}
+
+func (s *compSettingsService) TestBackupDestination(_ context.Context, _, _ string) (*admcore.BackupTestResult, error) {
+	return &admcore.BackupTestResult{Ok: true, Message: admcore.MsgBackupTestOK}, nil
+}
+
 var _ adminports.Service = (*compSettingsService)(nil)
 
 // activeUser builds a session carrying an active user.
@@ -222,5 +242,80 @@ func TestCompositionSettingsMountGating(t *testing.T) {
 	newCompositionSettingsRouter([]string{admcore.SmtpSettingsPermission}, activeUser("u-admin", "admin@gear.local")).ServeHTTP(rootRec, req)
 	if rootRec.Code != http.StatusOK {
 		t.Errorf("admin root: status = %d, want 200", rootRec.Code)
+	}
+}
+
+// newCompositionBackupRouter mirrors the main() mounts exactly for the Story
+// 3.2 backup surface: /api/v1/admin, /api/v1/admin/settings (SMTP gate) and
+// /api/v1/admin/settings/backup (its OWN admin.settings.backup gate), all
+// through the REAL RequireAnyPermission middleware and router.New. This pins
+// the one-permission-per-surface mount ordering (AD-6): the more-specific
+// backup sub-mount must win for /api/v1/admin/settings/backup/*, and a caller
+// holding only admin.settings.email must NOT reach it.
+func newCompositionBackupRouter(perms []string, session *usercore.Session) http.Handler {
+	log := discardLogger()
+	validator := &compValidator{session: session}
+	resolver := &compResolver{perms: perms}
+
+	settingsHandler := adminhttp.NewHandler(&compSettingsService{}, log)
+	settingsSurface := auth.RequireAnyPermission(validator, resolver, []string{admcore.SmtpSettingsPermission}, "admin.settings.email access denied", log)(settingsHandler.Routes())
+	backupSurface := auth.RequireAnyPermission(validator, resolver, []string{admcore.BackupSettingsPermission}, "admin.settings.backup access denied", log)(settingsHandler.BackupRoutes())
+
+	outer := chi.NewRouter()
+	outer.Get("/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"module":"admin","status":"ok"}`))
+	})
+	outerSurface := auth.RequireAnyPermission(validator, resolver, usercore.AdminModuleAccessCodes(), "admin access denied", log)(outer)
+
+	return router.New(stubPinger{}, log,
+		router.WithMount("/api/v1/admin", outerSurface),
+		router.WithMount("/api/v1/admin/settings", settingsSurface),
+		router.WithMount("/api/v1/admin/settings/backup", backupSurface),
+	)
+}
+
+func doBackupComposedRequest(h http.Handler, token string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin/settings/backup", nil)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+// TestCompositionBackupMountGating verifies the Story 3.2 composition-root
+// wiring: /api/v1/admin/settings/backup is gated by ITS OWN admin.settings.backup
+// permission (AD-6) — a caller holding only admin.settings.email gets the
+// uniform 403 (the SMTP gate is NOT widened), while a backup holder reaches the
+// surface.
+func TestCompositionBackupMountGating(t *testing.T) {
+	// 401: no token.
+	if rec := doBackupComposedRequest(newCompositionBackupRouter([]string{}, nil), ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no token: status = %d, want 401", rec.Code)
+	}
+
+	// 403: a caller holding ONLY admin.settings.email must NOT reach the backup
+	// surface — the gates are separate (one permission per surface, AD-6).
+	rec := doBackupComposedRequest(newCompositionBackupRouter([]string{admcore.SmtpSettingsPermission}, activeUser("u-mail", "mail@gear.local")), "tok")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("admin.settings.email holder: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// 403: a caller holding an unrelated admin code is also denied, with no
+	// destination data exposed.
+	rec = doBackupComposedRequest(newCompositionBackupRouter([]string{"dashboard.view"}, activeUser("u-vol", "vol@gear.local")), "tok")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("non-admin holder: status = %d, want 403", rec.Code)
+	}
+
+	// 200: a caller holding admin.settings.backup reaches the surface (empty
+	// list from the in-memory service).
+	rec = doBackupComposedRequest(newCompositionBackupRouter([]string{admcore.BackupSettingsPermission}, activeUser("u-admin", "admin@gear.local")), "tok")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin.settings.backup holder: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if strings.TrimSpace(rec.Body.String()) != "[]" {
+		t.Errorf("backup response = %s, want empty JSON array", rec.Body.String())
 	}
 }

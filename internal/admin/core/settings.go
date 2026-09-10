@@ -28,6 +28,20 @@ const (
 	AuditOperationSmtpSettingsTest   = "admin.settings.email.test"
 )
 
+// BackupSettingsPermission is the server-authoritative gate code for the whole
+// backup-destination settings surface (FR-29/AD-6). One Go const so the route
+// mount, the core re-check and the SPA-facing documentation never drift.
+const BackupSettingsPermission = "admin.settings.backup"
+
+// Audit-operation tags for the backup-destination surface (NFR-O1/NFR-O2):
+// creates/updates, deletes and test-connections are audited with actor,
+// timestamp and operation.
+const (
+	AuditOperationBackupSettingsUpdate = "admin.settings.backup.update"
+	AuditOperationBackupSettingsDelete = "admin.settings.backup.delete"
+	AuditOperationBackupSettingsTest   = "admin.settings.backup.test"
+)
+
 // AuditSeverityNormal is the standard audit severity for settings events.
 const AuditSeverityNormal = "normal"
 
@@ -51,6 +65,27 @@ type InvalidSmtpSettingsError struct {
 func (e *InvalidSmtpSettingsError) Error() string { return e.Message }
 func (e *InvalidSmtpSettingsError) Unwrap() error { return ErrSmtpSettingsInvalid }
 
+// ErrBackupDestinationsInvalid is the sentinel wrapping a German validation
+// message for a 400 invalid_request (empty name, bad mechanism, missing
+// endpoint/bucket-or-path, missing credential for S3/FTP/SFTP, oversized
+// fields).
+var ErrBackupDestinationsInvalid = errors.New("admin core: invalid backup destinations")
+
+// InvalidBackupDestinationsError carries the German validation message for a
+// 400 invalid_request. It unwraps to ErrBackupDestinationsInvalid so callers
+// can match the sentinel while still rendering the field-specific microcopy.
+type InvalidBackupDestinationsError struct {
+	Message string
+}
+
+func (e *InvalidBackupDestinationsError) Error() string { return e.Message }
+func (e *InvalidBackupDestinationsError) Unwrap() error { return ErrBackupDestinationsInvalid }
+
+// ErrBackupDestinationNotFound is returned when a create/update/delete/test
+// references an id that does not exist (or is not a valid uuidv7). Handlers
+// map it to the uniform 404.
+var ErrBackupDestinationNotFound = errors.New("admin core: backup destination not found")
+
 // German microcopy for the SMTP-settings surface (FR-28/UX-DR8).
 const (
 	MsgSmtpSettingsSaved   = "SMTP-Einstellungen gespeichert."
@@ -61,6 +96,27 @@ const (
 	// The detailed engine/TLS/cert error is logged structured (NFR-O1) and
 	// NEVER surfaced to the client (no SMTP/host/TLS detail leaks).
 	MsgSmtpTestFailed = "Die Test-E-Mail konnte nicht gesendet werden."
+)
+
+// German microcopy for the backup-destination surface (FR-29/UX-DR8).
+const (
+	MsgBackupDestinationSaved   = "Backup-Ziel gespeichert."
+	MsgBackupDestinationDeleted = "Backup-Ziel gelöscht."
+	MsgBackupTestOK             = "Verbindung erfolgreich getestet."
+	MsgBackupRequiresCredential = "Für S3, FTP und SFTP ist eine Zugangsberechtigung erforderlich."
+	// MsgBackupDestinationNameTaken rejects a create/update whose name another
+	// destination already holds (finding: duplicate-name guard).
+	MsgBackupDestinationNameTaken = "Es gibt bereits ein Backup-Ziel mit diesem Namen."
+	// MsgBackupClearCredentialConflict rejects an update that both clears the
+	// stored credential and provides a new one (mutually exclusive signals).
+	MsgBackupClearCredentialConflict = "Bitte gib entweder eine neue Zugangsberechtigung an oder wähle „Anmeldedaten entfernen“, nicht beides."
+	// MsgBackupCredentialInvalid is the inline result when the stored ciphertext
+	// cannot be decrypted (wrong/rotated key or tampering).
+	MsgBackupCredentialInvalid = "Die gespeicherte Zugangsberechtigung kann nicht entschlüsselt werden."
+	// MsgBackupTestFailed is the generic inline message for a test-connection
+	// failure. The detailed engine/TLS/auth error is logged structured (NFR-O1)
+	// and NEVER surfaced to the client (no endpoint/host/TLS detail leaks).
+	MsgBackupTestFailed = "Die Verbindung zum Backup-Ziel konnte nicht hergestellt werden."
 )
 
 // SmtpSettings is the domain representation of the single SMTP-settings row
@@ -192,21 +248,28 @@ type SmtpMailer interface {
 	SendEmail(ctx context.Context, params SmtpSendParams) error
 }
 
-// Service is the Admin module's SMTP-settings domain service (Story 3.1).
+// Service is the Admin module's settings domain service (Story 3.1 SMTP +
+// Story 3.2 backup destinations). It consumes the Admin-owned settings tables
+// through their stores and the User module's repository READ-ONLY for the
+// permission re-check (AD-12) and the audit trail (NFR-O1/NFR-O2).
 type Service struct {
-	store  SmtpSettingsStore
-	cipher SecretCipher
-	perms  PermissionResolver
-	audit  AuditWriter
-	mailer SmtpMailer
-	logger *slog.Logger
+	store       SmtpSettingsStore
+	backupStore BackupDestinationsStore
+	cipher      SecretCipher
+	perms       PermissionResolver
+	audit       AuditWriter
+	mailer      SmtpMailer
+	tester      BackupDestinationTester
+	logger      *slog.Logger
 }
 
-// NewService constructs the SMTP-settings service. logger may be nil (falls
-// back to slog.Default()); it is used for structured logging of audit-write
-// failures and test-send outcomes (NFR-O1).
-func NewService(store SmtpSettingsStore, cipher SecretCipher, perms PermissionResolver, audit AuditWriter, mailer SmtpMailer, logger *slog.Logger) *Service {
-	return &Service{store: store, cipher: cipher, perms: perms, audit: audit, mailer: mailer, logger: logger}
+// NewService constructs the settings service. backupStore and tester are used
+// only by the backup-destination methods (Story 3.2); they may be nil for an
+// SMTP-only service. logger may be nil (falls back to slog.Default()); it is
+// used for structured logging of audit-write failures and test outcomes
+// (NFR-O1).
+func NewService(store SmtpSettingsStore, backupStore BackupDestinationsStore, cipher SecretCipher, perms PermissionResolver, audit AuditWriter, mailer SmtpMailer, tester BackupDestinationTester, logger *slog.Logger) *Service {
+	return &Service{store: store, backupStore: backupStore, cipher: cipher, perms: perms, audit: audit, mailer: mailer, tester: tester, logger: logger}
 }
 
 // log returns the configured logger or slog.Default().

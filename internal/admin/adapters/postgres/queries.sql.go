@@ -7,7 +7,92 @@ package postgres
 
 import (
 	"context"
+
+	"github.com/jackc/pgx/v5/pgtype"
 )
+
+const createBackupDestination = `-- name: CreateBackupDestination :one
+INSERT INTO backup_destinations (name, mechanism, endpoint, bucket_or_path, username, password_encrypted, schedule)
+VALUES ($1, $2, $3, $4, $5, $6, NULLIF($7::text, ''))
+RETURNING id, name, mechanism, endpoint, bucket_or_path, username, password_encrypted, schedule, created_at, updated_at
+`
+
+type CreateBackupDestinationParams struct {
+	Name              string `json:"name"`
+	Mechanism         string `json:"mechanism"`
+	Endpoint          string `json:"endpoint"`
+	BucketOrPath      string `json:"bucket_or_path"`
+	Username          string `json:"username"`
+	PasswordEncrypted string `json:"password_encrypted"`
+	Column7           string `json:"column_7"`
+}
+
+// Insert a destination and return the resulting row. An empty schedule is
+// stored as NULL (the optional scheduling hint); the credential is stored as
+// the already-encrypted ciphertext the core produced.
+func (q *Queries) CreateBackupDestination(ctx context.Context, arg CreateBackupDestinationParams) (BackupDestination, error) {
+	row := q.db.QueryRow(ctx, createBackupDestination,
+		arg.Name,
+		arg.Mechanism,
+		arg.Endpoint,
+		arg.BucketOrPath,
+		arg.Username,
+		arg.PasswordEncrypted,
+		arg.Column7,
+	)
+	var i BackupDestination
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Mechanism,
+		&i.Endpoint,
+		&i.BucketOrPath,
+		&i.Username,
+		&i.PasswordEncrypted,
+		&i.Schedule,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const deleteBackupDestination = `-- name: DeleteBackupDestination :execrows
+DELETE FROM backup_destinations WHERE id = $1
+`
+
+// Remove one destination. Zero rows = the id did not exist.
+func (q *Queries) DeleteBackupDestination(ctx context.Context, id pgtype.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteBackupDestination, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
+const getBackupDestination = `-- name: GetBackupDestination :one
+SELECT id, name, mechanism, endpoint, bucket_or_path, username, password_encrypted, schedule, created_at, updated_at
+FROM backup_destinations
+WHERE id = $1
+`
+
+// A single destination by id (for update/test/delete). Zero rows = not found.
+func (q *Queries) GetBackupDestination(ctx context.Context, id pgtype.UUID) (BackupDestination, error) {
+	row := q.db.QueryRow(ctx, getBackupDestination, id)
+	var i BackupDestination
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Mechanism,
+		&i.Endpoint,
+		&i.BucketOrPath,
+		&i.Username,
+		&i.PasswordEncrypted,
+		&i.Schedule,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
 
 const getSmtpSettings = `-- name: GetSmtpSettings :many
 
@@ -19,8 +104,9 @@ LIMIT 1
 
 // Admin module store (AD-1/AD-11), generated into package postgres by sqlc.
 // Story 3.1 ships the SMTP-settings queries for the Admin-owned
-// `smtp_settings` single-row table (FR-28/AD-14); later Epic 3 stories extend
-// this file (backup_destinations, schedules) and re-run `just sqlc-generate`.
+// `smtp_settings` single-row table (FR-28/AD-14); Story 3.2 adds the
+// `backup_destinations` multi-row table (FR-29/AD-15). Schedules land here too
+// in a later story.
 // The single SMTP-settings row (the partial unique index guarantees at most
 // one). Zero rows = "not configured yet" → the consumer returns zero defaults.
 // The encrypted password column is intentionally selected: decryption happens
@@ -89,6 +175,112 @@ func (q *Queries) InsertSmtpSettings(ctx context.Context, arg InsertSmtpSettings
 		arg.PasswordEncrypted,
 	)
 	return err
+}
+
+const listBackupDestinations = `-- name: ListBackupDestinations :many
+SELECT id, name, mechanism, endpoint, bucket_or_path, username, password_encrypted, schedule, created_at, updated_at
+FROM backup_destinations
+ORDER BY created_at ASC
+`
+
+// The full multi-row backup-destination list (FR-29/AD-15), oldest first. The
+// encrypted credential column is intentionally selected: the consumer seam
+// (and the test-connection path) decrypt it in memory (NFR-S4) — the HTTP
+// surface never serializes it.
+func (q *Queries) ListBackupDestinations(ctx context.Context) ([]BackupDestination, error) {
+	rows, err := q.db.Query(ctx, listBackupDestinations)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []BackupDestination
+	for rows.Next() {
+		var i BackupDestination
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.Mechanism,
+			&i.Endpoint,
+			&i.BucketOrPath,
+			&i.Username,
+			&i.PasswordEncrypted,
+			&i.Schedule,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const updateBackupDestination = `-- name: UpdateBackupDestination :one
+UPDATE backup_destinations
+SET name = $2,
+    mechanism = $3,
+    endpoint = $4,
+    bucket_or_path = $5,
+    username = $6,
+    password_encrypted = CASE
+        WHEN $8::boolean THEN ''
+        ELSE COALESCE(NULLIF($9::text, ''), password_encrypted)
+    END,
+    schedule = NULLIF($7::text, ''),
+    updated_at = now()
+WHERE id = $1
+RETURNING id, name, mechanism, endpoint, bucket_or_path, username, password_encrypted, schedule, created_at, updated_at
+`
+
+type UpdateBackupDestinationParams struct {
+	ID                pgtype.UUID `json:"id"`
+	Name              string      `json:"name"`
+	Mechanism         string      `json:"mechanism"`
+	Endpoint          string      `json:"endpoint"`
+	BucketOrPath      string      `json:"bucket_or_path"`
+	Username          string      `json:"username"`
+	Column7           string      `json:"column_7"`
+	ClearCredential   bool        `json:"clear_credential"`
+	PasswordEncrypted string      `json:"password_encrypted"`
+}
+
+// Replace one destination's values (zero rows when the id does not exist).
+// The credential is COALESCED: an empty value KEEPS the existing ciphertext, a
+// non-empty one replaces it — both in the SAME statement (the RHS reads the
+// pre-update row value atomically), so keep-existing is atomic (no
+// read-then-write race a concurrent update could exploit). clear_credential:
+// true explicitly WIPES the stored credential (revoke — a blank password alone
+// means keep-existing, so clearing must be explicit, finding). updated_at is
+// refreshed on every edit. An empty schedule clears the stored hint (NULL).
+func (q *Queries) UpdateBackupDestination(ctx context.Context, arg UpdateBackupDestinationParams) (BackupDestination, error) {
+	row := q.db.QueryRow(ctx, updateBackupDestination,
+		arg.ID,
+		arg.Name,
+		arg.Mechanism,
+		arg.Endpoint,
+		arg.BucketOrPath,
+		arg.Username,
+		arg.Column7,
+		arg.ClearCredential,
+		arg.PasswordEncrypted,
+	)
+	var i BackupDestination
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.Mechanism,
+		&i.Endpoint,
+		&i.BucketOrPath,
+		&i.Username,
+		&i.PasswordEncrypted,
+		&i.Schedule,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const updateSmtpSettings = `-- name: UpdateSmtpSettings :execrows

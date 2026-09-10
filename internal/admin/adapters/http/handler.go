@@ -1,9 +1,11 @@
-// Package http hosts the HTTP adapter of the Admin hexagon (Story 3.1): the
-// SMTP-settings surface (GET/PUT /smtp, POST /smtp/test) under
-// /api/v1/admin/settings, gated at the composition-root mount by
-// RequireAnyPermission with `admin.settings.email`. The core re-checks the
-// permission defense-in-depth (AD-6). Later Epic 3 stories (backup, DSGVO)
-// add their surfaces here.
+// Package http hosts the HTTP adapter of the Admin hexagon (Story 3.1 + 3.2):
+// the SMTP-settings surface (GET/PUT /smtp, POST /smtp/test) and the
+// backup-destination surface (GET/POST /backup, PUT/DELETE /{id}, POST
+// /{id}/test) under /api/v1/admin/settings, each gated at the composition-root
+// mount by RequireAnyPermission with its OWN permission code
+// (admin.settings.email / admin.settings.backup — one permission per surface,
+// AD-6). The core re-checks the permission defense-in-depth (AD-6). Later Epic
+// 3 stories (DSGVO) add their surfaces here.
 package http
 
 import (
@@ -39,11 +41,11 @@ func (h *Handler) log() *slog.Logger {
 	return slog.Default()
 }
 
-// Routes returns the Admin settings router (Story 3.1): GET/PUT /smtp and
-// POST /smtp/test. The whole group is gated by `admin.settings.email` at the
-// composition-root mount point (RequireAnyPermission), so this router carries
-// no gateway itself; 404/405 answer with the uniform JSON envelope so no
-// sub-path can emit a plain-text body.
+// Routes returns the Admin settings SMTP router (Story 3.1): GET/PUT /smtp
+// and POST /smtp/test. The whole group is gated by `admin.settings.email` at
+// the composition-root mount point (RequireAnyPermission), so this router
+// carries no gateway itself; 404/405 answer with the uniform JSON envelope so
+// no sub-path can emit a plain-text body.
 func (h *Handler) Routes() http.Handler {
 	r := chi.NewRouter()
 	r.NotFound(httpapi.NotFoundHandler())
@@ -51,6 +53,24 @@ func (h *Handler) Routes() http.Handler {
 	r.Get("/smtp", h.GetSmtpSettings)
 	r.Put("/smtp", h.UpdateSmtpSettings)
 	r.Post("/smtp/test", h.TestSmtpEmail)
+	return r
+}
+
+// BackupRoutes returns the Admin settings backup-destination router (Story
+// 3.2): GET/POST /, PUT/DELETE /{id} and POST /{id}/test. The whole group is
+// gated by `admin.settings.backup` at the composition-root mount point — its
+// OWN gate, one permission per surface (AD-6) — so this router carries no
+// gateway itself; 404/405 answer with the uniform JSON envelope so no
+// sub-path can emit a plain-text body.
+func (h *Handler) BackupRoutes() http.Handler {
+	r := chi.NewRouter()
+	r.NotFound(httpapi.NotFoundHandler())
+	r.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
+	r.Get("/", h.ListBackupDestinations)
+	r.Post("/", h.CreateBackupDestination)
+	r.Put("/{id}", h.UpdateBackupDestination)
+	r.Delete("/{id}", h.DeleteBackupDestination)
+	r.Post("/{id}/test", h.TestBackupDestination)
 	return r
 }
 

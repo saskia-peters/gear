@@ -27,6 +27,14 @@ type fakeService struct {
 	putErr   error
 	testRes  *core.SmtpTestResult
 	testErr  error
+
+	backupDests      []*core.BackupDestination
+	backupListErr    error
+	backupWriteErr   error
+	backupDeleteErr  error
+	backupTestRes    *core.BackupTestResult
+	backupTestErr    error
+	lastBackupInput  core.BackupDestinationInput
 }
 
 func (f *fakeService) GetSmtpSettings(_ context.Context, _ string) (*core.SmtpSettings, error) {

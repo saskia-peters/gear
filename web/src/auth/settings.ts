@@ -1,13 +1,21 @@
-// SMTP settings data module (Story 3.1, FR-28). It holds the API types and
-// calls for the Einstellungen → E-Mail surface: read the current SMTP settings,
-// save them, and send a test email. The server is the source of truth for the
-// German microcopy; the password is WRITE-ONLY — GET returns only
-// password_configured and the save body omits the password when it was left
-// blank (so the server keeps the existing encrypted one, NFR-S4).
+// SMTP + backup settings data module (Story 3.1 + 3.2, FR-28/FR-29). It holds
+// the API types and calls for the Einstellungen → E-Mail and Einstellungen →
+// Backup surfaces: read/save/test SMTP, and list/create/update/delete/test
+// backup destinations. The server is the source of truth for the German
+// microcopy. Credentials are WRITE-ONLY — GET returns only
+// password_configured / credential_configured, and the save bodies omit the
+// credential when it was left blank (so the server keeps the existing
+// encrypted one, NFR-S4).
 
 import { ApiError, request, authTokenHeaders } from './http.ts'
 
 export type SmtpSecurity = 'none' | 'starttls' | 'tls'
+
+// Permission codes gating the two Einstellungen surfaces (AD-6, server-side
+// source of truth). Kept here so the per-tab gating cannot drift from the
+// server codes.
+export const SMTP_SETTINGS_PERMISSION = 'admin.settings.email'
+export const BACKUP_SETTINGS_PERMISSION = 'admin.settings.backup'
 
 // SmtpSettings is the GET payload — never a password (only password_configured).
 export interface SmtpSettings {
@@ -82,6 +90,118 @@ export async function testSmtpEmail(): Promise<SmtpTestResult> {
     method: 'POST',
     headers: authTokenHeaders(),
   })) as SmtpTestResult
+}
+
+export type BackupMechanism = 's3' | 'ftp' | 'sftp' | 'local'
+
+// BackupDestination is the GET payload — never a credential (only
+// credential_configured).
+export interface BackupDestination {
+  id: string
+  name: string
+  mechanism: BackupMechanism
+  endpoint: string
+  bucket_or_path: string
+  username: string
+  credential_configured: boolean
+  schedule?: string
+  created_at: string
+  updated_at: string
+}
+
+// BackupDestinationWriteResult is the POST/PUT payload: the destination plus
+// the server-authoritative German confirmation.
+export interface BackupDestinationWriteResult extends BackupDestination {
+  message: string
+}
+
+// BackupDestinationInput is the POST/PUT body. password is OPTIONAL and
+// omitted when the admin leaves it blank, so an existing credential is kept
+// (write-only edit). clear_credential explicitly revokes a stored credential
+// on update (a blank password alone means keep-existing); it is mutually
+// exclusive with a provided password.
+export interface BackupDestinationInput {
+  name: string
+  mechanism: BackupMechanism
+  endpoint: string
+  bucket_or_path: string
+  username: string
+  password?: string
+  clear_credential?: boolean
+  schedule?: string
+}
+
+// BackupTestResult is the 200-style inline outcome of the "Verbindung testen"
+// action.
+export interface BackupTestResult {
+  ok: boolean
+  message: string
+}
+
+const BACKUP_URL = '/api/v1/admin/settings/backup'
+
+// listBackupDestinations fetches every destination, oldest first
+// (GET_LIST_EMPTY when none exists — the server answers an empty array).
+export async function listBackupDestinations(): Promise<BackupDestination[]> {
+  return (await request(BACKUP_URL, { headers: authTokenHeaders() })) as BackupDestination[]
+}
+
+// createBackupDestination persists a new destination. When input.password is
+// empty it is OMITTED from the body (only local destinations may omit it).
+export async function createBackupDestination(input: BackupDestinationInput): Promise<BackupDestinationWriteResult> {
+  return (await request(BACKUP_URL, {
+    method: 'POST',
+    headers: authTokenHeaders(),
+    body: JSON.stringify(buildBackupBody(input)),
+  })) as BackupDestinationWriteResult
+}
+
+// updateBackupDestination persists a destination. An empty password is OMITTED
+// so the server keeps the existing encrypted credential (UPDATE_KEEP_CREDENTIAL).
+export async function updateBackupDestination(id: string, input: BackupDestinationInput): Promise<BackupDestinationWriteResult> {
+  return (await request(`${BACKUP_URL}/${id}`, {
+    method: 'PUT',
+    headers: authTokenHeaders(),
+    body: JSON.stringify(buildBackupBody(input)),
+  })) as BackupDestinationWriteResult
+}
+
+// deleteBackupDestination removes one destination.
+export async function deleteBackupDestination(id: string): Promise<{ message: string }> {
+  return (await request(`${BACKUP_URL}/${id}`, {
+    method: 'DELETE',
+    headers: authTokenHeaders(),
+  })) as { message: string }
+}
+
+// testBackupDestination exercises the destination's mechanism/endpoint and
+// returns the inline German result (ok + message).
+export async function testBackupDestination(id: string): Promise<BackupTestResult> {
+  return (await request(`${BACKUP_URL}/${id}/test`, {
+    method: 'POST',
+    headers: authTokenHeaders(),
+  })) as BackupTestResult
+}
+
+// buildBackupBody assembles the POST/PUT body, omitting a blank credential so
+// the server keeps the existing one (write-only edit, NFR-S4). clear_credential
+// is included only when the admin explicitly chose to revoke the stored
+// credential.
+function buildBackupBody(input: BackupDestinationInput): Record<string, unknown> {
+  const body: Record<string, unknown> = {
+    name: input.name,
+    mechanism: input.mechanism,
+    endpoint: input.endpoint,
+    bucket_or_path: input.bucket_or_path,
+    username: input.username,
+    schedule: input.schedule ?? '',
+  }
+  if (input.clear_credential) {
+    body.clear_credential = true
+  } else if (typeof input.password === 'string' && input.password !== '') {
+    body.password = input.password
+  }
+  return body
 }
 
 export { ApiError }

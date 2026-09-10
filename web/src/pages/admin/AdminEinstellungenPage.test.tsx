@@ -8,6 +8,22 @@ import { ThemeProvider } from '../../context/ThemeContext.tsx'
 
 const SMTP_URL = '/api/v1/admin/settings/smtp'
 const SMTP_TEST_URL = '/api/v1/admin/settings/smtp/test'
+const BACKUP_URL = '/api/v1/admin/settings/backup'
+
+function backupFixture() {
+  return {
+    id: 'id-a',
+    name: 'S3 Ziel',
+    mechanism: 's3',
+    endpoint: 's3.example.com',
+    bucket_or_path: 'bucket',
+    username: 'svc',
+    credential_configured: true,
+    schedule: '0 2 * * *',
+    created_at: '2026-09-10T10:00:00Z',
+    updated_at: '2026-09-10T10:00:00Z',
+  }
+}
 
 function settingsFixture() {
   return {
@@ -246,5 +262,236 @@ describe('AdminEinstellungenPage', () => {
     renderPage()
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Die SMTP-Einstellungen konnten nicht geladen werden.')
+  })
+})
+
+describe('AdminEinstellungenPage Backup tab', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    localStorage.setItem('gear.session_token', 'sesstoken123')
+    localStorage.setItem('gear.permissions', JSON.stringify(['admin.settings.backup']))
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    cleanup()
+  })
+
+  const stubBackupList = (body: unknown) => ({
+    matcher: (url: string, init?: RequestInit) => url === BACKUP_URL && !init?.method,
+    response: { ok: true, status: 200, body },
+  })
+
+  it('TAB_GATING_BACKUP: with only admin.settings.backup the E-Mail tab is hidden and Backup renders', async () => {
+    stubFetchRoutes([stubBackupList([])])
+    renderPage()
+
+    expect(await screen.findByText('Mindestens ein Backup-Ziel ist erforderlich.')).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'Backup' })).toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'E-Mail' })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('SMTP-Host')).not.toBeInTheDocument()
+  })
+
+  it('TAB_GATING_EMAIL: with only admin.settings.email the Backup tab is hidden and E-Mail renders', async () => {
+    localStorage.setItem('gear.permissions', JSON.stringify(['admin.settings.email']))
+    stubFetchRoutes([stubGet(settingsFixture())])
+    renderPage()
+
+    expect(await screen.findByLabelText('SMTP-Host')).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'E-Mail' })).toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'Backup' })).not.toBeInTheDocument()
+  })
+
+  it('EMPTY_LIST: the ≥1 destination warning is shown when none exist', async () => {
+    stubFetchRoutes([stubBackupList([])])
+    renderPage()
+    expect(await screen.findByText('Mindestens ein Backup-Ziel ist erforderlich.')).toBeInTheDocument()
+  })
+
+  it('LIST: destinations render with masked credential state', async () => {
+    stubFetchRoutes([stubBackupList([backupFixture()])])
+    renderPage()
+
+    expect(await screen.findByText('S3 Ziel')).toBeInTheDocument()
+    expect(screen.getByText(/S3-kompatibel · s3\.example\.com · bucket · svc · 0 2 \* \* \*/)).toBeInTheDocument()
+    expect(screen.getByText('Zugangsberechtigung konfiguriert')).toBeInTheDocument()
+    // The credential value is never rendered (write-only, NFR-S4).
+    expect(screen.queryByText('geheim')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Verbindung testen' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Löschen' })).toBeInTheDocument()
+  })
+
+  it('CREATE: the form POSTs and adds the row inline', async () => {
+    const fetchMock = stubFetchRoutes([
+      stubBackupList([]),
+      {
+        matcher: (url, init) => url === BACKUP_URL && init?.method === 'POST',
+        response: { ok: true, status: 201, body: { ...backupFixture(), message: 'Backup-Ziel gespeichert.' } },
+      },
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByText('Mindestens ein Backup-Ziel ist erforderlich.')
+    await user.type(screen.getByLabelText('Name'), 'S3 Ziel')
+    await user.selectOptions(screen.getByLabelText('Mechanismus'), 's3')
+    await user.type(screen.getByLabelText(/Endpunkt \/ Host/), 's3.example.com')
+    await user.type(screen.getByLabelText('Bucket'), 'bucket')
+    await user.type(screen.getByLabelText(/Benutzername/), 'svc')
+    await user.type(screen.getByLabelText(/Zugangsberechtigung/), 'geheim123')
+    await user.click(screen.getByRole('button', { name: 'Speichern' }))
+
+    expect(await screen.findByText('Backup-Ziel gespeichert.')).toBeInTheDocument()
+    const postCall = fetchMock.mock.calls.find(([url, init]) => url === BACKUP_URL && init?.method === 'POST')
+    expect(postCall).toBeTruthy()
+    const body = JSON.parse((postCall![1] as RequestInit).body as string)
+    expect(body.mechanism).toBe('s3')
+    expect(body.bucket_or_path).toBe('bucket')
+    expect(body.password).toBe('geheim123')
+    expect(await screen.findByText('S3 Ziel')).toBeInTheDocument()
+  })
+
+  it('EDIT: Bearbeiten loads the row, PUT omits a blank credential (keeps existing)', async () => {
+    const fetchMock = stubFetchRoutes([
+      stubBackupList([backupFixture()]),
+      {
+        matcher: (url, init) => url === `${BACKUP_URL}/id-a` && init?.method === 'PUT',
+        response: { ok: true, status: 200, body: { ...backupFixture(), name: 'S3 Ziel v2', message: 'Backup-Ziel gespeichert.' } },
+      },
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByText('S3 Ziel')
+    await user.click(screen.getByRole('button', { name: 'Bearbeiten' }))
+    expect(screen.getByRole('heading', { name: 'Backup-Ziel bearbeiten' })).toBeInTheDocument()
+    // The stored credential is masked, not filled in.
+    const passwordInput = screen.getByLabelText(/^Zugangsberechtigung/) as HTMLInputElement
+    expect(passwordInput.value).toBe('')
+    expect(passwordInput).toHaveAttribute('placeholder', '••••••••')
+
+    await user.clear(screen.getByLabelText('Name'))
+    await user.type(screen.getByLabelText('Name'), 'S3 Ziel v2')
+    await user.click(screen.getByRole('button', { name: 'Änderungen speichern' }))
+
+    expect(await screen.findByText('Backup-Ziel gespeichert.')).toBeInTheDocument()
+    const putCall = fetchMock.mock.calls.find(([url, init]) => url === `${BACKUP_URL}/id-a` && init?.method === 'PUT')
+    expect(putCall).toBeTruthy()
+    const body = JSON.parse((putCall![1] as RequestInit).body as string)
+    expect(body.name).toBe('S3 Ziel v2')
+    expect('password' in body).toBe(false)
+    expect(await screen.findByText('S3 Ziel v2')).toBeInTheDocument()
+  })
+
+  it('EDIT_REMOVE_CREDENTIAL: checking Anmeldedaten entfernen sends clear_credential:true and no password', async () => {
+    const fetchMock = stubFetchRoutes([
+      stubBackupList([backupFixture()]),
+      {
+        matcher: (url, init) => url === `${BACKUP_URL}/id-a` && init?.method === 'PUT',
+        response: { ok: true, status: 200, body: { ...backupFixture(), credential_configured: false, message: 'Backup-Ziel gespeichert.' } },
+      },
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByText('S3 Ziel')
+    await user.click(screen.getByRole('button', { name: 'Bearbeiten' }))
+    // The remove affordance appears only when a stored credential exists.
+    const checkbox = screen.getByLabelText(/Anmeldedaten entfernen/)
+    expect(checkbox).not.toBeChecked()
+    // The masked password field is present but empty.
+    const passwordInput = screen.getByLabelText(/^Zugangsberechtigung/) as HTMLInputElement
+    await user.type(passwordInput, 'darf-nicht-reisen')
+    await user.click(checkbox)
+    // Typing is disabled while removal is armed, so the value is cleared.
+    expect(passwordInput).toBeDisabled()
+    expect(passwordInput).toHaveValue('')
+
+    await user.click(screen.getByRole('button', { name: 'Änderungen speichern' }))
+
+    expect(await screen.findByText('Backup-Ziel gespeichert.')).toBeInTheDocument()
+    const putCall = fetchMock.mock.calls.find(([url, init]) => url === `${BACKUP_URL}/id-a` && init?.method === 'PUT')
+    expect(putCall).toBeTruthy()
+    const body = JSON.parse((putCall![1] as RequestInit).body as string)
+    expect(body.clear_credential).toBe(true)
+    expect('password' in body).toBe(false)
+    expect(await screen.findByText('Ohne Zugangsberechtigung')).toBeInTheDocument()
+  })
+
+  it('TEST_OK: Verbindung testen shows the inline success', async () => {
+    stubFetchRoutes([
+      stubBackupList([backupFixture()]),
+      {
+        matcher: (url, init) => url === `${BACKUP_URL}/id-a/test` && init?.method === 'POST',
+        response: { ok: true, status: 200, body: { ok: true, message: 'Verbindung erfolgreich getestet.' } },
+      },
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByText('S3 Ziel')
+    await user.click(screen.getByRole('button', { name: 'Verbindung testen' }))
+
+    expect(await screen.findByText('Verbindung erfolgreich getestet.')).toBeInTheDocument()
+  })
+
+  it('TEST_FAIL: a failed connection shows the inline German error', async () => {
+    stubFetchRoutes([
+      stubBackupList([backupFixture()]),
+      {
+        matcher: (url, init) => url === `${BACKUP_URL}/id-a/test` && init?.method === 'POST',
+        response: { ok: true, status: 200, body: { ok: false, message: 'Die Verbindung zum Backup-Ziel konnte nicht hergestellt werden.' } },
+      },
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByText('S3 Ziel')
+    await user.click(screen.getByRole('button', { name: 'Verbindung testen' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Die Verbindung zum Backup-Ziel konnte nicht hergestellt werden.')
+  })
+
+  it('DELETE: Löschen removes the row and shows the confirmation', async () => {
+    const fetchMock = stubFetchRoutes([
+      stubBackupList([backupFixture()]),
+      {
+        matcher: (url, init) => url === `${BACKUP_URL}/id-a` && init?.method === 'DELETE',
+        response: { ok: true, status: 200, body: { message: 'Backup-Ziel gelöscht.' } },
+      },
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByText('S3 Ziel')
+    await user.click(screen.getByRole('button', { name: 'Löschen' }))
+
+    expect(await screen.findByText('Backup-Ziel gelöscht.')).toBeInTheDocument()
+    expect(screen.queryByText('S3 Ziel')).not.toBeInTheDocument()
+    expect(await screen.findByText('Mindestens ein Backup-Ziel ist erforderlich.')).toBeInTheDocument()
+    const delCall = fetchMock.mock.calls.find(([url, init]) => url === `${BACKUP_URL}/id-a` && init?.method === 'DELETE')
+    expect(delCall).toBeTruthy()
+  })
+
+  it('FORBIDDEN: a 403 on load clears the admin flag and leaves the module', async () => {
+    localStorage.setItem('gear.is_admin', 'true')
+    stubFetchRoutes([
+      { matcher: (url) => url === BACKUP_URL, response: { ok: false, status: 403, body: { error: { code: 'forbidden', message: 'Keine Berechtigung.' } } } },
+    ])
+    renderPage()
+
+    expect(await screen.findByText('Dashboard')).toBeInTheDocument()
+    expect(localStorage.getItem('gear.is_admin')).toBeNull()
+  })
+
+  it('UNAUTHORIZED: a 401 on load clears auth state and redirects to /login', async () => {
+    localStorage.setItem('gear.is_admin', 'true')
+    stubFetchRoutes([
+      { matcher: (url) => url === BACKUP_URL, response: { ok: false, status: 401, body: { error: { code: 'unauthorized', message: 'Authentifizierung erforderlich.' } } } },
+    ])
+    renderPage()
+
+    expect(await screen.findByText('Anmeldung')).toBeInTheDocument()
+    expect(localStorage.getItem('gear.session_token')).toBeNull()
   })
 })

@@ -22,6 +22,7 @@ import (
 	"github.com/saskia-peters/gear/internal/platform/logger"
 	"github.com/saskia-peters/gear/internal/platform/router"
 	admcore "github.com/saskia-peters/gear/internal/admin/core"
+	admbck "github.com/saskia-peters/gear/internal/admin/adapters/backup"
 	adminhttp "github.com/saskia-peters/gear/internal/admin/adapters/http"
 	adminpostgres "github.com/saskia-peters/gear/internal/admin/adapters/postgres"
 	admsmtp "github.com/saskia-peters/gear/internal/admin/adapters/smtp"
@@ -67,15 +68,16 @@ func main() {
 	sessionManager := usercore.NewSessionManager(userRepo, cfg.SessionIdle)
 	userService := usercore.NewService(userRepo, hasher, sessionManager, secretCipher, log)
 
-	// Story 3.1 — materialized Admin hexagon for SMTP settings (FR-28/AD-1):
-	// the Admin-owned smtp_settings store (AD-11), the settings core and the
-	// settings HTTP handler. The core consumes the User module's repository
-	// READ-ONLY for the permission re-check (AD-12) and the audit trail
-	// (NFR-O1/NFR-O2, audit_log is User-owned) — the Admin module never authors
-	// another module's SQL (AD-8/AD-11).
+	// Story 3.1 + 3.2 — materialized Admin hexagon for the settings surfaces
+	// (FR-28/FR-29/AD-1): the Admin-owned smtp_settings + backup_destinations
+	// stores (AD-11/AD-15), the settings core and the settings HTTP handlers.
+	// The core consumes the User module's repository READ-ONLY for the
+	// permission re-check (AD-12) and the audit trail (NFR-O1/NFR-O2,
+	// audit_log is User-owned) — the Admin module never authors another
+	// module's SQL (AD-8/AD-11).
 	adminStore := adminpostgres.New(pool)
 	adminRepo := adminpostgres.NewRepository(adminStore)
-	adminSettingsService := admcore.NewService(adminRepo, secretCipher, userRepo, userRepo, admsmtp.Client{}, log)
+	adminSettingsService := admcore.NewService(adminRepo, adminRepo, secretCipher, userRepo, userRepo, admsmtp.Client{}, admbck.NewTester(), log)
 	adminSettingsHandler := adminhttp.NewHandler(adminSettingsService, log)
 
 	// Password reset email delivery (FR-26/AD-14): Story 3.1 wires the REAL
@@ -105,6 +107,12 @@ func main() {
 	// the core re-checks the same code defense-in-depth.
 	settingsSurface := auth.RequireAnyPermission(sessionManager, userRepo, []string{admcore.SmtpSettingsPermission}, "admin.settings.email access denied", log)(adminSettingsHandler.Routes())
 
+	// The backup-destination surface mounts under /api/v1/admin/settings/backup
+	// with its OWN gate — one permission per surface (AD-6): only holders of
+	// `admin.settings.backup` reach it. The core re-checks the same code
+	// defense-in-depth. It deliberately does NOT widen the SMTP gate above.
+	backupSurface := auth.RequireAnyPermission(sessionManager, userRepo, []string{admcore.BackupSettingsPermission}, "admin.settings.backup access denied", log)(adminSettingsHandler.BackupRoutes())
+
 	// Demo route for the gateway composition tests: any active user holding
 	// `dashboard.view` (all base roles) can reach /api/v1/protected/me.
 	protectedRoute := auth.Route(sessionManager, userRepo, "dashboard.view")
@@ -116,6 +124,7 @@ func main() {
 		router.WithProtected(protectedRoute),
 		router.WithMount("/api/v1/admin", adminSurface),
 		router.WithMount("/api/v1/admin/settings", settingsSurface),
+		router.WithMount("/api/v1/admin/settings/backup", backupSurface),
 	)
 
 	srv := &http.Server{
