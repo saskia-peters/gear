@@ -129,6 +129,15 @@ func (f *fakeToolTypeStore) ArchiveToolType(_ context.Context, id string) (*Tool
 	return nil, ErrToolTypeNotFound
 }
 
+// The combined store dependency (Story 4.3) requires the ToolStore surface
+// too. The tool-type fakes never exercise the tool surface — these stubs keep
+// the shared constructor compilable without touching tool-type tests.
+func (f *fakeToolTypeStore) ListTools(context.Context) ([]*Tool, error) { return []*Tool{}, nil }
+func (f *fakeToolTypeStore) ToolExistsActive(context.Context, string) (bool, error) { return false, nil }
+func (f *fakeToolTypeStore) CreateTool(_ context.Context, _ *Tool) (*Tool, error) { return nil, ErrToolNotFound }
+func (f *fakeToolTypeStore) UpdateTool(_ context.Context, _ *Tool) (*Tool, error) { return nil, ErrToolNotFound }
+func (f *fakeToolTypeStore) ArchiveTool(_ context.Context, _ string) (*Tool, error) { return nil, ErrToolNotFound }
+
 // fakeSchedulesPort is an adminports.SchedulesPort over a fixed ACTIVE catalog.
 type fakeSchedulesPort struct {
 	schedules []*admcore.Schedule

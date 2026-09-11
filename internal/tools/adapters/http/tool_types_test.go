@@ -74,6 +74,25 @@ func (f *fakeService) ArchiveToolType(_ context.Context, _, id string) (*toolsco
 	return &toolscore.ToolType{ID: id, Name: "archiviert"}, nil
 }
 
+// The port contract (Story 4.3) grew the tool methods; the tool-type fakes
+// never exercise the tool surface — these stubs keep the shared Service port
+// compilable without touching the tool-type tests.
+func (f *fakeService) ListTools(_ context.Context, _ string) ([]*toolscore.Tool, error) {
+	return []*toolscore.Tool{}, nil
+}
+
+func (f *fakeService) CreateTool(_ context.Context, _ string, _ toolscore.ToolInput) (*toolscore.Tool, error) {
+	return nil, toolscore.ErrToolNotFound
+}
+
+func (f *fakeService) UpdateTool(_ context.Context, _, _ string, _ toolscore.ToolInput) (*toolscore.Tool, error) {
+	return nil, toolscore.ErrToolNotFound
+}
+
+func (f *fakeService) ArchiveTool(_ context.Context, _, _ string) (*toolscore.Tool, error) {
+	return nil, toolscore.ErrToolNotFound
+}
+
 // toolTypeGateway wraps the REAL ToolTypeRoutes() behind the same
 // RequireAnyPermission gate the composition root uses (tool_types.manage), with
 // a fake session validator + permission resolver.

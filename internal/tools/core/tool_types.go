@@ -193,7 +193,7 @@ type AuditWriter interface {
 // AD-11), the User module's repository READ-ONLY for the permission re-check
 // (AD-12) and the audit trail (NFR-O1/NFR-O2).
 type Service struct {
-	store          ToolTypeStore
+	store          toolModuleStore
 	schedules      adminports.SchedulesPort
 	qualifications userports.QualificationCatalogPort
 	perms          PermissionResolver
@@ -201,12 +201,14 @@ type Service struct {
 	logger         *slog.Logger
 }
 
-// NewService constructs the Tool type service. schedules/qualifications are
-// the read-only consumer ports used only by the write path (FK validation);
-// perms/audit are the User-module repository seams (permission re-check +
-// audit trail). logger may be nil (falls back to slog.Default()); it is used
-// for structured logging of audit-write failures (NFR-O1).
-func NewService(store ToolTypeStore, schedules adminports.SchedulesPort, qualifications userports.QualificationCatalogPort, perms PermissionResolver, audit AuditWriter, logger *slog.Logger) *Service {
+// NewService constructs the Tool service. store is the combined persistence
+// port over the Tool-owned tables (tool types + tools); schedules/
+// qualifications are the read-only consumer ports used only by the write path
+// (FK validation); perms/audit are the User-module repository seams
+// (permission re-check + audit trail). logger may be nil (falls back to
+// slog.Default()); it is used for structured logging of audit-write failures
+// (NFR-O1).
+func NewService(store toolModuleStore, schedules adminports.SchedulesPort, qualifications userports.QualificationCatalogPort, perms PermissionResolver, audit AuditWriter, logger *slog.Logger) *Service {
 	return &Service{store: store, schedules: schedules, qualifications: qualifications, perms: perms, audit: audit, logger: logger}
 }
 

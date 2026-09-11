@@ -13,12 +13,16 @@ import (
 	"github.com/saskia-peters/gear/internal/tools/core"
 )
 
-// Service is the Tool module's inbound configuration port (Story 4.2, AD-10):
-// list/create/update/archive tool types. Every method re-checks the
-// `tool_types.manage` code against the actor's LIVE permission set
-// defense-in-depth (AD-6). Writes are audited with actor, timestamp and
-// operation (NFR-O1/NFR-O2). Update REPLACES the checklist-item list fully; the
-// cross-module FKs are validated through the modules' read-only ports.
+// Service is the Tool module's inbound configuration port (Story 4.2 + 4.3,
+// AD-10): list/create/update/archive tool types AND the physical tools that
+// belong to them. Every method re-checks its own permission code (`tool_types.manage`
+// for the type surface, `tools.manage` for the tool surface) against the
+// actor's LIVE permission set defense-in-depth (AD-6). Writes are audited with
+// actor, timestamp and operation (NFR-O1/NFR-O2). Update REPLACES the
+// tool-type checklist-item list fully; the cross-module FKs are validated
+// through the modules' read-only ports (the tool-type schedule/qualification
+// and the per-tool schedule override), while the tool's type is validated
+// intra-module.
 type Service interface {
 	// ListToolTypes returns every ACTIVE tool type, oldest first, each with its
 	// ordered checklist items (GET_LIST_EMPTY / GET_LIST). Archived rows are
@@ -38,4 +42,24 @@ type Service interface {
 	// the active list. Audited. Archiving an already-archived type answers
 	// ErrToolTypeNotFound.
 	ArchiveToolType(ctx context.Context, actorID, id string) (*core.ToolType, error)
+	// ListTools returns every ACTIVE tool, oldest first, each with its tool
+	// type's display name (GET_LIST_EMPTY / GET_LIST). Archived rows are
+	// filtered server-side.
+	ListTools(ctx context.Context, actorID string) ([]*core.Tool, error)
+	// CreateTool persists a new physical tool. The tool's type must EXIST and
+	// be ACTIVE (intra-module ToolTypeExistsActive); an EMPTY schedule override
+	// is stored as NULL (the tool inherits its type's default, AD-5) while a
+	// non-empty one must be an ACTIVE schedule (SchedulesPort lookup); a
+	// duplicate name answers the German duplicate-name 400. Audited
+	// (tool.create).
+	CreateTool(ctx context.Context, actorID string, input core.ToolInput) (*core.Tool, error)
+	// UpdateTool persists a tool. An EMPTY schedule override CLEARS the stored
+	// override (schedule_id NULL → inherits the type default again, AD-5);
+	// updating an already-archived tool answers ErrToolNotFound (404 sentinel).
+	// Audited (tool.update).
+	UpdateTool(ctx context.Context, actorID, id string, input core.ToolInput) (*core.Tool, error)
+	// ArchiveTool soft-archives one tool: archived_at is set, the row leaves
+	// the active list. Audited. Archiving an already-archived tool answers
+	// ErrToolNotFound.
+	ArchiveTool(ctx context.Context, actorID, id string) (*core.Tool, error)
 }

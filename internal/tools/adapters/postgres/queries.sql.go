@@ -11,6 +11,52 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+const archiveTool = `-- name: ArchiveTool :one
+WITH archived AS (
+    UPDATE tools
+    SET archived_at = now(),
+        updated_at = now()
+    WHERE tools.id = $1 AND tools.archived_at IS NULL
+    RETURNING tools.id, tools.name, tools.tool_type_id, tools.schedule_id, tools.attributes, tools.archived_at, tools.created_at, tools.updated_at
+)
+SELECT a.id, a.name, a.tool_type_id, tt.name AS tool_type_name, a.schedule_id, a.attributes, a.archived_at, a.created_at, a.updated_at
+FROM archived a
+JOIN tool_types tt ON tt.id = a.tool_type_id
+`
+
+type ArchiveToolRow struct {
+	ID           pgtype.UUID        `json:"id"`
+	Name         string             `json:"name"`
+	ToolTypeID   pgtype.UUID        `json:"tool_type_id"`
+	ToolTypeName string             `json:"tool_type_name"`
+	ScheduleID   pgtype.UUID        `json:"schedule_id"`
+	Attributes   []byte             `json:"attributes"`
+	ArchivedAt   pgtype.Timestamptz `json:"archived_at"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+}
+
+// Soft-archive one tool: archived_at = now() (never a hard delete — FK
+// history intact, AD-10), returning the row JOINed with its type name. The
+// `AND archived_at IS NULL` guard makes archiving an already-archived row
+// affect zero rows → ErrToolNotFound (the row is non-existent to the surface).
+func (q *Queries) ArchiveTool(ctx context.Context, id pgtype.UUID) (ArchiveToolRow, error) {
+	row := q.db.QueryRow(ctx, archiveTool, id)
+	var i ArchiveToolRow
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.ToolTypeID,
+		&i.ToolTypeName,
+		&i.ScheduleID,
+		&i.Attributes,
+		&i.ArchivedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
 const archiveToolType = `-- name: ArchiveToolType :one
 UPDATE tool_types
 SET archived_at = now(),
@@ -32,6 +78,64 @@ func (q *Queries) ArchiveToolType(ctx context.Context, id pgtype.UUID) (ToolType
 		&i.DefaultScheduleID,
 		&i.RequiredQualificationID,
 		&i.InspectionMode,
+		&i.Attributes,
+		&i.ArchivedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
+}
+
+const createTool = `-- name: CreateTool :one
+WITH new_tool AS (
+    INSERT INTO tools (name, tool_type_id, schedule_id, attributes)
+    VALUES ($1, $2, $3, $4)
+    RETURNING id, name, tool_type_id, schedule_id, attributes, archived_at, created_at, updated_at
+)
+SELECT nt.id, nt.name, nt.tool_type_id, tt.name AS tool_type_name, nt.schedule_id, nt.attributes, nt.archived_at, nt.created_at, nt.updated_at
+FROM new_tool nt
+JOIN tool_types tt ON tt.id = nt.tool_type_id
+`
+
+type CreateToolParams struct {
+	Name       string      `json:"name"`
+	ToolTypeID pgtype.UUID `json:"tool_type_id"`
+	ScheduleID pgtype.UUID `json:"schedule_id"`
+	Attributes []byte      `json:"attributes"`
+}
+
+type CreateToolRow struct {
+	ID           pgtype.UUID        `json:"id"`
+	Name         string             `json:"name"`
+	ToolTypeID   pgtype.UUID        `json:"tool_type_id"`
+	ToolTypeName string             `json:"tool_type_name"`
+	ScheduleID   pgtype.UUID        `json:"schedule_id"`
+	Attributes   []byte             `json:"attributes"`
+	ArchivedAt   pgtype.Timestamptz `json:"archived_at"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+}
+
+// Insert a tool and return the resulting row JOINed with its type name. The
+// core validated the type EXISTS + ACTIVE and the (optional) schedule override
+// against the SchedulesPort first; an EMPTY schedule_id is passed as NULL
+// (inherit the type default, AD-5). A name already held by ANY row (active or
+// archived) trips the UNIQUE constraint and is mapped by the repository to the
+// German duplicate-name 400.
+func (q *Queries) CreateTool(ctx context.Context, arg CreateToolParams) (CreateToolRow, error) {
+	row := q.db.QueryRow(ctx, createTool,
+		arg.Name,
+		arg.ToolTypeID,
+		arg.ScheduleID,
+		arg.Attributes,
+	)
+	var i CreateToolRow
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.ToolTypeID,
+		&i.ToolTypeName,
+		&i.ScheduleID,
 		&i.Attributes,
 		&i.ArchivedAt,
 		&i.CreatedAt,
@@ -229,6 +333,88 @@ func (q *Queries) ListToolTypes(ctx context.Context) ([]ToolType, error) {
 	return items, nil
 }
 
+const listTools = `-- name: ListTools :many
+
+SELECT t.id, t.name, t.tool_type_id, tt.name AS tool_type_name, t.schedule_id, t.attributes, t.archived_at, t.created_at, t.updated_at
+FROM tools t
+JOIN tool_types tt ON tt.id = t.tool_type_id
+WHERE t.archived_at IS NULL
+ORDER BY t.created_at ASC, t.name ASC
+`
+
+type ListToolsRow struct {
+	ID           pgtype.UUID        `json:"id"`
+	Name         string             `json:"name"`
+	ToolTypeID   pgtype.UUID        `json:"tool_type_id"`
+	ToolTypeName string             `json:"tool_type_name"`
+	ScheduleID   pgtype.UUID        `json:"schedule_id"`
+	Attributes   []byte             `json:"attributes"`
+	ArchivedAt   pgtype.Timestamptz `json:"archived_at"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+}
+
+// ============================================================================
+// Tool queries (Story 4.3, FR-9/FR-10/AD-5/AD-10): the physical tools that
+// belong to a tool type. Every read/write joins the Tool-OWNED `tool_types`
+// for the type display name (AD-8/AD-11: the Tool module only joins ITS OWN
+// tables — the cross-module schedules override is validated through the Admin
+// SchedulesPort, never by joining the Admin tables).
+// ============================================================================
+// The ACTIVE tool catalog (FR-9/AD-10), each with its tool type's display name
+// (JOIN on Tool-owned tool_types). Archived rows (archived_at NOT NULL) are
+// filtered out — the active surface never shows them. The order is
+// deterministic: created_at ASC with a name tiebreaker. An empty schedule_id
+// (SQL NULL) means the tool inherits its type's default schedule (AD-5).
+func (q *Queries) ListTools(ctx context.Context) ([]ListToolsRow, error) {
+	rows, err := q.db.Query(ctx, listTools)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListToolsRow
+	for rows.Next() {
+		var i ListToolsRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.Name,
+			&i.ToolTypeID,
+			&i.ToolTypeName,
+			&i.ScheduleID,
+			&i.Attributes,
+			&i.ArchivedAt,
+			&i.CreatedAt,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const toolExistsActive = `-- name: ToolExistsActive :one
+SELECT EXISTS (
+    SELECT 1 FROM tools
+    WHERE id = $1 AND archived_at IS NULL
+)
+`
+
+// A lean existence check used by the update path to resolve the archived
+// sentinel BEFORE the duplicate-name guard (so updating an unknown/archived id
+// never answers a duplicate-name 400). Reports whether the row exists AND is
+// still active (archived_at IS NULL); the store maps a false result to
+// ErrToolNotFound.
+func (q *Queries) ToolExistsActive(ctx context.Context, id pgtype.UUID) (bool, error) {
+	row := q.db.QueryRow(ctx, toolExistsActive, id)
+	var exists bool
+	err := row.Scan(&exists)
+	return exists, err
+}
+
 const toolTypeExistsActive = `-- name: ToolTypeExistsActive :one
 SELECT EXISTS (
     SELECT 1 FROM tool_types
@@ -246,6 +432,72 @@ func (q *Queries) ToolTypeExistsActive(ctx context.Context, id pgtype.UUID) (boo
 	var exists bool
 	err := row.Scan(&exists)
 	return exists, err
+}
+
+const updateTool = `-- name: UpdateTool :one
+WITH updated AS (
+    UPDATE tools
+    SET name = $2,
+        tool_type_id = $3,
+        schedule_id = $4,
+        attributes = $5,
+        updated_at = now()
+    WHERE tools.id = $1 AND tools.archived_at IS NULL
+    RETURNING tools.id, tools.name, tools.tool_type_id, tools.schedule_id, tools.attributes, tools.archived_at, tools.created_at, tools.updated_at
+)
+SELECT u.id, u.name, u.tool_type_id, tt.name AS tool_type_name, u.schedule_id, u.attributes, u.archived_at, u.created_at, u.updated_at
+FROM updated u
+JOIN tool_types tt ON tt.id = u.tool_type_id
+`
+
+type UpdateToolParams struct {
+	ID         pgtype.UUID `json:"id"`
+	Name       string      `json:"name"`
+	ToolTypeID pgtype.UUID `json:"tool_type_id"`
+	ScheduleID pgtype.UUID `json:"schedule_id"`
+	Attributes []byte      `json:"attributes"`
+}
+
+type UpdateToolRow struct {
+	ID           pgtype.UUID        `json:"id"`
+	Name         string             `json:"name"`
+	ToolTypeID   pgtype.UUID        `json:"tool_type_id"`
+	ToolTypeName string             `json:"tool_type_name"`
+	ScheduleID   pgtype.UUID        `json:"schedule_id"`
+	Attributes   []byte             `json:"attributes"`
+	ArchivedAt   pgtype.Timestamptz `json:"archived_at"`
+	CreatedAt    pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+}
+
+// Replace one ACTIVE tool's core fields and refresh updated_at, returning the
+// row JOINed with its type name. The `AND archived_at IS NULL` guard makes an
+// update against an already-archived row affect zero rows → ErrToolNotFound
+// (soft archive is irreversible in V1; the archived row is non-existent to the
+// surface). The schedule override REPLACES the stored value, so clearing it
+// (schedule_id NULL) makes the tool inherit its type's default again
+// (UPDATE_CLEAR_OVERRIDE, AD-5).
+func (q *Queries) UpdateTool(ctx context.Context, arg UpdateToolParams) (UpdateToolRow, error) {
+	row := q.db.QueryRow(ctx, updateTool,
+		arg.ID,
+		arg.Name,
+		arg.ToolTypeID,
+		arg.ScheduleID,
+		arg.Attributes,
+	)
+	var i UpdateToolRow
+	err := row.Scan(
+		&i.ID,
+		&i.Name,
+		&i.ToolTypeID,
+		&i.ToolTypeName,
+		&i.ScheduleID,
+		&i.Attributes,
+		&i.ArchivedAt,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+	)
+	return i, err
 }
 
 const updateToolType = `-- name: UpdateToolType :one

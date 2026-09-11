@@ -143,6 +143,12 @@ func main() {
 	// defense-in-depth. It deliberately does NOT widen any existing gate.
 	toolTypesSurface := auth.RequireAnyPermission(sessionManager, userRepo, []string{toolscore.ToolTypesManagePermission}, "tool_types.manage access denied", log)(toolHandler.ToolTypeRoutes())
 
+	// The tool surface mounts under /api/v1/admin/tools with its OWN gate — one
+	// permission per surface (AD-6/AD-10): only holders of `tools.manage`
+	// reach it (Story 4.3). The core re-checks the same code
+	// defense-in-depth. It deliberately does NOT widen the tool_types gate.
+	toolToolsSurface := auth.RequireAnyPermission(sessionManager, userRepo, []string{toolscore.ToolsManagePermission}, "tools.manage access denied", log)(toolHandler.ToolRoutes())
+
 	// Demo route for the gateway composition tests: any active user holding
 	// `dashboard.view` (all base roles) can reach /api/v1/protected/me.
 	protectedRoute := auth.Route(sessionManager, userRepo, "dashboard.view")
@@ -157,6 +163,7 @@ func main() {
 		router.WithMount("/api/v1/admin/settings/backup", backupSurface),
 		router.WithMount("/api/v1/admin/settings/schedules", schedulesSurface),
 		router.WithMount("/api/v1/admin/tool-types", toolTypesSurface),
+		router.WithMount("/api/v1/admin/tools", toolToolsSurface),
 	)
 
 	srv := &http.Server{

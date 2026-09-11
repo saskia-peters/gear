@@ -8,6 +8,17 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type Tool struct {
+	ID         pgtype.UUID        `json:"id"`
+	Name       string             `json:"name"`
+	ToolTypeID pgtype.UUID        `json:"tool_type_id"`
+	ScheduleID pgtype.UUID        `json:"schedule_id"`
+	Attributes []byte             `json:"attributes"`
+	ArchivedAt pgtype.Timestamptz `json:"archived_at"`
+	CreatedAt  pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt  pgtype.Timestamptz `json:"updated_at"`
+}
+
 type ToolType struct {
 	ID                      pgtype.UUID        `json:"id"`
 	Name                    string             `json:"name"`

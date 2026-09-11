@@ -6,12 +6,17 @@ import { adminForbiddenHandled, clearAuthState, getPermissions } from '../../aut
 import { filteredAdminNav } from '../../auth/permissions.ts'
 import {
   TOOL_TYPES_PERMISSION,
+  TOOLS_PERMISSION,
   listToolTypes,
   createToolType,
   updateToolType,
   archiveToolType,
+  listTools,
+  createTool,
+  updateTool,
+  archiveTool,
 } from '../../auth/tools.ts'
-import type { ToolType, InspectionMode } from '../../auth/tools.ts'
+import type { ToolType, Tool, InspectionMode } from '../../auth/tools.ts'
 import { listSchedules } from '../../auth/settings.ts'
 import type { Schedule } from '../../auth/settings.ts'
 import { listQualifications } from '../../auth/qualifications.ts'
@@ -22,20 +27,24 @@ import styles from './AdminWerkzeugePage.module.css'
 type Feedback = { kind: 'success' | 'error'; message: string } | null
 type Tab = 'typen' | 'werkzeuge'
 
-// AdminWerkzeugePage is the Tool catalogue surface (Story 4.2, FR-8/FR-10/
-// FR-23/UX-DR6/UX-DR8): a tab bar over "Typen" (tool types, gated by
-// tool_types.manage) and "Werkzeuge" (physical tools — Story 4.3 fills it;
-// until then an honest empty state). The type editor offers Name, the default
-// schedule dropdown (reusing the schedule-catalog client, AD-16), the required
-// qualification dropdown (reusing the qualification-vocabulary client, AD-7),
-// the inspection-mode switch and an ordered checklist-item editor when mode is
-// checklist. Inline German feedback, sticky actions, ≥48px targets, 401→login,
-// 403→leave the admin module. The server remains the source of truth.
+// AdminWerkzeugePage is the Tool catalogue surface (Story 4.2 + 4.3, FR-8/
+// FR-9/FR-10/FR-23/UX-DR6/UX-DR8): a tab bar over "Typen" (tool types, gated
+// by tool_types.manage) and "Werkzeuge" (physical tools, gated by tools.manage,
+// AD-6). The type editor offers Name, the default schedule dropdown (reusing
+// the schedule-catalog client, AD-16), the required qualification dropdown
+// (reusing the qualification-vocabulary client, AD-7), the inspection-mode
+// switch and an ordered checklist-item editor when mode is checklist. The tool
+// editor offers Name, a tool-type dropdown and the OPTIONAL schedule-override
+// dropdown (default option "Standard für diesen Typ" = inherit the type
+// default, AD-5). Inline German feedback, sticky actions, ≥48px targets,
+// 401→login, 403→leave the admin module. The server remains the source of
+// truth.
 export function AdminWerkzeugePage() {
   const navigate = useNavigate()
   const perms = getPermissions()
   const canToolTypes = perms.includes(TOOL_TYPES_PERMISSION)
-  const [activeTab, setActiveTab] = useState<Tab>(canToolTypes ? 'typen' : 'werkzeuge')
+  const canTools = perms.includes(TOOLS_PERMISSION)
+  const [activeTab, setActiveTab] = useState<Tab>(canToolTypes ? 'typen' : canTools ? 'werkzeuge' : 'typen')
 
   const handleApiError = useCallback(
     (err: unknown): boolean => {
@@ -78,34 +87,35 @@ export function AdminWerkzeugePage() {
                 Typen
               </button>
             )}
-            <button
-              type="button"
-              id="tab-werkzeuge"
-              role="tab"
-              aria-selected={activeTab === 'werkzeuge'}
-              aria-controls="panel-werkzeuge"
-              className={activeTab === 'werkzeuge' ? styles.tabActive : styles.tab}
-              onClick={() => setActiveTab('werkzeuge')}
-            >
-              Werkzeuge
-            </button>
+            {canTools && (
+              <button
+                type="button"
+                id="tab-werkzeuge"
+                role="tab"
+                aria-selected={activeTab === 'werkzeuge'}
+                aria-controls="panel-werkzeuge"
+                className={activeTab === 'werkzeuge' ? styles.tabActive : styles.tab}
+                onClick={() => setActiveTab('werkzeuge')}
+              >
+                Werkzeuge
+              </button>
+            )}
           </div>
 
           {activeTab === 'typen' && canToolTypes ? (
             <div id="panel-typen" role="tabpanel" aria-labelledby="tab-typen">
               <ToolTypesTab onApiError={handleApiError} />
             </div>
+          ) : activeTab === 'werkzeuge' && canTools ? (
+            <div id="panel-werkzeuge" role="tabpanel" aria-labelledby="tab-werkzeuge">
+              <ToolsTab onApiError={handleApiError} />
+            </div>
           ) : (
-            <div
-              id="panel-werkzeuge"
-              role="tabpanel"
-              aria-labelledby="tab-werkzeuge"
-              className={styles.emptyStateWrap}
-            >
-              <EmptyState
-                message="Keine Werkzeuge vorhanden"
-                description="Die Verwaltung einzelner Werkzeuge folgt in einem späteren Schritt."
-              />
+            // The fallback only renders when NEITHER Tab tab is shown, so it
+            // carries no tabpanel/aria-labelledby wiring (a panel must not
+            // reference a tab that does not exist).
+            <div className={styles.emptyStateWrap}>
+              <EmptyState message="Keine Werkzeuge vorhanden" description="Werkzeuge und Gerätetypen sind für dein Konto nicht verfügbar." />
             </div>
           )}
         </main>
@@ -456,6 +466,324 @@ function ToolTypesTab({ onApiError }: { onApiError: (err: unknown) => boolean })
                       className={styles.dangerButton}
                       disabled={busy}
                       onClick={() => void archive(tt)}
+                    >
+                      Archivieren
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
+        </>
+      )}
+    </>
+  )
+}
+
+// ToolsTab is the "Werkzeuge" surface (Story 4.3, FR-9/FR-10/AD-5/AD-6): the
+// active physical-tool list (each with its tool type's display name), a
+// create/edit form (Name + mandatory tool-type dropdown + OPTIONAL
+// schedule-override dropdown whose default option is EXACTLY "Standard für
+// diesen Typ" = inherit the type's default, AD-5) and a per-row archive action
+// with a confirm. No checklist items, no inspection mode — tools carry neither.
+function ToolsTab({ onApiError }: { onApiError: (err: unknown) => boolean }) {
+  const [loaded, setLoaded] = useState(false)
+  const [loadError, setLoadError] = useState('')
+  const [tools, setTools] = useState<Tool[]>([])
+  const [toolTypes, setToolTypes] = useState<ToolType[]>([])
+  const [schedules, setSchedules] = useState<Schedule[]>([])
+  const [busy, setBusy] = useState(false)
+  const [feedback, setFeedback] = useState<Feedback>(null)
+
+  const [editingId, setEditingId] = useState<string | null>(null)
+  const [name, setName] = useState('')
+  const [toolTypeId, setToolTypeId] = useState('')
+  const [scheduleId, setScheduleId] = useState('')
+
+  useEffect(() => {
+    let cancelled = false
+    async function run() {
+      // PRIMARY content load: the tool list. A 401/403 HERE is authoritative —
+      // the caller cannot reach the Werkzeuge surface, so the existing auth
+      // handling (401→login, 403→leave module) applies.
+      try {
+        const items = await listTools()
+        if (!cancelled) setTools(items)
+      } catch (err) {
+        if (cancelled) return
+        if (!onApiError(err)) {
+          setLoadError('Die Werkzeuge konnten nicht geladen werden.')
+        }
+      } finally {
+        if (!cancelled) setLoaded(true)
+      }
+      if (cancelled) return
+
+      // BEST-EFFORT dropdown population: tool types and schedules are SEPARATE
+      // catalog surfaces gated by their OWN permissions (tool_types.manage /
+      // schedules.manage). A holder of tools.manage WITHOUT those codes gets a
+      // 403 here — the catalog fetch degrades to an EMPTY dropdown and the tool
+      // list still renders; it must never eject from the module (only a 401/403
+      // on the tools request itself may trigger the auth handling).
+      const [types, scheds] = await Promise.all([
+        listToolTypes().catch(() => [] as ToolType[]),
+        listSchedules().catch(() => [] as Schedule[]),
+      ])
+      if (cancelled) return
+      const loadedTypes = Array.isArray(types) ? types : []
+      const loadedScheds = Array.isArray(scheds) ? scheds : []
+      setToolTypes(loadedTypes)
+      setSchedules(loadedScheds)
+      // Fresh create form: auto-select the first tool type so the save is
+      // immediately valid (the form is disabled until a type is chosen). The
+      // schedule override is OPTIONAL — the fresh form starts on the
+      // "Standard für diesen Typ" option (empty → inherit, AD-5).
+      if (loadedTypes.length > 0) {
+        setToolTypeId((cur) => (cur === '' ? loadedTypes[0].id : cur))
+      }
+    }
+    void run()
+    return () => {
+      cancelled = true
+    }
+  }, [onApiError])
+
+  function resetForm() {
+    setEditingId(null)
+    setName('')
+    setToolTypeId(toolTypes[0]?.id ?? '')
+    setScheduleId('')
+  }
+
+  function startEdit(tool: Tool) {
+    setEditingId(tool.id)
+    setName(tool.name)
+    // Only carry over the stored tool type when the freshly-loaded catalog
+    // actually contains it: a degraded/empty catalog (e.g. a 403 on the type
+    // fetch) must fall back to '' so canSave turns off instead of showing a
+    // blank select with an enabled save.
+    setToolTypeId(
+      toolTypes.some((tt) => tt.id === tool.tool_type_id) ? tool.tool_type_id : '',
+    )
+    // A stale schedule override (its schedule was archived since the tool was
+    // saved) must not be resubmitted — clear it to '' (the inherit default,
+    // AD-5) instead of failing the save with an unclear 400.
+    setScheduleId(
+      schedules.some((s) => s.id === tool.schedule_id) ? tool.schedule_id : '',
+    )
+    setFeedback(null)
+  }
+
+  async function save() {
+    setBusy(true)
+    setFeedback(null)
+    const input = {
+      name: name.trim(),
+      tool_type_id: toolTypeId,
+      schedule_id: scheduleId,
+      attributes: {},
+    }
+    try {
+      if (editingId) {
+        const saved = await updateTool(editingId, input)
+        setTools((prev) => prev.map((t) => (t.id === editingId ? saved : t)))
+        setFeedback({ kind: 'success', message: saved.message })
+        resetForm()
+      } else {
+        const created = await createTool(input)
+        setTools((prev) => [...prev, created])
+        setFeedback({ kind: 'success', message: created.message })
+        resetForm()
+      }
+    } catch (err) {
+      if (onApiError(err)) return
+      setFeedback({
+        kind: 'error',
+        message: err instanceof Error ? err.message : 'Das Werkzeug konnte nicht gespeichert werden.',
+      })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function archive(tool: Tool) {
+    const ok = window.confirm(
+      `Werkzeug „${tool.name}“ wirklich archivieren? Archivierte Werkzeuge können nicht mehr bearbeitet werden.`,
+    )
+    if (!ok) return
+    setBusy(true)
+    setFeedback(null)
+    try {
+      const result = await archiveTool(tool.id)
+      setTools((prev) => prev.filter((x) => x.id !== tool.id))
+      setFeedback({ kind: 'success', message: result.message })
+      if (editingId === tool.id) resetForm()
+    } catch (err) {
+      if (onApiError(err)) return
+      setFeedback({
+        kind: 'error',
+        message: err instanceof Error ? err.message : 'Das Werkzeug konnte nicht archiviert werden.',
+      })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  // A tool cannot be saved without a tool type (a mandatory FK). When the type
+  // catalog is empty (degraded fetch or genuinely unpopulated) the save is
+  // disabled with an inline hint instead of submitting a 400-ing placeholder.
+  // The schedule override is OPTIONAL (AD-5) and never blocks the save.
+  const canSave = toolTypeId !== ''
+
+  return (
+    <>
+      {feedback && (
+        <p
+          role={feedback.kind === 'error' ? 'alert' : 'status'}
+          className={feedback.kind === 'error' ? styles.feedbackError : styles.feedbackSuccess}
+        >
+          {feedback.message}
+        </p>
+      )}
+      {loadError && (
+        <p role="alert" className={styles.feedbackError}>
+          {loadError}
+        </p>
+      )}
+
+      {!loaded ? (
+        <div className={styles.skeleton} aria-busy="true" aria-label="Werkzeuge werden geladen">
+          <div className={styles.skeletonRow} aria-hidden="true" />
+          <div className={styles.skeletonRow} aria-hidden="true" />
+        </div>
+      ) : (
+        <>
+          <form
+            className={styles.editor}
+            onSubmit={(e) => {
+              e.preventDefault()
+              void save()
+            }}
+          >
+            <div className={styles.formHeader}>
+              <h3 className={styles.formTitle}>{editingId ? 'Werkzeug bearbeiten' : 'Neues Werkzeug'}</h3>
+              <div className={styles.formHeaderActions}>
+                <button type="submit" className={styles.saveButton} disabled={busy || !canSave}>
+                  {busy ? 'Wird gespeichert...' : editingId ? 'Änderungen speichern' : 'Speichern'}
+                </button>
+                {editingId && (
+                  <button type="button" className={styles.testButton} disabled={busy} onClick={resetForm}>
+                    Abbrechen
+                  </button>
+                )}
+              </div>
+            </div>
+            {!canSave && (
+              <p role="status" className={styles.emptyHint}>
+                Wähle einen Gerätetyp aus, um zu speichern.
+              </p>
+            )}
+
+            <div className={styles.field}>
+              <label className={styles.label} htmlFor="tool-name">
+                Name
+              </label>
+              <input
+                id="tool-name"
+                className={styles.input}
+                value={name}
+                onChange={(e) => {
+                  setName(e.target.value)
+                  setFeedback(null)
+                }}
+                maxLength={255}
+                autoComplete="off"
+              />
+            </div>
+
+            <div className={styles.fieldRow}>
+              <div className={styles.field}>
+                <label className={styles.label} htmlFor="tool-type">
+                  Gerätetyp
+                </label>
+                <select
+                  id="tool-type"
+                  className={styles.select}
+                  value={toolTypeId}
+                  onChange={(e) => {
+                    setToolTypeId(e.target.value)
+                    setFeedback(null)
+                  }}
+                >
+                  {toolTypes.length === 0 && <option value="">Keine Gerätetypen vorhanden</option>}
+                  {toolTypes.map((tt) => (
+                    <option key={tt.id} value={tt.id}>
+                      {tt.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+              <div className={styles.field}>
+                <label className={styles.label} htmlFor="tool-schedule">
+                  Zeitplan
+                </label>
+                <select
+                  id="tool-schedule"
+                  className={styles.select}
+                  value={scheduleId}
+                  onChange={(e) => {
+                    setScheduleId(e.target.value)
+                    setFeedback(null)
+                  }}
+                >
+                  {/* The DEFAULT/empty option is EXACTLY "Standard für diesen
+                      Typ" — empty schedule_id means the tool inherits its type's
+                      default schedule (AD-5). It is ALWAYS the single valid
+                      empty-value option: an empty schedule catalog still allows
+                      the inherit default (the override is optional, never
+                      blocks the save). */}
+                  <option value="">Standard für diesen Typ</option>
+                  {schedules.map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                    </option>
+                  ))}
+                </select>
+              </div>
+            </div>
+          </form>
+
+          {tools.length === 0 && (
+            <p role="status" className={styles.emptyHint}>
+              Keine Werkzeuge vorhanden. Lege das erste Werkzeug an.
+            </p>
+          )}
+
+          {tools.length > 0 && (
+            <ul className={styles.list} aria-label="Werkzeuge">
+              {tools.map((tool) => (
+                <li key={tool.id} className={styles.row}>
+                  <div className={styles.rowInfo}>
+                    <span className={styles.rowName}>{tool.name}</span>
+                    <span className={styles.rowMeta}>{tool.tool_type_name}</span>
+                    {tool.schedule_id !== '' && (
+                      <span className={styles.rowMeta}>Zeitplan überschrieben</span>
+                    )}
+                  </div>
+                  <div className={styles.rowActions}>
+                    <button
+                      type="button"
+                      className={styles.rowButton}
+                      disabled={busy}
+                      onClick={() => startEdit(tool)}
+                    >
+                      Bearbeiten
+                    </button>
+                    <button
+                      type="button"
+                      className={styles.dangerButton}
+                      disabled={busy}
+                      onClick={() => void archive(tool)}
                     >
                       Archivieren
                     </button>

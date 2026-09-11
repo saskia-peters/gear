@@ -88,3 +88,88 @@ SET archived_at = now(),
     updated_at = now()
 WHERE id = $1 AND archived_at IS NULL
 RETURNING id, name, default_schedule_id, required_qualification_id, inspection_mode, attributes, archived_at, created_at, updated_at;
+
+-- ============================================================================
+-- Tool queries (Story 4.3, FR-9/FR-10/AD-5/AD-10): the physical tools that
+-- belong to a tool type. Every read/write joins the Tool-OWNED `tool_types`
+-- for the type display name (AD-8/AD-11: the Tool module only joins ITS OWN
+-- tables — the cross-module schedules override is validated through the Admin
+-- SchedulesPort, never by joining the Admin tables).
+-- ============================================================================
+
+-- name: ListTools :many
+-- The ACTIVE tool catalog (FR-9/AD-10), each with its tool type's display name
+-- (JOIN on Tool-owned tool_types). Archived rows (archived_at NOT NULL) are
+-- filtered out — the active surface never shows them. The order is
+-- deterministic: created_at ASC with a name tiebreaker. An empty schedule_id
+-- (SQL NULL) means the tool inherits its type's default schedule (AD-5).
+SELECT t.id, t.name, t.tool_type_id, tt.name AS tool_type_name, t.schedule_id, t.attributes, t.archived_at, t.created_at, t.updated_at
+FROM tools t
+JOIN tool_types tt ON tt.id = t.tool_type_id
+WHERE t.archived_at IS NULL
+ORDER BY t.created_at ASC, t.name ASC;
+
+-- name: ToolExistsActive :one
+-- A lean existence check used by the update path to resolve the archived
+-- sentinel BEFORE the duplicate-name guard (so updating an unknown/archived id
+-- never answers a duplicate-name 400). Reports whether the row exists AND is
+-- still active (archived_at IS NULL); the store maps a false result to
+-- ErrToolNotFound.
+SELECT EXISTS (
+    SELECT 1 FROM tools
+    WHERE id = $1 AND archived_at IS NULL
+);
+
+-- name: CreateTool :one
+-- Insert a tool and return the resulting row JOINed with its type name. The
+-- core validated the type EXISTS + ACTIVE and the (optional) schedule override
+-- against the SchedulesPort first; an EMPTY schedule_id is passed as NULL
+-- (inherit the type default, AD-5). A name already held by ANY row (active or
+-- archived) trips the UNIQUE constraint and is mapped by the repository to the
+-- German duplicate-name 400.
+WITH new_tool AS (
+    INSERT INTO tools (name, tool_type_id, schedule_id, attributes)
+    VALUES ($1, $2, $3, $4)
+    RETURNING id, name, tool_type_id, schedule_id, attributes, archived_at, created_at, updated_at
+)
+SELECT nt.id, nt.name, nt.tool_type_id, tt.name AS tool_type_name, nt.schedule_id, nt.attributes, nt.archived_at, nt.created_at, nt.updated_at
+FROM new_tool nt
+JOIN tool_types tt ON tt.id = nt.tool_type_id;
+
+-- name: UpdateTool :one
+-- Replace one ACTIVE tool's core fields and refresh updated_at, returning the
+-- row JOINed with its type name. The `AND archived_at IS NULL` guard makes an
+-- update against an already-archived row affect zero rows → ErrToolNotFound
+-- (soft archive is irreversible in V1; the archived row is non-existent to the
+-- surface). The schedule override REPLACES the stored value, so clearing it
+-- (schedule_id NULL) makes the tool inherit its type's default again
+-- (UPDATE_CLEAR_OVERRIDE, AD-5).
+WITH updated AS (
+    UPDATE tools
+    SET name = $2,
+        tool_type_id = $3,
+        schedule_id = $4,
+        attributes = $5,
+        updated_at = now()
+    WHERE tools.id = $1 AND tools.archived_at IS NULL
+    RETURNING tools.id, tools.name, tools.tool_type_id, tools.schedule_id, tools.attributes, tools.archived_at, tools.created_at, tools.updated_at
+)
+SELECT u.id, u.name, u.tool_type_id, tt.name AS tool_type_name, u.schedule_id, u.attributes, u.archived_at, u.created_at, u.updated_at
+FROM updated u
+JOIN tool_types tt ON tt.id = u.tool_type_id;
+
+-- name: ArchiveTool :one
+-- Soft-archive one tool: archived_at = now() (never a hard delete — FK
+-- history intact, AD-10), returning the row JOINed with its type name. The
+-- `AND archived_at IS NULL` guard makes archiving an already-archived row
+-- affect zero rows → ErrToolNotFound (the row is non-existent to the surface).
+WITH archived AS (
+    UPDATE tools
+    SET archived_at = now(),
+        updated_at = now()
+    WHERE tools.id = $1 AND tools.archived_at IS NULL
+    RETURNING tools.id, tools.name, tools.tool_type_id, tools.schedule_id, tools.attributes, tools.archived_at, tools.created_at, tools.updated_at
+)
+SELECT a.id, a.name, a.tool_type_id, tt.name AS tool_type_name, a.schedule_id, a.attributes, a.archived_at, a.created_at, a.updated_at
+FROM archived a
+JOIN tool_types tt ON tt.id = a.tool_type_id;

@@ -78,3 +78,10 @@ Triage output of review loops — real, non-story-blocking findings that are not
   summary: DSGVO Account Deletion (Story 3.4) is postponed to AFTER Epic 4 for the same reason as 3.3 — it rewrites inspector references in inspection history to "Deleted User", but no inspection/tool data exists yet; the irreversibility + audit guarantee is safer to build once the real cross-module lifecycle port (AD-8) exists.
   evidence: Story 3.4 AC (FR-24/FR-18) requires "all inspection records stay fully intact" with the anonymous placeholder — impossible to verify meaningfully before inspection data exists. Deferred with Story 3.3.
   recommended: schedule 3.4 together with 3.3 after Epic 4; revisit in the Epic 3 retrospective.
+
+## Deferred from: scope split (2026-09-09) of spec-4-3-tool-management.md
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-4-3-tool-management.md`
+  summary: Inventory-number system for tools — a unique `inventory_number` column (text, char not number-only), auto-assigned `GEAR` + incrementing number (sequence) on manual creation, editable afterward by `tool.edit`/`tools.manage` holders, and a UNIQUE backstop so a CSV/Excel import row whose inventory number already exists is rejected.
+  evidence: The spec exceeded the 1600-token scope standard; the tool CRUD surface (create/edit/archive, type + optional schedule override) is independently shippable, while the inventory-number system is a cohesive secondary goal (new scoped `tool.edit` permission seed + role grants, `tools_inventory_number_seq`, auto-assignment, edit-gating, and the Story 4.5 import-interplay). The user chose [S] Split.
+  recommended: implement as a follow-up story right after 4.3 (a migration adding the column + sequence, the `tool.edit` permission seed, and the editor field); the import duplicate-rejection reuses the UNIQUE constraint as the backstop in Story 4.5.
