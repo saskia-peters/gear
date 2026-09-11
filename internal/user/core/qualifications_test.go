@@ -454,3 +454,37 @@ func TestQualificationStatusDerivation(t *testing.T) {
 		t.Errorf("Befristet status = %q, want %q (fixed vocabulary badge)", got["Befristet"], QualificationStatusFixed)
 	}
 }
+func TestQualificationExistsCatalogPort(t *testing.T) {
+	// The ungated QualificationCatalogPort (AD-7/AD-11): the Tool module's
+	// FK-validation seam. It reports whether a qualification id is in the
+	// vocabulary, with NO permission re-check (the trusted internal read path).
+	repo := qualificationsRepo()
+	svc := usersAdminService(t, repo)
+
+	exists, err := svc.QualificationExists(context.Background(), "q-ketten")
+	if err != nil {
+		t.Fatalf("QualificationExists(known) err = %v", err)
+	}
+	if !exists {
+		t.Error("QualificationExists(q-ketten) = false, want true")
+	}
+
+	exists, err = svc.QualificationExists(context.Background(), "q-missing")
+	if err != nil {
+		t.Fatalf("QualificationExists(unknown) err = %v", err)
+	}
+	if exists {
+		t.Error("QualificationExists(q-missing) = true, want false")
+	}
+
+	// The port is ungated: even a caller without qualifications.manage may
+	// resolve the existence (the Tool write path calls it with the acting
+	// admin's actor id only for the permission re-check, never for this).
+	exists, err = svc.QualificationExists(context.Background(), "q-ketten")
+	if err != nil {
+		t.Fatalf("QualificationExists (no-actor path) err = %v", err)
+	}
+	if !exists {
+		t.Error("QualificationExists(q-ketten) = false via ungated path, want true")
+	}
+}

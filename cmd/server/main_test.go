@@ -19,6 +19,9 @@ import (
 	"github.com/saskia-peters/gear/internal/platform/auth"
 	"github.com/saskia-peters/gear/internal/platform/crypto"
 	"github.com/saskia-peters/gear/internal/platform/router"
+	toolhttp "github.com/saskia-peters/gear/internal/tools/adapters/http"
+	toolscore "github.com/saskia-peters/gear/internal/tools/core"
+	toolports "github.com/saskia-peters/gear/internal/tools/ports"
 	usercore "github.com/saskia-peters/gear/internal/user/core"
 	userports "github.com/saskia-peters/gear/internal/user/ports"
 )
@@ -498,6 +501,182 @@ func TestCompositionScheduleWriteVerbs(t *testing.T) {
 	}
 	rec = doComposedJSONRequest(nonHolder, "tok", http.MethodPost, "/api/v1/admin/settings/schedules/id-a/archive", "")
 	if rec.Code != http.StatusForbidden {
+		t.Errorf("email-only POST archive: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+}
+// compToolTypeService is an in-memory toolports.Service for the tool-type
+// surface. It implements the same inbound port main.go wires (the real core).
+type compToolTypeService struct{}
+
+func (s *compToolTypeService) ListToolTypes(_ context.Context, _ string) ([]*toolscore.ToolType, error) {
+	return []*toolscore.ToolType{}, nil
+}
+
+func (s *compToolTypeService) CreateToolType(_ context.Context, _ string, input toolscore.ToolTypeInput) (*toolscore.ToolType, error) {
+	return &toolscore.ToolType{ID: "id", Name: input.Name, DefaultScheduleID: input.DefaultScheduleID, RequiredQualificationID: input.RequiredQualificationID, InspectionMode: input.InspectionMode}, nil
+}
+
+func (s *compToolTypeService) UpdateToolType(_ context.Context, _, id string, input toolscore.ToolTypeInput) (*toolscore.ToolType, error) {
+	return &toolscore.ToolType{ID: id, Name: input.Name}, nil
+}
+
+func (s *compToolTypeService) ArchiveToolType(_ context.Context, _, id string) (*toolscore.ToolType, error) {
+	return &toolscore.ToolType{ID: id, Name: "archiviert"}, nil
+}
+
+var _ toolports.Service = (*compToolTypeService)(nil)
+
+// newCompositionToolTypeRouter mirrors the main() mounts exactly for the Story
+// 4.2 tool-type surface: /api/v1/admin, /api/v1/admin/settings (SMTP gate),
+// /api/v1/admin/settings/backup (backup gate), /api/v1/admin/settings/schedules
+// (schedules gate) and /api/v1/admin/tool-types (its OWN tool_types.manage
+// gate), all through the REAL RequireAnyPermission middleware and router.New.
+// This pins the one-permission-per-surface mount ordering (AD-6): the
+// more-specific tool-types sub-mount must win for /api/v1/admin/tool-types/*, a
+// caller holding only admin.settings.email must NOT reach it, and a caller
+// holding ONLY tool_types.manage reaches it (no existing gate is widened).
+func newCompositionToolTypeRouter(perms []string, session *usercore.Session) http.Handler {
+	log := discardLogger()
+	validator := &compValidator{session: session}
+	resolver := &compResolver{perms: perms}
+
+	settingsHandler := adminhttp.NewHandler(&compSettingsService{}, log)
+	settingsSurface := auth.RequireAnyPermission(validator, resolver, []string{admcore.SmtpSettingsPermission}, "admin.settings.email access denied", log)(settingsHandler.Routes())
+	backupSurface := auth.RequireAnyPermission(validator, resolver, []string{admcore.BackupSettingsPermission}, "admin.settings.backup access denied", log)(settingsHandler.BackupRoutes())
+	schedulesSurface := auth.RequireAnyPermission(validator, resolver, []string{admcore.SchedulesPermission}, "schedules.manage access denied", log)(settingsHandler.ScheduleRoutes())
+
+	toolHandler := toolhttp.NewHandler(&compToolTypeService{}, log)
+	toolTypesSurface := auth.RequireAnyPermission(validator, resolver, []string{toolscore.ToolTypesManagePermission}, "tool_types.manage access denied", log)(toolHandler.ToolTypeRoutes())
+
+	outer := chi.NewRouter()
+	outer.Get("/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"module":"admin","status":"ok"}`))
+	})
+	outerSurface := auth.RequireAnyPermission(validator, resolver, usercore.AdminModuleAccessCodes(), "admin access denied", log)(outer)
+
+	return router.New(stubPinger{}, log,
+		router.WithMount("/api/v1/admin", outerSurface),
+		router.WithMount("/api/v1/admin/settings", settingsSurface),
+		router.WithMount("/api/v1/admin/settings/backup", backupSurface),
+		router.WithMount("/api/v1/admin/settings/schedules", schedulesSurface),
+		router.WithMount("/api/v1/admin/tool-types", toolTypesSurface),
+	)
+}
+
+func doToolTypesComposedRequest(h http.Handler, token string) *httptest.ResponseRecorder {
+	return doComposedJSONRequest(h, token, http.MethodGet, "/api/v1/admin/tool-types", "")
+}
+
+// TestCompositionToolTypesMountGating verifies the Story 4.2 composition-root
+// wiring: /api/v1/admin/tool-types is gated by ITS OWN tool_types.manage
+// permission (AD-6/AD-10) — a caller holding only admin.settings.email gets the
+// uniform 403 (the SMTP gate is NOT widened), while a tool_types.manage holder
+// reaches the surface (and, via the outer gate, the admin module root). The
+// reverse is also pinned: a tool-types-only holder is denied the SMTP surface
+// (its code opens only the tool-types mount).
+func TestCompositionToolTypesMountGating(t *testing.T) {
+	// 401: no token.
+	if rec := doToolTypesComposedRequest(newCompositionToolTypeRouter([]string{}, nil), ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no token: status = %d, want 401", rec.Code)
+	}
+
+	// 403: a caller holding ONLY admin.settings.email must NOT reach the
+	// tool-types surface — the gates are separate (one permission per surface).
+	rec := doToolTypesComposedRequest(newCompositionToolTypeRouter([]string{admcore.SmtpSettingsPermission}, activeUser("u-mail", "mail@gear.local")), "tok")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("admin.settings.email holder: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// 403: a caller holding an unrelated admin code is denied with no tool-type
+	// data exposed.
+	rec = doToolTypesComposedRequest(newCompositionToolTypeRouter([]string{"dashboard.view"}, activeUser("u-vol", "vol@gear.local")), "tok")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("non-admin holder: status = %d, want 403", rec.Code)
+	}
+	if strings.Contains(strings.ToLower(rec.Body.String()), "gerätetyp") {
+		t.Errorf("403 body leaks tool-type data: %s", rec.Body.String())
+	}
+
+	// 200: a caller holding ONLY tool_types.manage reaches the tool-types
+	// surface (empty list from the in-memory service) — proves the tool-types
+	// sub-mount is chosen over the outer admin-module mount (mount ordering
+	// correct).
+	toolRouter := newCompositionToolTypeRouter([]string{toolscore.ToolTypesManagePermission}, activeUser("u-tools", "tools@gear.local"))
+	rec = doToolTypesComposedRequest(toolRouter, "tok")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tool_types.manage holder: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if strings.TrimSpace(rec.Body.String()) != "[]" {
+		t.Errorf("tool-type response = %s, want empty JSON array", rec.Body.String())
+	}
+
+	// REVERSE: the tool-types-only holder must NOT reach the SMTP surface (the
+	// tool-types gate does not widen the admin.settings.email gate).
+	if rec := doComposedJSONRequest(toolRouter, "tok", http.MethodGet, "/api/v1/admin/settings/smtp", ""); rec.Code != http.StatusForbidden {
+		t.Errorf("tool-types-only holder on SMTP: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// 200: the same holder reaches the outer admin-module root (tool_types.manage
+	// is part of AdminModuleAccessCodes).
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rootRec := httptest.NewRecorder()
+	newCompositionToolTypeRouter([]string{toolscore.ToolTypesManagePermission}, activeUser("u-tools", "tools@gear.local")).ServeHTTP(rootRec, req)
+	if rootRec.Code != http.StatusOK {
+		t.Errorf("admin root: status = %d, want 200", rootRec.Code)
+	}
+}
+
+// TestCompositionToolTypesWriteVerbs verifies the Story 4.2 write verbs through
+// the REAL RequireAnyPermission mount: a tool_types.manage holder can POST
+// (create), PUT (update) and POST /{id}/archive on the composed tool-types
+// surface, while a non-holder (email-only) is denied all of them with the
+// uniform 403.
+func TestCompositionToolTypesWriteVerbs(t *testing.T) {
+	body := `{"name":"Bohrmaschine","default_schedule_id":"id-s1","required_qualification_id":"id-q1","inspection_mode":"checklist","items":[{"label":"Kabel"}]}`
+	holder := newCompositionToolTypeRouter([]string{toolscore.ToolTypesManagePermission}, activeUser("u-tools", "tools@gear.local"))
+
+	// POST create as a tool-types-only holder → 201.
+	rec := doComposedJSONRequest(holder, "tok", http.MethodPost, "/api/v1/admin/tool-types", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("holder POST create: status = %d, want 201 (body %s)", rec.Code, rec.Body.String())
+	}
+	var createBody map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &createBody); err != nil {
+		t.Fatalf("decoding create response err = %v", err)
+	}
+	if createBody["message"] != toolscore.MsgToolTypeSaved {
+		t.Errorf("create message = %v, want %q", createBody["message"], toolscore.MsgToolTypeSaved)
+	}
+
+	// PUT update as a tool-types-only holder → 200.
+	rec = doComposedJSONRequest(holder, "tok", http.MethodPut, "/api/v1/admin/tool-types/id-a", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("holder PUT update: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// POST /{id}/archive as a tool-types-only holder → 200.
+	rec = doComposedJSONRequest(holder, "tok", http.MethodPost, "/api/v1/admin/tool-types/id-a/archive", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("holder POST archive: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var archiveBody map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &archiveBody); err != nil {
+		t.Fatalf("decoding archive response err = %v", err)
+	}
+	if archiveBody["message"] != toolscore.MsgToolTypeArchived {
+		t.Errorf("archive message = %v, want %q", archiveBody["message"], toolscore.MsgToolTypeArchived)
+	}
+
+	// Non-holder (email-only) is denied all write verbs with the uniform 403.
+	nonHolder := newCompositionToolTypeRouter([]string{admcore.SmtpSettingsPermission}, activeUser("u-mail", "mail@gear.local"))
+	if rec := doComposedJSONRequest(nonHolder, "tok", http.MethodPost, "/api/v1/admin/tool-types", body); rec.Code != http.StatusForbidden {
+		t.Errorf("email-only POST create: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	if rec := doComposedJSONRequest(nonHolder, "tok", http.MethodPut, "/api/v1/admin/tool-types/id-a", body); rec.Code != http.StatusForbidden {
+		t.Errorf("email-only PUT update: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	if rec := doComposedJSONRequest(nonHolder, "tok", http.MethodPost, "/api/v1/admin/tool-types/id-a/archive", ""); rec.Code != http.StatusForbidden {
 		t.Errorf("email-only POST archive: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
 	}
 }

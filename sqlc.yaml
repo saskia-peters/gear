@@ -61,3 +61,20 @@ sql:
         out: "./internal/admin/adapters/postgres"
         sql_package: "pgx/v5"
         emit_json_tags: true
+  # Story 4.2: the Tool hexagon's own store (Epic 4). Schema scoped to the
+  # Tool-owned migrations only. The tool_types + tool_type_checklist_items
+  # tables reference the Admin schedules catalog and the User qualifications
+  # vocabulary by FK, but the Tool module never joins those modules' tables —
+  # the write path validates the FKs through the modules' read-only ports
+  # (AD-7/AD-10/AD-11).
+  - engine: "postgresql"
+    schema:
+      - "./migrations/000021_tool_types.up.sql"
+      - "./migrations/000022_tool_type_checklist_items_unique_position.up.sql"
+    queries: "./internal/tools/adapters/postgres/queries.sql"
+    gen:
+      go:
+        package: "postgres"
+        out: "./internal/tools/adapters/postgres"
+        sql_package: "pgx/v5"
+        emit_json_tags: true

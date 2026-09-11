@@ -360,6 +360,24 @@ func (s *Service) UpdateQualification(ctx context.Context, actor *User, id strin
 	}}, nil
 }
 
+// QualificationExists implements the read-only QualificationCatalogPort
+// (AD-7/AD-11): an ungated existence check over the qualification vocabulary,
+// consumed by the Tool module (Story 4.2) to validate its
+// required_qualification_id FK — the Tool write path never joins user tables.
+// No actor, no permission re-check: this is the trusted internal read path.
+func (s *Service) QualificationExists(ctx context.Context, id string) (bool, error) {
+	quals, err := s.repo.ListQualificationVocabulary(ctx)
+	if err != nil {
+		return false, fmt.Errorf("user core: failed to check qualification existence: %w", err)
+	}
+	for _, q := range quals {
+		if q.ID == id {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
 // ListQualificationAssignees returns the users currently assigned a
 // qualification (id + display name), ordered by name (Story 2.7). An unknown
 // id maps to ErrQualificationNotFound → 404. Gated by `qualifications.manage`

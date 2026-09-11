@@ -26,6 +26,9 @@ import (
 	adminhttp "github.com/saskia-peters/gear/internal/admin/adapters/http"
 	adminpostgres "github.com/saskia-peters/gear/internal/admin/adapters/postgres"
 	admsmtp "github.com/saskia-peters/gear/internal/admin/adapters/smtp"
+	toolhttp "github.com/saskia-peters/gear/internal/tools/adapters/http"
+	toolpostgres "github.com/saskia-peters/gear/internal/tools/adapters/postgres"
+	toolscore "github.com/saskia-peters/gear/internal/tools/core"
 	userhttp "github.com/saskia-peters/gear/internal/user/adapters/http"
 	userpostgres "github.com/saskia-peters/gear/internal/user/adapters/postgres"
 	usercore "github.com/saskia-peters/gear/internal/user/core"
@@ -120,6 +123,26 @@ func main() {
 	// widen the SMTP/backup gates above.
 	schedulesSurface := auth.RequireAnyPermission(sessionManager, userRepo, []string{admcore.SchedulesPermission}, "schedules.manage access denied", log)(adminSettingsHandler.ScheduleRoutes())
 
+	// Story 4.2 — materialized Tool hexagon for the tool-type surface
+	// (FR-8/FR-10/FR-23/AD-1/AD-10): the Tool-owned tool_types store, the tools
+	// core and the tools HTTP handlers. The core consumes the Admin module's
+	// read-only SchedulesPort (validates the default_schedule_id FK is ACTIVE,
+	// AD-16), the User module's read-only QualificationCatalogPort (validates
+	// the required_qualification_id FK exists, AD-7/AD-11) and the User
+	// repository READ-ONLY for the permission re-check (AD-12) and the audit
+	// trail (NFR-O1/NFR-O2) — the Tool module never joins another module's
+	// tables (AD-7/AD-10/AD-11).
+	toolStore := toolpostgres.New(pool)
+	toolRepo := toolpostgres.NewRepository(toolStore)
+	toolService := toolscore.NewService(toolRepo, adminSettingsService, userService, userRepo, userRepo, log)
+	toolHandler := toolhttp.NewHandler(toolService, log)
+
+	// The tool-type surface mounts under /api/v1/admin/tool-types with its OWN
+	// gate — one permission per surface (AD-6/AD-10): only holders of
+	// `tool_types.manage` reach it. The core re-checks the same code
+	// defense-in-depth. It deliberately does NOT widen any existing gate.
+	toolTypesSurface := auth.RequireAnyPermission(sessionManager, userRepo, []string{toolscore.ToolTypesManagePermission}, "tool_types.manage access denied", log)(toolHandler.ToolTypeRoutes())
+
 	// Demo route for the gateway composition tests: any active user holding
 	// `dashboard.view` (all base roles) can reach /api/v1/protected/me.
 	protectedRoute := auth.Route(sessionManager, userRepo, "dashboard.view")
@@ -133,6 +156,7 @@ func main() {
 		router.WithMount("/api/v1/admin/settings", settingsSurface),
 		router.WithMount("/api/v1/admin/settings/backup", backupSurface),
 		router.WithMount("/api/v1/admin/settings/schedules", schedulesSurface),
+		router.WithMount("/api/v1/admin/tool-types", toolTypesSurface),
 	)
 
 	srv := &http.Server{

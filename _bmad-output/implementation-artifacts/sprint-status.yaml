@@ -73,7 +73,7 @@ development_status:
 
   epic-4: in-progress
   4-1-schedule-catalog-management: done
-  4-2-tool-type-management: backlog
+  4-2-tool-type-management: done
   4-3-tool-management: backlog
   4-4-flexible-attributes-on-tools-tool-types: backlog
   4-5-bulk-csv-import: backlog

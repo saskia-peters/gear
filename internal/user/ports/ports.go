@@ -270,3 +270,13 @@ type ResetEmailSender interface {
 	SendPasswordResetEmail(ctx context.Context, email, resetLink string) error
 	Configured() bool
 }
+
+// QualificationCatalogPort is the ungated read-only qualification-vocabulary
+// consumer port (AD-7/AD-11): the Tool module (Story 4.2) validates its
+// required_qualification_id FK against it — never by joining user tables.
+// Implemented by the User core Service.
+type QualificationCatalogPort interface {
+	// QualificationExists reports whether the qualification id is present in
+	// the vocabulary.
+	QualificationExists(ctx context.Context, id string) (bool, error)
+}

@@ -9,9 +9,9 @@ Layout mirrors the other hexagons:
 
 | Path        | Purpose |
 |-------------|---------|
-| `core/`     | Domain core (empty until Epic 2). |
-| `ports/`    | Port interfaces. |
-| `adapters/` | Outbound adapters (sqlc PostgreSQL store arrives with Epic 2). |
+| `core/`     | Domain core — Story 4.2 materializes tool-type management (`tool_types.go`). |
+| `ports/`    | Port interfaces (inbound config service + consumed module ports). |
+| `adapters/` | Outbound adapters — sqlc PostgreSQL store + HTTP surface (Story 4.2). |
 
 No other module writes its tables; configuration goes through its exported
 configuration port (AD-10).
