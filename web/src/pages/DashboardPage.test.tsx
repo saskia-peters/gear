@@ -7,12 +7,13 @@ import { ThemeProvider } from '../context/ThemeContext.tsx'
 
 const DASHBOARD_TOOLS_URL = '/api/v1/tools'
 
-function dashboardToolFixture(id: string, name: string, toolTypeName = 'Bohrmaschine') {
+function dashboardToolFixture(id: string, name: string, toolTypeName = 'Bohrmaschine', inventoryNumber = 'GEAR00000X') {
   return {
     id,
     name,
     tool_type_id: 'id-t1',
     tool_type_name: toolTypeName,
+    inventory_number: inventoryNumber,
   }
 }
 
@@ -52,10 +53,10 @@ describe('DashboardPage Werkzeugliste (Story 4-3b)', () => {
     cleanup()
   })
 
-  it('GET_LIST: renders each active tool as name + type name + "verfügbar" (green)', async () => {
+  it('GET_LIST: renders each active tool as name + type name + inventory number + "verfügbar" (green)', async () => {
     stubFetchTools([
-      dashboardToolFixture('id-w1', 'Bohrmaschine-01'),
-      dashboardToolFixture('id-w2', 'Bohrmaschine-02', 'Schleifmaschine'),
+      dashboardToolFixture('id-w1', 'Bohrmaschine-01', 'Bohrmaschine', 'GEAR000001'),
+      dashboardToolFixture('id-w2', 'Bohrmaschine-02', 'Schleifmaschine', 'GEAR000002'),
     ])
     renderPage()
 
@@ -64,6 +65,9 @@ describe('DashboardPage Werkzeugliste (Story 4-3b)', () => {
     expect(screen.getByText('Bohrmaschine-02')).toBeInTheDocument()
     // Type names: one row is Bohrmaschine, the other Schleifmaschine.
     expect(screen.getByText('Schleifmaschine')).toBeInTheDocument()
+    // DASHBOARD (Story 4-3b): the inventory number shows as row meta.
+    expect(screen.getByText('GEAR000001')).toBeInTheDocument()
+    expect(screen.getByText('GEAR000002')).toBeInTheDocument()
     // Every listed tool carries the static "verfügbar" label.
     expect(screen.getAllByText('verfügbar')).toHaveLength(2)
     // No status derivation (Story 6.1 owns it): no Green/Orange/Red chips.

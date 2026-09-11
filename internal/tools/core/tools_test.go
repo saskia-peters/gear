@@ -153,19 +153,21 @@ func newToolService(perms ...string) (*Service, *fakeToolStore, *fakeAudit) {
 
 func toolInput() ToolInput {
 	return ToolInput{
-		Name:       "Bohrmaschine-01",
-		ToolTypeID: "id-t1",
-		ScheduleID: "",
+		Name:            "Bohrmaschine-01",
+		ToolTypeID:      "id-t1",
+		ScheduleID:      "",
+		InventoryNumber: "GEAR000001",
 	}
 }
 
 func toolFixture(id, name string) *Tool {
 	return &Tool{
-		ID:           id,
-		Name:         name,
-		ToolTypeID:   "id-t1",
-		ToolTypeName: "Bohrmaschine",
-		ScheduleID:   "id-s1",
+		ID:              id,
+		Name:            name,
+		ToolTypeID:      "id-t1",
+		ToolTypeName:    "Bohrmaschine",
+		ScheduleID:      "id-s1",
+		InventoryNumber: "GEAR00000X",
 	}
 }
 
@@ -234,6 +236,11 @@ func TestCreateToolValid(t *testing.T) {
 	}
 	if len(store.created[0].Attributes) != 0 {
 		t.Errorf("attributes = %v, want empty map default", store.created[0].Attributes)
+	}
+	// CREATE_AUTO: the inventory number is NOT carried by the create path — the
+	// store auto-assigns it in-SQL (the core never forwards a client value).
+	if store.created[0].InventoryNumber != "" {
+		t.Errorf("persisted inventory_number = %q, want empty (server auto-assigns on create)", store.created[0].InventoryNumber)
 	}
 	if len(audit.events) != 1 || audit.events[0].operation != AuditOperationToolCreate {
 		t.Fatalf("audit events = %+v, want one create audit", audit.events)
@@ -534,6 +541,37 @@ func TestUpdateToolArchivedSentinelWinsOverInvalidFK(t *testing.T) {
 	}
 }
 
+func TestUpdateToolArchivedSentinelWinsOverInvalidInventory(t *testing.T) {
+	// The archived-sentinel-wins-over-400 contract (finding 12) extended to the
+	// inventory number: an update against an already-archived (or unknown) id
+	// answers the 404 sentinel EVEN when the submitted body carries an EMPTY or
+	// over-long inventory number (which would 400 a live tool) — the existence
+	// check runs BEFORE the inventory validation.
+	svc, store, _ := newToolService()
+	archived := toolFixture("id-arch", "Alt")
+	now := time.Now()
+	archived.ArchivedAt = &now
+	store.tools = []*Tool{archived}
+
+	for _, mutate := range []func(*ToolInput){
+		func(in *ToolInput) { in.InventoryNumber = "" },        // UPDATE_CLEAR: would 400 a live tool
+		func(in *ToolInput) { in.InventoryNumber = strings.Repeat("x", 17) }, // over-long: would 400 a live tool
+	} {
+		input := toolInput()
+		mutate(&input)
+		if _, err := svc.UpdateTool(context.Background(), actorID, "id-arch", input); !errors.Is(err, ErrToolNotFound) {
+			var inv *InvalidToolError
+			if errors.As(err, &inv) {
+				t.Fatalf("err = %v (InvalidToolError %q), want ErrToolNotFound (404 sentinel wins over 400)", err, inv.Message)
+			}
+			t.Fatalf("archived id with invalid inventory: err = %v, want ErrToolNotFound", err)
+		}
+		if _, err := svc.UpdateTool(context.Background(), actorID, "id-missing", input); !errors.Is(err, ErrToolNotFound) {
+			t.Fatalf("unknown id with invalid inventory: err = %v, want ErrToolNotFound", err)
+		}
+	}
+}
+
 func TestArchiveTool(t *testing.T) {
 	// ARCHIVE: archived_at set, the row leaves the active list, audited
 	// (tool.archive).
@@ -669,6 +707,174 @@ func TestToolsEmptyActorNeverPasses(t *testing.T) {
 	svc.perms = &fakePerms{perms: []string{ToolsManagePermission}}
 	if _, err := svc.ListTools(context.Background(), ""); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("err = %v, want ErrForbidden", err)
+	}
+}
+
+func TestCreateToolIgnoresClientInventory(t *testing.T) {
+	// CREATE_IGNORE_CLIENT: a client-sent inventory_number on create is IGNORED —
+	// the persisted tool carries an EMPTY number (the store auto-assigns
+	// 'GEAR%06d' in-SQL). Nothing is validated against the client value.
+	svc, store, _ := newToolService()
+	input := toolInput()
+	input.InventoryNumber = "GEAR999999"
+	got, err := svc.CreateTool(context.Background(), actorID, input)
+	if err != nil {
+		t.Fatalf("CreateTool err = %v", err)
+	}
+	if got.InventoryNumber != "" {
+		t.Errorf("returned inventory_number = %q, want empty (server-assigned, not yet set at the core)", got.InventoryNumber)
+	}
+	if len(store.created) != 1 || store.created[0].InventoryNumber != "" {
+		t.Fatalf("persisted = %+v, want the client inventory ignored (empty)", store.created)
+	}
+}
+
+func TestUpdateToolInventory(t *testing.T) {
+	// UPDATE_INVENTORY: editing a tool with a new inventory number persists it
+	// (bounded, non-empty), audited (tool.update).
+	svc, store, audit := newToolService()
+	store.tools = []*Tool{toolFixture("id-a", "Bohrmaschine-01")}
+
+	input := toolInput()
+	input.InventoryNumber = "GEAR000042"
+	got, err := svc.UpdateTool(context.Background(), actorID, "id-a", input)
+	if err != nil {
+		t.Fatalf("UpdateTool err = %v", err)
+	}
+	if got.InventoryNumber != "GEAR000042" {
+		t.Errorf("inventory_number = %q, want GEAR000042", got.InventoryNumber)
+	}
+	if len(store.updated) != 1 || store.updated[0].InventoryNumber != "GEAR000042" {
+		t.Errorf("persisted = %+v, want the edited inventory number", store.updated)
+	}
+	if len(audit.events) != 1 || audit.events[0].operation != AuditOperationToolUpdate {
+		t.Fatalf("audit events = %+v, want one update audit", audit.events)
+	}
+}
+
+func TestUpdateToolInventoryCleared(t *testing.T) {
+	// UPDATE_CLEAR: an EMPTY inventory_number is rejected 400 — a tool always
+	// has an inventory number, it can never be cleared.
+	svc, store, _ := newToolService()
+	store.tools = []*Tool{toolFixture("id-a", "Bohrmaschine-01")}
+
+	input := toolInput()
+	input.InventoryNumber = "  "
+	_, err := svc.UpdateTool(context.Background(), actorID, "id-a", input)
+	var inv *InvalidToolError
+	if !errors.As(err, &inv) {
+		t.Fatalf("err = %v, want *InvalidToolError", err)
+	}
+	if inv.Message != MsgToolInventoryNumberRequired {
+		t.Errorf("message = %q, want %q", inv.Message, MsgToolInventoryNumberRequired)
+	}
+	if !errors.Is(err, ErrToolInvalid) {
+		t.Errorf("err = %v, want unwraps to ErrToolInvalid", err)
+	}
+	if len(store.updated) != 0 {
+		t.Error("cleared-inventory update must not persist")
+	}
+}
+
+func TestUpdateToolInventoryTooLong(t *testing.T) {
+	// UPDATE_INVENTORY too long: a number over the 16-rune bound is rejected 400.
+	svc, store, _ := newToolService()
+	store.tools = []*Tool{toolFixture("id-a", "Bohrmaschine-01")}
+
+	input := toolInput()
+	input.InventoryNumber = "GEAR" + strings.Repeat("0", 13) // 17 runes
+	_, err := svc.UpdateTool(context.Background(), actorID, "id-a", input)
+	var inv *InvalidToolError
+	if !errors.As(err, &inv) {
+		t.Fatalf("err = %v, want *InvalidToolError", err)
+	}
+	if inv.Message != MsgToolInventoryNumberTooLong {
+		t.Errorf("message = %q, want %q", inv.Message, MsgToolInventoryNumberTooLong)
+	}
+	if len(store.updated) != 0 {
+		t.Error("over-long inventory update must not persist")
+	}
+}
+
+func TestUpdateToolInventoryDuplicate(t *testing.T) {
+	// UPDATE_INVENTORY uniqueness: an inventory number already held by ANOTHER
+	// ACTIVE tool (case-insensitive) is rejected with the German duplicate 400.
+	svc, store, _ := newToolService()
+	store.tools = []*Tool{
+		toolFixture("id-a", "Bohrmaschine-01"),
+		{ID: "id-b", Name: "Bohrmaschine-02", ToolTypeID: "id-t1", ToolTypeName: "Bohrmaschine", ScheduleID: "id-s1", InventoryNumber: "GEAR000002"},
+	}
+
+	input := toolInput()
+	input.InventoryNumber = "gear000002" // case-variant of id-b's number
+	_, err := svc.UpdateTool(context.Background(), actorID, "id-a", input)
+	var inv *InvalidToolError
+	if !errors.As(err, &inv) {
+		t.Fatalf("err = %v, want *InvalidToolError", err)
+	}
+	if inv.Message != MsgToolInventoryNumberTaken {
+		t.Errorf("message = %q, want %q", inv.Message, MsgToolInventoryNumberTaken)
+	}
+	if !errors.Is(err, ErrToolInvalid) {
+		t.Errorf("err = %v, want unwraps to ErrToolInvalid", err)
+	}
+	if len(store.updated) != 0 {
+		t.Error("duplicate-inventory update must not persist")
+	}
+}
+
+func TestUpdateToolKeepsItsInventoryNumber(t *testing.T) {
+	// The dominant edit flow keeps the tool's inventory number: the exceptID
+	// exclusion in the duplicate guard must let a tool keep its OWN number (a
+	// regression there would break every inventory-preserving edit).
+	svc, store, _ := newToolService()
+	store.tools = []*Tool{toolFixture("id-a", "Bohrmaschine-01")}
+
+	input := toolInput() // inventory "GEAR000001" == the stored "GEAR00000X"? No:
+	// the stored fixture uses GEAR00000X; keep it unchanged by passing it.
+	input.InventoryNumber = "GEAR00000X"
+	got, err := svc.UpdateTool(context.Background(), actorID, "id-a", input)
+	if err != nil {
+		t.Fatalf("UpdateTool(keep inventory) err = %v, want success", err)
+	}
+	if got.InventoryNumber != "GEAR00000X" {
+		t.Errorf("inventory_number = %q, want unchanged GEAR00000X", got.InventoryNumber)
+	}
+	if len(store.updated) != 1 {
+		t.Fatalf("updated = %d, want 1", len(store.updated))
+	}
+}
+
+func TestToolEditOnlyGate(t *testing.T) {
+	// GATE (Story 4-3b): a tool.edit-ONLY holder (no tools.manage) can
+	// ListTools + UpdateTool (any-of) but CreateTool + ArchiveTool answer
+	// ErrForbidden (tools.manage-only).
+	svc, store, _ := newToolService(ToolEditPermission)
+	store.tools = []*Tool{toolFixture("id-a", "Bohrmaschine-01")}
+
+	got, err := svc.ListTools(context.Background(), actorID)
+	if err != nil {
+		t.Fatalf("ListTools err = %v, want success for a tool.edit holder", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("tools = %d, want 1", len(got))
+	}
+
+	if _, err := svc.UpdateTool(context.Background(), actorID, "id-a", toolInput()); err != nil {
+		t.Fatalf("UpdateTool err = %v, want success for a tool.edit holder", err)
+	}
+
+	if _, err := svc.CreateTool(context.Background(), actorID, toolInput()); !errors.Is(err, ErrForbidden) {
+		t.Errorf("create err = %v, want ErrForbidden for a tool.edit-only holder", err)
+	}
+	if _, err := svc.ArchiveTool(context.Background(), actorID, "id-a"); !errors.Is(err, ErrForbidden) {
+		t.Errorf("archive err = %v, want ErrForbidden for a tool.edit-only holder", err)
+	}
+	if len(store.created) != 0 {
+		t.Error("tool.edit-only holder must not reach the store create")
+	}
+	if len(store.archivedIDs) != 0 {
+		t.Error("tool.edit-only holder must not reach the store archive")
 	}
 }
 

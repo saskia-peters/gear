@@ -52,14 +52,30 @@ type toolTypeWriteDTO struct {
 
 // Handler serves the Tool HTTP surface.
 type Handler struct {
-	service toolports.Service
-	logger  *slog.Logger
+	service            toolports.Service
+	sessionValidator   auth.SessionValidator
+	permissionResolver auth.PermissionResolver
+	logger             *slog.Logger
 }
 
-// NewHandler constructs the Tool HTTP handler. logger may be nil — the handlers
-// never log through a nil logger (log() falls back to slog.Default()).
-func NewHandler(service toolports.Service, logger *slog.Logger) *Handler {
-	return &Handler{service: service, logger: logger}
+// NewHandler constructs the Tool HTTP handler. sessionValidator /
+// permissionResolver are the real auth-gateway seams used by the ToolRoutes
+// write-only sub-gate (Spec 4-3b: POST/archive re-apply a tools.manage-only
+// RequireAnyPermission inside the router, mirroring the admin sub-surface
+// precedent) — the composition root passes the SessionManager + user Repository
+// it already hands to every other mount. A NIL validator/resolver is a
+// composition-root wiring defect and PANICS here (mirroring the admin module's
+// nil-logger guard) instead of failing at request time inside the write sub-gate.
+// logger may be nil — the handlers never log through a nil logger (log() falls
+// back to slog.Default()).
+func NewHandler(service toolports.Service, sessionValidator auth.SessionValidator, permissionResolver auth.PermissionResolver, logger *slog.Logger) *Handler {
+	if service == nil {
+		panic("tools http: service is not wired")
+	}
+	if sessionValidator == nil || permissionResolver == nil {
+		panic("tools http: auth-gateway seams (session validator + permission resolver) are not wired — the ToolRoutes write sub-gate needs them")
+	}
+	return &Handler{service: service, sessionValidator: sessionValidator, permissionResolver: permissionResolver, logger: logger}
 }
 
 // log returns the configured logger or slog.Default() so a nil logger can never

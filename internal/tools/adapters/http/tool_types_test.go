@@ -101,7 +101,7 @@ func (f *fakeService) ArchiveTool(_ context.Context, _, _ string) (*toolscore.To
 // RequireAnyPermission gate the composition root uses (tool_types.manage), with
 // a fake session validator + permission resolver.
 func toolTypeGateway(perms []string, session *usercore.Session, svc toolports.Service) http.Handler {
-	h := NewHandler(svc, discardLogger())
+	h := NewHandler(svc, &gateValidator{session: session}, &gateResolver{perms: perms}, discardLogger())
 	return auth.RequireAnyPermission(
 		&gateValidator{session: session},
 		&gateResolver{perms: perms},

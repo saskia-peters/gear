@@ -88,6 +88,7 @@ export function DashboardPage() {
                   <div className={styles.rowInfo}>
                     <span className={styles.rowName}>{tool.name}</span>
                     <span className={styles.rowMeta}>{tool.tool_type_name}</span>
+                    <span className={styles.rowMeta}>{tool.inventory_number}</span>
                   </div>
                   <span className={styles.available}>verfügbar</span>
                 </li>

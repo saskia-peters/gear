@@ -67,14 +67,16 @@ sql:
   # vocabulary by FK, and the tools table (000024) references tool_types
   # (intra-module) + schedules (override) — but the Tool module never joins
   # another module's tables — the write path validates the cross-module FKs
-  # through the modules' read-only ports (AD-7/AD-10/AD-11). 000024 is appended
-  # to THIS block only (per-module scoping, AD-8/AD-11).
+  # through the modules' read-only ports (AD-7/AD-10/AD-11). 000024/000025 are
+  # appended to THIS block only (per-module scoping, AD-8/AD-11). 000025 also
+  # seeds the tool.edit permission (data INSERTs, ignored by sqlc).
   - engine: "postgresql"
     schema:
       - "./migrations/000021_tool_types.up.sql"
       - "./migrations/000022_tool_type_checklist_items_unique_position.up.sql"
       - "./migrations/000023_tool_type_qualification_optional.up.sql"
       - "./migrations/000024_tools.up.sql"
+      - "./migrations/000025_tool_inventory_number.up.sql"
     queries: "./internal/tools/adapters/postgres/queries.sql"
     gen:
       go:

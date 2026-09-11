@@ -18,7 +18,7 @@ migrations.
 > drop-qualification-vocab-expiry, `000016` user-account-approve permission,
 > `000017` SMTP settings, `000018` backup destinations, `000019` schedules,
 > `000020` schedule seed names German. Each is documented alongside its story;
-> this file highlights the milestone cold-start and the current Story 4.2/4.3
+> this file highlights the milestone cold-start and the current Story 4.2/4.3/4-3b
 > set.
 
 The table below lists the current story set:
@@ -29,6 +29,7 @@ The table below lists the current story set:
 | `000022_tool_type_checklist_items_unique_position.up/down.sql` | 4.2 review | `UNIQUE (tool_type_id, position)` on the ordered child rows (nondeterministic-ordering backstop). |
 | `000023_tool_type_qualification_optional.up/down.sql` | 4.2 review | The tool type's required qualification becomes OPTIONAL (`required_qualification_id` DROP NOT NULL). |
 | `000024_tools.up/down.sql` | 4.3 | Tool-owned `tools` (intra-module FK to `tool_types`, optional per-tool `schedule_id` override FK to Admin `schedules`, UNIQUE name, `attributes` JSONB, soft archive) + `tools_tool_type_id_idx`. |
+| `000025_tool_inventory_number.up/down.sql` | 4-3b | `tools.inventory_number` (text, NOT NULL, CHECK ≤ 16) + `tools_inventory_number_seq` + backfill of existing rows + UNIQUE across ALL rows (Story 4.5 import backstop) + `tool.edit` permission seeded/granted to admin/schirrmeister/fuehrende. |
 
 Naming: `NNNNNN_snake_case.up.sql` / `NNNNNN_snake_case.down.sql`.
 

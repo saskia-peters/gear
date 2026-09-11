@@ -49,6 +49,7 @@ func AdminModuleAccessCodes() []string {
 		"roles.assign",
 		"qualifications.manage",
 		"tools.manage",
+		"tool.edit",
 		"tool_types.manage",
 		"admin.settings.email",
 		"admin.settings.backup",

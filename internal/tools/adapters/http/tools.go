@@ -15,21 +15,22 @@ import (
 )
 
 // toolDTO is the GET payload — the typed core fields plus the tool's type
-// display name (JOIN) and the attributes jsonb passthrough. An EMPTY
-// schedule_id means the tool inherits its type's default schedule (AD-5);
-// archived tools never reach the active surface. ArchivedAt is null on the
-// active surface and set (RFC3339) after a soft archive — it is the observable
-// state-change signal of the POST /{id}/archive response.
+// display name (JOIN), the inventory number and the attributes jsonb
+// passthrough. An EMPTY schedule_id means the tool inherits its type's default
+// schedule (AD-5); archived tools never reach the active surface. ArchivedAt
+// is null on the active surface and set (RFC3339) after a soft archive — it is
+// the observable state-change signal of the POST /{id}/archive response.
 type toolDTO struct {
-	ID           string         `json:"id"`
-	Name         string         `json:"name"`
-	ToolTypeID   string         `json:"tool_type_id"`
-	ToolTypeName string         `json:"tool_type_name"`
-	ScheduleID   string         `json:"schedule_id"`
-	Attributes   map[string]any `json:"attributes"`
-	ArchivedAt   *string        `json:"archived_at"`
-	CreatedAt    string         `json:"created_at"`
-	UpdatedAt    string         `json:"updated_at"`
+	ID              string         `json:"id"`
+	Name            string         `json:"name"`
+	ToolTypeID      string         `json:"tool_type_id"`
+	ToolTypeName    string         `json:"tool_type_name"`
+	ScheduleID      string         `json:"schedule_id"`
+	InventoryNumber string         `json:"inventory_number"`
+	Attributes      map[string]any `json:"attributes"`
+	ArchivedAt      *string        `json:"archived_at"`
+	CreatedAt       string         `json:"created_at"`
+	UpdatedAt       string         `json:"updated_at"`
 }
 
 // toolWriteDTO adds the server-authoritative German confirmation.
@@ -39,42 +40,60 @@ type toolWriteDTO struct {
 }
 
 // dashboardToolDTO is the minimal GET /api/v1/tools payload (Story 4-3b): the
-// id, name and the tool type's display name (JOIN). Deliberately small — no
+// id, name, the tool type's display name (JOIN) and the inventory number
+// (shown as row meta in the Werkzeugliste). Deliberately small — no
 // schedule/attributes/audit data on this surface (the admin surface exposes
 // the full DTO) and no status/due-date derivation (Story 6.1 owns it — the SPA
 // marks every tool "verfügbar" statically).
 type dashboardToolDTO struct {
-	ID           string `json:"id"`
-	Name         string `json:"name"`
-	ToolTypeID   string `json:"tool_type_id"`
-	ToolTypeName string `json:"tool_type_name"`
+	ID              string `json:"id"`
+	Name            string `json:"name"`
+	ToolTypeID      string `json:"tool_type_id"`
+	ToolTypeName    string `json:"tool_type_name"`
+	InventoryNumber string `json:"inventory_number"`
 }
 
-// ToolRoutes returns the Tool tool router (Story 4.3, FR-9/FR-10): GET/POST /
-// and PUT /{id}, POST /{id}/archive — soft archive only, NO DELETE endpoint
-// (archived rows keep FK history intact). The whole group is gated by
-// `tools.manage` at the composition-root mount point — its OWN gate, one
-// permission per surface (AD-6) — so this router carries no gateway itself;
-// 404/405 answer with the uniform JSON envelope so no sub-path can emit a
-// plain-text body.
+// ToolRoutes returns the Tool tool router (Story 4.3 + 4-3b, FR-9/FR-10):
+// GET/POST / and PUT /{id}, POST /{id}/archive — soft archive only, NO DELETE
+// endpoint (archived rows keep FK history intact). The outer mount gate is
+// any-of [tools.manage, tool.edit] (Spec 4-3b): a tool.edit-only holder can
+// GET (list) + PUT (edit, incl. the inventory number) but NOT create/archive.
+// The writes POST / and POST /{id}/archive are wrapped in a chi GROUP that
+// re-applies a tools.manage-ONLY RequireAnyPermission (the real auth
+// middleware, mirroring the admin sub-surface precedent in
+// internal/user/adapters/http/admin.go) — the tighter write-only gate — while
+// GET / and PUT /{id} stay at the mount level. The core re-checks the same
+// split defense-in-depth (AD-6). 404/405 answer with the uniform JSON envelope
+// so no sub-path can emit a plain-text body.
 func (h *Handler) ToolRoutes() http.Handler {
 	r := chi.NewRouter()
 	r.NotFound(httpapi.NotFoundHandler())
 	r.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
 	r.Get("/", h.ListTools)
-	r.Post("/", h.CreateTool)
 	r.Put("/{id}", h.UpdateTool)
-	r.Post("/{id}/archive", h.ArchiveTool)
+
+	// Write-only sub-gate (Spec 4-3b): POST / (create) and POST /{id}/archive
+	// re-apply a tools.manage-only RequireAnyPermission. The outer any-of gate
+	// already authenticated + resolved the caller's permission set; this group
+	// re-runs the REAL auth middleware so a tool.edit-only holder is denied the
+	// writes with the uniform 403 (no tool data, FR-19).
+	r.Group(func(writes chi.Router) {
+		writes.Use(auth.RequireAnyPermission(h.sessionValidator, h.permissionResolver,
+			[]string{toolscore.ToolsManagePermission}, "tools.manage write access denied", h.logger))
+		writes.Post("/", h.CreateTool)
+		writes.Post("/{id}/archive", h.ArchiveTool)
+	})
+
 	return r
 }
 
 // DashboardToolsRoutes returns the GEAR-module (non-admin) tool router (Story
 // 4-3b): GET / only, answering the minimal dashboard DTO (id, name, type
-// name). The whole group is gated by `dashboard.view` at the composition-root
-// mount point — its OWN gate, one permission per surface (AD-6) — so this
-// router carries no gateway itself; 404/405 answer with the uniform JSON
-// envelope so no sub-path can emit a plain-text body. No writes live here
-// (admin-only, Story 4.3).
+// name, inventory number). The whole group is gated by `dashboard.view` at the
+// composition-root mount point — its OWN gate, one permission per surface
+// (AD-6) — so this router carries no gateway itself; 404/405 answer with the
+// uniform JSON envelope so no sub-path can emit a plain-text body. No writes
+// live here (admin-only, Story 4.3).
 func (h *Handler) DashboardToolsRoutes() http.Handler {
 	r := chi.NewRouter()
 	r.NotFound(httpapi.NotFoundHandler())
@@ -85,12 +104,12 @@ func (h *Handler) DashboardToolsRoutes() http.Handler {
 
 // ListTools handles GET /api/v1/admin/tools (GET_LIST_EMPTY / GET_LIST): it
 // returns the ACTIVE tool catalog, oldest first, each with its type display
-// name. Archived tools never appear.
+// name and inventory number. Archived tools never appear.
 //
 // Error mapping (uniform envelope):
 //   - 401 unauthorized when the caller is not authenticated
-//   - 403 forbidden when the caller lacks tools.manage (gateway or core
-//     re-check; no tool data exposed)
+//   - 403 forbidden when the caller lacks BOTH tools.manage and tool.edit
+//     (gateway or core re-check; no tool data exposed)
 //   - 500 internal_error on an unexpected failure
 func (h *Handler) ListTools(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFrom(r.Context())
@@ -136,10 +155,11 @@ func (h *Handler) ListDashboardTools(w http.ResponseWriter, r *http.Request) {
 	out := make([]dashboardToolDTO, 0, len(tools))
 	for _, tool := range tools {
 		out = append(out, dashboardToolDTO{
-			ID:           tool.ID,
-			Name:         tool.Name,
-			ToolTypeID:   tool.ToolTypeID,
-			ToolTypeName: tool.ToolTypeName,
+			ID:              tool.ID,
+			Name:            tool.Name,
+			ToolTypeID:      tool.ToolTypeID,
+			ToolTypeName:    tool.ToolTypeName,
+			InventoryNumber: tool.InventoryNumber,
 		})
 	}
 	httpapi.WriteJSON(w, http.StatusOK, out)
@@ -148,8 +168,10 @@ func (h *Handler) ListDashboardTools(w http.ResponseWriter, r *http.Request) {
 // CreateTool handles POST /api/v1/admin/tools (CREATE_VALID / CREATE_OVERRIDE /
 // CREATE_DUPLICATE / CREATE_INVALID / CREATE_BAD_TYPE / CREATE_BAD_OVERRIDE):
 // it persists a new tool belonging to exactly one tool type, with the optional
-// per-tool schedule override (empty → inherit the type default). Audited
-// (tool.create).
+// per-tool schedule override (empty → inherit the type default). The inventory
+// number is AUTO-ASSIGNED by the server (a client-sent value is ignored) and
+// returned in the response. Gated `tools.manage`-only by the write-only
+// sub-router (a tool.edit-only holder is denied). Audited (tool.create).
 func (h *Handler) CreateTool(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFrom(r.Context())
 	if user == nil {
@@ -173,11 +195,14 @@ func (h *Handler) CreateTool(w http.ResponseWriter, r *http.Request) {
 	httpapi.WriteJSON(w, http.StatusCreated, toolWriteDTO{toolDTO: toToolDTO(tool), Message: toolscore.MsgToolSaved})
 }
 
-// UpdateTool handles PUT /api/v1/admin/tools/{id} (UPDATE_CLEAR_OVERRIDE): it
-// persists the tool's name, type, override and attributes; an EMPTY
-// schedule_id CLEARS the stored override (the tool inherits its type's default
-// again, AD-5). Updating an already-archived tool answers the 404 sentinel
-// (UPDATE_ARCHIVED). Audited (tool.update).
+// UpdateTool handles PUT /api/v1/admin/tools/{id} (UPDATE_CLEAR_OVERRIDE /
+// UPDATE_INVENTORY): it persists the tool's name, type, override, inventory
+// number and attributes; an EMPTY schedule_id CLEARS the stored override (the
+// tool inherits its type's default again, AD-5). A non-empty inventory_number
+// edits the stored number (uniquely enforced); an empty one is rejected 400
+// (a tool always has one). Updating an already-archived tool answers the 404
+// sentinel (UPDATE_ARCHIVED). Any-of [tools.manage, tool.edit] holder may call
+// it. Audited (tool.update).
 func (h *Handler) UpdateTool(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFrom(r.Context())
 	if user == nil {
@@ -204,8 +229,9 @@ func (h *Handler) UpdateTool(w http.ResponseWriter, r *http.Request) {
 
 // ArchiveTool handles POST /api/v1/admin/tools/{id}/archive (ARCHIVE): it
 // soft-archives the tool — archived_at is set and the row leaves the active
-// list. Archiving an already-archived row answers the 404 sentinel. Audited
-// (tool.archive).
+// list. Archiving an already-archived row answers the 404 sentinel. Gated
+// `tools.manage`-only by the write-only sub-router (a tool.edit-only holder is
+// denied). Audited (tool.archive).
 func (h *Handler) ArchiveTool(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFrom(r.Context())
 	if user == nil {
@@ -235,15 +261,16 @@ func toToolDTO(tool *toolscore.Tool) toolDTO {
 		archivedAt = &s
 	}
 	return toolDTO{
-		ID:           tool.ID,
-		Name:         tool.Name,
-		ToolTypeID:   tool.ToolTypeID,
-		ToolTypeName: tool.ToolTypeName,
-		ScheduleID:   tool.ScheduleID,
-		Attributes:   tool.Attributes,
-		ArchivedAt:   archivedAt,
-		CreatedAt:    tool.CreatedAt.UTC().Format(time.RFC3339),
-		UpdatedAt:    tool.UpdatedAt.UTC().Format(time.RFC3339),
+		ID:              tool.ID,
+		Name:            tool.Name,
+		ToolTypeID:      tool.ToolTypeID,
+		ToolTypeName:    tool.ToolTypeName,
+		ScheduleID:      tool.ScheduleID,
+		InventoryNumber: tool.InventoryNumber,
+		Attributes:      tool.Attributes,
+		ArchivedAt:      archivedAt,
+		CreatedAt:       tool.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:       tool.UpdatedAt.UTC().Format(time.RFC3339),
 	}
 }
 

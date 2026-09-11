@@ -3,13 +3,18 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
+	"os"
+	"regexp"
 	"strings"
 	"testing"
+	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/go-chi/chi/v5"
 
 	adminhttp "github.com/saskia-peters/gear/internal/admin/adapters/http"
@@ -20,8 +25,10 @@ import (
 	"github.com/saskia-peters/gear/internal/platform/crypto"
 	"github.com/saskia-peters/gear/internal/platform/router"
 	toolhttp "github.com/saskia-peters/gear/internal/tools/adapters/http"
+	toolpostgres "github.com/saskia-peters/gear/internal/tools/adapters/postgres"
 	toolscore "github.com/saskia-peters/gear/internal/tools/core"
 	toolports "github.com/saskia-peters/gear/internal/tools/ports"
+	userpostgres "github.com/saskia-peters/gear/internal/user/adapters/postgres"
 	usercore "github.com/saskia-peters/gear/internal/user/core"
 	userports "github.com/saskia-peters/gear/internal/user/ports"
 )
@@ -533,11 +540,18 @@ func (s *compToolTypeService) ListToolsForDashboard(_ context.Context) ([]*tools
 }
 
 func (s *compToolTypeService) CreateTool(_ context.Context, _ string, input toolscore.ToolInput) (*toolscore.Tool, error) {
-	return &toolscore.Tool{ID: "id", Name: input.Name, ToolTypeID: input.ToolTypeID, ScheduleID: input.ScheduleID}, nil
+	// Mirror the store contract (Story 4-3b): the create path IGNORES the
+	// client inventory (the server auto-assigns in-SQL) — the fake returns a
+	// fresh auto-assigned-looking number so a composed POST response proves the
+	// value flows back out.
+	return &toolscore.Tool{ID: "id", Name: input.Name, ToolTypeID: input.ToolTypeID, ScheduleID: input.ScheduleID, InventoryNumber: "GEAR00000F"}, nil
 }
 
 func (s *compToolTypeService) UpdateTool(_ context.Context, _, id string, input toolscore.ToolInput) (*toolscore.Tool, error) {
-	return &toolscore.Tool{ID: id, Name: input.Name}, nil
+	// Echo the submitted inventory_number back (like the http-suite fake) so a
+	// composed PUT response proves the edit value really reached the service —
+	// a silently-dropped inventory would surface as an empty number and fail.
+	return &toolscore.Tool{ID: id, Name: input.Name, InventoryNumber: input.InventoryNumber}, nil
 }
 
 func (s *compToolTypeService) ArchiveTool(_ context.Context, _, id string) (*toolscore.Tool, error) {
@@ -565,7 +579,7 @@ func newCompositionToolTypeRouter(perms []string, session *usercore.Session) htt
 	backupSurface := auth.RequireAnyPermission(validator, resolver, []string{admcore.BackupSettingsPermission}, "admin.settings.backup access denied", log)(settingsHandler.BackupRoutes())
 	schedulesSurface := auth.RequireAnyPermission(validator, resolver, []string{admcore.SchedulesPermission}, "schedules.manage access denied", log)(settingsHandler.ScheduleRoutes())
 
-	toolHandler := toolhttp.NewHandler(&compToolTypeService{}, log)
+	toolHandler := toolhttp.NewHandler(&compToolTypeService{}, validator, resolver, log)
 	toolTypesSurface := auth.RequireAnyPermission(validator, resolver, []string{toolscore.ToolTypesManagePermission}, "tool_types.manage access denied", log)(toolHandler.ToolTypeRoutes())
 
 	outer := chi.NewRouter()
@@ -721,9 +735,9 @@ func newCompositionToolRouter(perms []string, session *usercore.Session) http.Ha
 	backupSurface := auth.RequireAnyPermission(validator, resolver, []string{admcore.BackupSettingsPermission}, "admin.settings.backup access denied", log)(settingsHandler.BackupRoutes())
 	schedulesSurface := auth.RequireAnyPermission(validator, resolver, []string{admcore.SchedulesPermission}, "schedules.manage access denied", log)(settingsHandler.ScheduleRoutes())
 
-	toolHandler := toolhttp.NewHandler(&compToolTypeService{}, log)
+	toolHandler := toolhttp.NewHandler(&compToolTypeService{}, validator, resolver, log)
 	toolTypesSurface := auth.RequireAnyPermission(validator, resolver, []string{toolscore.ToolTypesManagePermission}, "tool_types.manage access denied", log)(toolHandler.ToolTypeRoutes())
-	toolToolsSurface := auth.RequireAnyPermission(validator, resolver, []string{toolscore.ToolsManagePermission}, "tools.manage access denied", log)(toolHandler.ToolRoutes())
+	toolToolsSurface := auth.RequireAnyPermission(validator, resolver, []string{toolscore.ToolsManagePermission, toolscore.ToolEditPermission}, "tools.manage/tool.edit access denied", log)(toolHandler.ToolRoutes())
 
 	outer := chi.NewRouter()
 	outer.Get("/", func(w http.ResponseWriter, _ *http.Request) {
@@ -860,6 +874,66 @@ func TestCompositionToolsWriteVerbs(t *testing.T) {
 	}
 }
 
+// TestCompositionToolsEditOnlyGate verifies the Story 4-3b permission split
+// through the REAL composition wiring: the outer /api/v1/admin/tools mount is
+// ANY-of [tools.manage, tool.edit], and the write-only sub-gate inside
+// ToolRoutes re-applies tools.manage-ONLY for POST (create) + archive. A
+// tool.edit-only holder gets GET/PUT (200) but POST/archive (403); a
+// tools.manage holder gets everything (pinned by TestCompositionToolsWriteVerbs).
+func TestCompositionToolsEditOnlyGate(t *testing.T) {
+	body := `{"name":"Bohrmaschine-01","tool_type_id":"id-t1","schedule_id":"","inventory_number":"GEAR0042"}`
+	editor := newCompositionToolRouter([]string{toolscore.ToolEditPermission}, activeUser("u-editor", "editor@gear.local"))
+
+	// GATE_GET: the any-of read gate lets the tool.edit-only holder list.
+	rec := doComposedJSONRequest(editor, "tok", http.MethodGet, "/api/v1/admin/tools", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tool.edit-only GET: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if strings.TrimSpace(rec.Body.String()) != "[]" {
+		t.Errorf("tool.edit-only GET body = %s, want the empty tool list", rec.Body.String())
+	}
+
+	// GATE_UPDATE: PUT (edit, incl. the inventory number) is any-of → 200.
+	rec = doComposedJSONRequest(editor, "tok", http.MethodPut, "/api/v1/admin/tools/id-a", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tool.edit-only PUT: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	// The inventory value must have REALLY arrived at the service and flow back
+	// through the DTO — a silently-dropped inventory on the edit path fails here.
+	var putBody map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &putBody); err != nil {
+		t.Fatalf("decoding PUT response err = %v", err)
+	}
+	if putBody["inventory_number"] != "GEAR0042" {
+		t.Errorf("PUT response inventory_number = %v, want GEAR0042 (the edit value must round-trip through the composed path)", putBody["inventory_number"])
+	}
+
+	// GATE_CREATE: POST is tools.manage-ONLY (the write-only sub-gate) → 403.
+	rec = doComposedJSONRequest(editor, "tok", http.MethodPost, "/api/v1/admin/tools", body)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("tool.edit-only POST: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(strings.ToLower(rec.Body.String()), "werkzeug") {
+		t.Errorf("tool.edit-only POST 403 leaks tool data: %s", rec.Body.String())
+	}
+
+	// GATE_ARCHIVE: POST /{id}/archive is tools.manage-ONLY → 403.
+	rec = doComposedJSONRequest(editor, "tok", http.MethodPost, "/api/v1/admin/tools/id-a/archive", "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("tool.edit-only archive: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// FORBIDDEN: no tools.manage/tool.edit → uniform 403, no tool data.
+	nonHolder := newCompositionToolRouter([]string{"dashboard.view"}, activeUser("u-vol", "vol@gear.local"))
+	rec = doComposedJSONRequest(nonHolder, "tok", http.MethodGet, "/api/v1/admin/tools", "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("non-holder GET: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(strings.ToLower(rec.Body.String()), "werkzeug") {
+		t.Errorf("non-holder 403 leaks tool data: %s", rec.Body.String())
+	}
+}
+
 // newCompositionDashboardToolsRouter mirrors the main() mounts exactly for the
 // Story 4-3b dashboard tool-list surface: /api/v1/tools is mounted with its OWN
 // `dashboard.view` gate (RequirePermission — the single-code gateway, NOT the
@@ -876,9 +950,9 @@ func newCompositionDashboardToolsRouter(perms []string, session *usercore.Sessio
 	backupSurface := auth.RequireAnyPermission(validator, resolver, []string{admcore.BackupSettingsPermission}, "admin.settings.backup access denied", log)(settingsHandler.BackupRoutes())
 	schedulesSurface := auth.RequireAnyPermission(validator, resolver, []string{admcore.SchedulesPermission}, "schedules.manage access denied", log)(settingsHandler.ScheduleRoutes())
 
-	toolHandler := toolhttp.NewHandler(&compToolTypeService{}, log)
+	toolHandler := toolhttp.NewHandler(&compToolTypeService{}, validator, resolver, log)
 	toolTypesSurface := auth.RequireAnyPermission(validator, resolver, []string{toolscore.ToolTypesManagePermission}, "tool_types.manage access denied", log)(toolHandler.ToolTypeRoutes())
-	toolToolsSurface := auth.RequireAnyPermission(validator, resolver, []string{toolscore.ToolsManagePermission}, "tools.manage access denied", log)(toolHandler.ToolRoutes())
+	toolToolsSurface := auth.RequireAnyPermission(validator, resolver, []string{toolscore.ToolsManagePermission, toolscore.ToolEditPermission}, "tools.manage/tool.edit access denied", log)(toolHandler.ToolRoutes())
 	dashboardToolsSurface := auth.RequirePermission(validator, resolver, toolscore.DashboardViewPermission)(toolHandler.DashboardToolsRoutes())
 
 	outer := chi.NewRouter()
@@ -943,5 +1017,167 @@ func TestCompositionDashboardToolsMountGating(t *testing.T) {
 	// (its code opens only the dashboard mount, not the tools.manage gate).
 	if rec := doComposedJSONRequest(dashRouter, "tok", http.MethodGet, "/api/v1/admin/tools", ""); rec.Code != http.StatusForbidden {
 		t.Errorf("dashboard-only holder on admin tools: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// ============================================================================
+// Story 4-3b real-wiring composed E2E (finding 9): the auto-assigned inventory
+// number must round-trip through the REAL composition path — gate → HTTP
+// handler → core → postgres repo → in-SQL nextval — not a hardcoded fake.
+// ============================================================================
+
+const composedArgon2DummyHash = "$argon2id$v=19$m=65536,t=3,p=4$c2FsdHNhbHRzYWx0$8U3f5yO8JUpfGT5WmljHhL8n2nWlVEhL2fj7EXpS9gM"
+
+// newComposedRealToolRouter wires the REAL Story 4-3b tool surface exactly like
+// cmd/server/main.go: toolpostgres store + tools core + tools HTTP handler
+// mounted at /api/v1/admin/tools behind the any-of [tools.manage, tool.edit]
+// gate, with the REAL SessionManager + user Repository as the auth seams (the
+// write-only sub-gate inside ToolRoutes re-uses them). The tool core consumes
+// nil schedules/qualifications ports (not hit for an empty-override create).
+func newComposedRealToolRouter(t *testing.T, log *slog.Logger) (http.Handler, *userpostgres.Repository, *usercore.SessionManager, *pgxpool.Pool) {
+	t.Helper()
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Skipf("skipping db integration test: %v", err)
+	}
+	t.Cleanup(pool.Close)
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping db integration test (db ping failed): %v", err)
+	}
+
+	userRepo := userpostgres.NewRepository(userpostgres.New(pool))
+	sm := usercore.NewSessionManager(userRepo, time.Hour)
+	toolRepo := toolpostgres.NewRepository(toolpostgres.New(pool))
+	toolService := toolscore.NewService(toolRepo, nil, nil, userRepo, userRepo, log)
+	toolHandler := toolhttp.NewHandler(toolService, sm, userRepo, log)
+	toolsSurface := auth.RequireAnyPermission(sm, userRepo,
+		[]string{toolscore.ToolsManagePermission, toolscore.ToolEditPermission},
+		"tools.manage/tool.edit access denied", log)(toolHandler.ToolRoutes())
+	r := router.New(pool, log,
+		router.WithMount("/api/v1/admin/tools", toolsSurface),
+	)
+	return r, userRepo, sm, pool
+}
+
+// composedSeedToolRefs inserts one Test- schedule (Admin-owned catalog) + one
+// Test- tool type (Tool-owned) into the live dev DB and cleans them up. Cleanup
+// order matters: tools BEFORE tool_types/schedules.
+func composedSeedToolRefs(t *testing.T, pool *pgxpool.Pool) (toolTypeID, scheduleID string) {
+	t.Helper()
+	ctx := context.Background()
+	for _, table := range []string{"tools", "tool_types", "schedules", "qualifications"} {
+		if _, err := pool.Exec(ctx, "DELETE FROM "+table+" WHERE lower(name) LIKE 'test-%'"); err != nil {
+			t.Fatalf("cleanup %s err = %v", table, err)
+		}
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, "DELETE FROM tools WHERE lower(name) LIKE 'test-%'")
+		_, _ = pool.Exec(ctx, "DELETE FROM tool_types WHERE lower(name) LIKE 'test-%'")
+		_, _ = pool.Exec(ctx, "DELETE FROM schedules WHERE lower(name) LIKE 'test-%'")
+	})
+	if err := pool.QueryRow(ctx,
+		"INSERT INTO schedules (name, interval_unit, interval_magnitude) VALUES ('Test-Zeitplan', 'year', 1) RETURNING id",
+	).Scan(&scheduleID); err != nil {
+		t.Fatalf("seeding schedule err = %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO tool_types (name, default_schedule_id, required_qualification_id, inspection_mode)
+		 VALUES ('Test-Geraetetyp', $1, NULL, 'pass_fail') RETURNING id`, scheduleID,
+	).Scan(&toolTypeID); err != nil {
+		t.Fatalf("seeding tool type err = %v", err)
+	}
+	return toolTypeID, scheduleID
+}
+
+// composedCreateAdminUser registers a FRESH active user with the admin role
+// (grants tools.manage), issues a live session token and cleans up the row.
+func composedCreateAdminUser(t *testing.T, pool *pgxpool.Pool, repo *userpostgres.Repository, sm *usercore.SessionManager, stamp, tag string) string {
+	t.Helper()
+	ctx := context.Background()
+	email := fmt.Sprintf("comptool.%s.%s@gear.local", tag, stamp)
+	user, err := repo.CreateRegisteredUser(ctx, email, "Comp Tool", "Comp", "Tool", composedArgon2DummyHash)
+	if err != nil {
+		t.Fatalf("CreateRegisteredUser failed: %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, "DELETE FROM users WHERE id = $1", user.ID)
+	})
+	if _, err := pool.Exec(ctx, "UPDATE users SET state = 'active' WHERE id = $1", user.ID); err != nil {
+		t.Fatalf("activating user failed: %v", err)
+	}
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO user_permission_groups (user_id, permission_group_id) SELECT $1, g.id FROM permission_groups g WHERE g.name = 'admin'`, user.ID); err != nil {
+		t.Fatalf("granting admin role failed: %v", err)
+	}
+	token, err := sm.Issue(ctx, user)
+	if err != nil {
+		t.Fatalf("issuing session failed: %v", err)
+	}
+	return token
+}
+
+// TestComposedToolCreateAutoAssignsInventory pins the full create round-trip
+// through the REAL wiring (finding 9): a tools.manage holder POSTs a tool and
+// the response carries a non-empty 'GEAR%06d' number auto-assigned in-SQL by
+// the store; a subsequent GET returns the same number. This proves the
+// auto-assignment is NOT a fake-service artifact but flows through
+// gate → handler → core → postgres repo → nextval and back.
+func TestComposedToolCreateAutoAssignsInventory(t *testing.T) {
+	r, repo, sm, pool := newComposedRealToolRouter(t, discardLogger())
+	stamp := time.Now().Format("20060102150405.000000")
+	toolTypeID, _ := composedSeedToolRefs(t, pool)
+	token := composedCreateAdminUser(t, pool, repo, sm, stamp, "e2e")
+
+	// POST create with an EMPTY schedule override (the AD-5 inherit default) —
+	// the in-SQL nextval auto-assignment is what we are pinning.
+	body := fmt.Sprintf(`{"name":"Test-Composed-Tool","tool_type_id":%q,"schedule_id":"","attributes":{}}`, toolTypeID)
+	rec := doComposedJSONRequest(r, token, http.MethodPost, "/api/v1/admin/tools", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST create: status = %d, want 201 (body %s)", rec.Code, rec.Body.String())
+	}
+	var created struct {
+		ID              string `json:"id"`
+		InventoryNumber string `json:"inventory_number"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
+		t.Fatalf("decoding create response err = %v", err)
+	}
+	if !regexp.MustCompile(`^GEAR\d{6}$`).MatchString(created.InventoryNumber) {
+		t.Fatalf("created inventory_number = %q, want a non-empty 'GEAR' + 6 zero-padded digits", created.InventoryNumber)
+	}
+	if created.ID == "" {
+		t.Fatal("created tool id empty")
+	}
+
+	// GET returns the SAME auto-assigned number (round-trip through the real
+	// postgres list query).
+	rec = doComposedJSONRequest(r, token, http.MethodGet, "/api/v1/admin/tools", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET list: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var list []struct {
+		ID              string `json:"id"`
+		InventoryNumber string `json:"inventory_number"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &list); err != nil {
+		t.Fatalf("decoding GET list err = %v", err)
+	}
+	found := false
+	for _, tool := range list {
+		if tool.ID == created.ID {
+			found = true
+			if tool.InventoryNumber != created.InventoryNumber {
+				t.Errorf("GET inventory_number = %q, want the created %q (round-trip mismatch)", tool.InventoryNumber, created.InventoryNumber)
+			}
+		}
+	}
+	if !found {
+		t.Errorf("created tool %s missing from the GET list", created.ID)
 	}
 }

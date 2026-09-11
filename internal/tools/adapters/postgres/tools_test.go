@@ -3,6 +3,8 @@ package postgres
 import (
 	"context"
 	"errors"
+	"fmt"
+	"regexp"
 	"strings"
 	"testing"
 
@@ -120,6 +122,11 @@ func TestPostgresToolsStore(t *testing.T) {
 	}
 	if created.ArchivedAt != nil {
 		t.Error("new tool must be active (archived_at NULL)")
+	}
+	// CREATE_AUTO: the created tool carries an auto-assigned 'GEAR' + 6
+	// zero-padded digits inventory number.
+	if !strings.HasPrefix(created.InventoryNumber, "GEAR") || len(created.InventoryNumber) != 10 {
+		t.Errorf("created inventory_number = %q, want 'GEAR' + 6 zero-padded digits", created.InventoryNumber)
 	}
 	if created.CreatedAt.IsZero() || created.UpdatedAt.IsZero() {
 		t.Errorf("timestamps missing: %+v", created)
@@ -342,10 +349,292 @@ func TestPostgresToolsFKConstraints(t *testing.T) {
 	}
 
 	// The raw DB backstop still exists: a direct INSERT with a missing tool
-	// type FK trips SQLSTATE 23503.
+	// type FK trips SQLSTATE 23503. (The inventory_number column is NOT NULL —
+	// the insert takes a FRESH sequence value so the FK is the only violation.)
+	var rawInv string
+	if err := pool.QueryRow(ctx,
+		`SELECT 'GEAR' || lpad(nextval('tools_inventory_number_seq')::text, 6, '0')`).Scan(&rawInv); err != nil {
+		t.Fatalf("reserving a unique raw inventory number err = %v", err)
+	}
 	_, err = pool.Exec(ctx,
-		`INSERT INTO tools (name, tool_type_id) VALUES ('Test-Fk-Raw', $1)`, missing)
+		`INSERT INTO tools (name, tool_type_id, inventory_number) VALUES ('Test-Fk-Raw', $1, $2)`, missing, rawInv)
 	if !isForeignKeyViolation(err) {
 		t.Fatalf("raw insert with missing type err = %v, want FK violation 23503", err)
+	}
+}
+// toolInventoryNumberFormat is the auto-assigned shape: 'GEAR' + 6 zero-padded
+// digits (Story 4-3b, CREATE_AUTO).
+var toolInventoryNumberFormat = regexp.MustCompile(`^GEAR\d{6}$`)
+
+// TestPostgresToolInventoryNumbers covers the Story 4-3b inventory-number
+// store contract: CREATE_AUTO (monotonic 'GEAR%06d' sequence values), the
+// list round-trip, and the DB-level uniqueness backstop (EXACT, over ALL rows
+// incl. archived — the Story 4.5 import backstop) mapped to the German
+// duplicate-inventory 400.
+func TestPostgresToolInventoryNumbers(t *testing.T) {
+	pool := toolTestPool(t)
+	ctx := context.Background()
+	t.Cleanup(func() { pool.Close() })
+
+	repo := NewRepository(New(pool))
+	toolTypeID, _ := seedToolRefs(t, ctx, pool)
+
+	// CREATE_AUTO: two creates get distinct, monotonic 'GEAR' + 6 zero-padded
+	// numbers (same width → string order == numeric order).
+	first, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Inv-A", ToolTypeID: toolTypeID})
+	if err != nil {
+		t.Fatalf("CreateTool(A) err = %v", err)
+	}
+	second, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Inv-B", ToolTypeID: toolTypeID})
+	if err != nil {
+		t.Fatalf("CreateTool(B) err = %v", err)
+	}
+	if !toolInventoryNumberFormat.MatchString(first.InventoryNumber) || !toolInventoryNumberFormat.MatchString(second.InventoryNumber) {
+		t.Fatalf("inventory numbers = %q / %q, want 'GEAR' + 6 zero-padded digits", first.InventoryNumber, second.InventoryNumber)
+	}
+	if first.InventoryNumber == second.InventoryNumber {
+		t.Fatalf("inventory numbers collide: %q", first.InventoryNumber)
+	}
+	if first.InventoryNumber >= second.InventoryNumber {
+		t.Errorf("monotonicity broken: %q >= %q", first.InventoryNumber, second.InventoryNumber)
+	}
+
+	// ROUND-TRIP: the list returns both numbers on the active catalog.
+	list, err := repo.ListTools(ctx)
+	if err != nil {
+		t.Fatalf("ListTools err = %v", err)
+	}
+	seen := map[string]bool{}
+	for _, tool := range list {
+		if strings.HasPrefix(strings.ToLower(tool.Name), "test-inv-") {
+			seen[tool.InventoryNumber] = true
+		}
+	}
+	if !seen[first.InventoryNumber] || !seen[second.InventoryNumber] {
+		t.Errorf("round-trip missing numbers: have %v, want %q and %q", seen, first.InventoryNumber, second.InventoryNumber)
+	}
+
+	// UNIQUENESS backstop (case-insensitive, all rows): editing a tool onto a
+	// number another row already holds — INCLUDING a case-variant — trips the
+	// tools_inventory_number_key functional UNIQUE index (lower(...)) → German
+	// duplicate-inventory 400 (never a raw 500). The core's active-only
+	// case-insensitive guard would catch the ACTIVE variant first; this pins the
+	// DB-level backstop for the EXACT same-number case AND the case-variant
+	// (which only the functional index can catch).
+	_, err = repo.UpdateTool(ctx, &core.Tool{
+		ID:              second.ID,
+		Name:            "Test-Inv-B",
+		ToolTypeID:      toolTypeID,
+		InventoryNumber: first.InventoryNumber,
+	})
+	var inv *core.InvalidToolError
+	if !errors.As(err, &inv) {
+		t.Fatalf("duplicate-inventory update err = %v, want *InvalidToolError", err)
+	}
+	if inv.Message != core.MsgToolInventoryNumberTaken {
+		t.Errorf("message = %q, want %q", inv.Message, core.MsgToolInventoryNumberTaken)
+	}
+
+	// CASE-INSENSITIVITY (finding 3): a case-variant of an ACTIVE number is
+	// rejected by the functional index — 'gear000001' collides with
+	// 'GEAR000001' (the core guard alone cannot be trusted with a case-blind
+	// DB).
+	_, err = repo.UpdateTool(ctx, &core.Tool{
+		ID:              second.ID,
+		Name:            "Test-Inv-B",
+		ToolTypeID:      toolTypeID,
+		InventoryNumber: strings.ToLower(first.InventoryNumber),
+	})
+	inv = nil
+	if !errors.As(err, &inv) {
+		t.Fatalf("case-variant update err = %v, want *InvalidToolError", err)
+	}
+	if inv.Message != core.MsgToolInventoryNumberTaken {
+		t.Errorf("message = %q, want %q", inv.Message, core.MsgToolInventoryNumberTaken)
+	}
+}
+
+// TestPostgresToolInventoryArchivedBackstop pins the Story 4.5 import backstop
+// (finding 2): an ARCHIVED tool's inventory number stays "taken" — updating an
+// active tool onto it is rejected (case-insensitively), and a create whose
+// auto-assigned nextval lands on an archived number is retried to a fresh
+// value instead of 500ing.
+func TestPostgresToolInventoryArchivedBackstop(t *testing.T) {
+	pool := toolTestPool(t)
+	ctx := context.Background()
+	t.Cleanup(func() { pool.Close() })
+
+	repo := NewRepository(New(pool))
+	toolTypeID, _ := seedToolRefs(t, ctx, pool)
+
+	archived, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Inv-Arch-A", ToolTypeID: toolTypeID})
+	if err != nil {
+		t.Fatalf("CreateTool(archived candidate) err = %v", err)
+	}
+	active, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Inv-Arch-B", ToolTypeID: toolTypeID})
+	if err != nil {
+		t.Fatalf("CreateTool(active) err = %v", err)
+	}
+
+	// Archive the first tool: its number must stay taken.
+	if _, err := repo.ArchiveTool(ctx, archived.ID); err != nil {
+		t.Fatalf("ArchiveTool err = %v", err)
+	}
+
+	// UPDATE backstop: editing the ACTIVE tool onto the ARCHIVED tool's number
+	// (case-insensitively — the lower() functional index) → German duplicate 400.
+	_, err = repo.UpdateTool(ctx, &core.Tool{
+		ID:              active.ID,
+		Name:            "Test-Inv-Arch-B",
+		ToolTypeID:      toolTypeID,
+		InventoryNumber: strings.ToLower(archived.InventoryNumber),
+	})
+	var inv *core.InvalidToolError
+	if !errors.As(err, &inv) {
+		t.Fatalf("update onto archived number err = %v, want *InvalidToolError", err)
+	}
+	if inv.Message != core.MsgToolInventoryNumberTaken {
+		t.Errorf("message = %q, want %q", inv.Message, core.MsgToolInventoryNumberTaken)
+	}
+
+	// CREATE retry onto an ARCHIVED number: make the next generated nextval
+	// collide with the archived row's (manually re-set) number, then a create
+	// must retry to a fresh value.
+	var last int64
+	var called bool
+	if err := pool.QueryRow(ctx, "SELECT last_value, is_called FROM tools_inventory_number_seq").Scan(&last, &called); err != nil {
+		t.Fatalf("reading sequence state err = %v", err)
+	}
+	next := last
+	if called {
+		next++
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE tools SET inventory_number = $1 WHERE id = $2`,
+		fmt.Sprintf("GEAR%06d", next), archived.ID,
+	); err != nil {
+		t.Fatalf("re-setting the archived number err = %v", err)
+	}
+	created, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Inv-Arch-C", ToolTypeID: toolTypeID})
+	if err != nil {
+		t.Fatalf("CreateTool (retry past an archived number) err = %v", err)
+	}
+	if want := fmt.Sprintf("GEAR%06d", next+1); created.InventoryNumber != want {
+		t.Errorf("inventory_number = %q, want %q (the retry advanced past the archived collision)", created.InventoryNumber, want)
+	}
+}
+
+// TestPostgresCreateToolInventoryCollisionRetry pins the bounded retry loop
+// (Story 4-3b, CREATE_COLLISION): when a MANUAL edit consumed the generated
+// nextval, the first INSERT trips the UNIQUE index and the repository re-runs
+// the INSERT (which computes a FRESH nextval in-SQL) until the budget is
+// exhausted → German collision 400.
+func TestPostgresCreateToolInventoryCollisionRetry(t *testing.T) {
+	pool := toolTestPool(t)
+	ctx := context.Background()
+	t.Cleanup(func() { pool.Close() })
+
+	repo := NewRepository(New(pool))
+	toolTypeID, _ := seedToolRefs(t, ctx, pool)
+
+	// Read the sequence state WITHOUT advancing it: since the sequence has been
+	// called (migration backfill + prior creates), the NEXT nextval returns
+	// last_value + 1.
+	var last int64
+	var called bool
+	if err := pool.QueryRow(ctx, "SELECT last_value, is_called FROM tools_inventory_number_seq").Scan(&last, &called); err != nil {
+		t.Fatalf("reading sequence state err = %v", err)
+	}
+	next := last
+	if called {
+		next++
+	}
+
+	// Reserve ONLY the first generated value: the auto-assign collides on
+	// attempt 1, the retry loop advances to the next fresh number → succeeds.
+	reserved := fmt.Sprintf("GEAR%06d", next)
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO tools (name, tool_type_id, inventory_number) VALUES ('Test-Collision-Reserve', $1, $2)`, toolTypeID, reserved,
+	); err != nil {
+		t.Fatalf("reserving the next generated number err = %v", err)
+	}
+
+	created, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Collision-Auto", ToolTypeID: toolTypeID})
+	if err != nil {
+		t.Fatalf("CreateTool (collision retry) err = %v", err)
+	}
+	if want := fmt.Sprintf("GEAR%06d", next+1); created.InventoryNumber != want {
+		t.Errorf("inventory_number = %q, want %q (the retry advanced past the collision)", created.InventoryNumber, want)
+	}
+
+	// Reserve the next THREE generated values → every retry attempt collides →
+	// the bounded loop exhausts and maps to the German collision 400.
+	if err := pool.QueryRow(ctx, "SELECT last_value, is_called FROM tools_inventory_number_seq").Scan(&last, &called); err != nil {
+		t.Fatalf("re-reading sequence state err = %v", err)
+	}
+	cur := last
+	if called {
+		cur++
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO tools (name, tool_type_id, inventory_number) VALUES ($1, $2, $3)`,
+			fmt.Sprintf("Test-Collision-Reserve-%d", i), toolTypeID, fmt.Sprintf("GEAR%06d", cur+int64(i)),
+		); err != nil {
+			t.Fatalf("reserving colliding number %d err = %v", i, err)
+		}
+	}
+	_, err = repo.CreateTool(ctx, &core.Tool{Name: "Test-Collision-Fail", ToolTypeID: toolTypeID})
+	var inv *core.InvalidToolError
+	if !errors.As(err, &inv) {
+		t.Fatalf("exhausted retry err = %v, want *InvalidToolError (German collision)", err)
+	}
+	if inv.Message != core.MsgToolInventoryNumberCollision {
+		t.Errorf("message = %q, want %q", inv.Message, core.MsgToolInventoryNumberCollision)
+	}
+}
+
+// TestPostgresToolInventoryBackfill pins the 000025 backfill contract
+// (CREATE_BACKFILL): a pre-existing row whose inventory_number was NULL (the
+// pre-migration state) is assigned 'GEAR' + zero-padded nextval. The scenario
+// is simulated in a rolled-back transaction — the live dev DB is never
+// disturbed.
+func TestPostgresToolInventoryBackfill(t *testing.T) {
+	pool := toolTestPool(t)
+	ctx := context.Background()
+	t.Cleanup(func() { pool.Close() })
+
+	toolTypeID, _ := seedToolRefs(t, ctx, pool)
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin tx err = %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Recreate the pre-migration state: the column is nullable and the row has
+	// no inventory number yet.
+	if _, err := tx.Exec(ctx, `ALTER TABLE tools ALTER COLUMN inventory_number DROP NOT NULL`); err != nil {
+		t.Fatalf("drop not null err = %v", err)
+	}
+	var preID string
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO tools (name, tool_type_id) VALUES ('Test-Backfill-Pre', $1) RETURNING id`, toolTypeID,
+	).Scan(&preID); err != nil {
+		t.Fatalf("inserting the pre-migration row err = %v", err)
+	}
+	// The 000025 backfill UPDATE assigns the sequence number to the NULL rows.
+	if _, err := tx.Exec(ctx,
+		`UPDATE tools SET inventory_number = 'GEAR' || lpad(nextval('tools_inventory_number_seq')::text, 6, '0')
+		 WHERE id = $1 AND inventory_number IS NULL`, preID,
+	); err != nil {
+		t.Fatalf("backfill update err = %v", err)
+	}
+	var inv string
+	if err := tx.QueryRow(ctx, `SELECT inventory_number FROM tools WHERE id = $1`, preID).Scan(&inv); err != nil {
+		t.Fatalf("scanning the backfilled number err = %v", err)
+	}
+	if !toolInventoryNumberFormat.MatchString(inv) {
+		t.Errorf("backfilled inventory_number = %q, want 'GEAR' + 6 zero-padded digits", inv)
 	}
 }

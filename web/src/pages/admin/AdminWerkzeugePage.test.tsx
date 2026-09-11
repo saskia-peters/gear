@@ -34,6 +34,7 @@ function toolItemFixture() {
     tool_type_id: 'id-t1',
     tool_type_name: 'Bohrmaschine',
     schedule_id: '',
+    inventory_number: 'GEAR000001',
     attributes: {},
     created_at: '2026-09-10T10:00:00Z',
     updated_at: '2026-09-10T10:00:00Z',
@@ -151,6 +152,26 @@ describe('AdminWerkzeugePage', () => {
     expect(screen.queryByRole('tab', { name: 'Werkzeuge' })).not.toBeInTheDocument()
   })
 
+  it('NO_SURFACE_CODE: a holder with NEITHER tool_types.manage NOR tools.manage/tool.edit sees no tabs and the EmptyState fallback (finding 15)', async () => {
+    localStorage.setItem('gear.permissions', JSON.stringify(['dashboard.view']))
+    // No tool-surface request should ever fire (no panel renders) — stub fetch
+    // FIRST so a stray call would be visible as a made call on a 404 route.
+    const fetchMock = stubFetchRoutes([])
+    renderPage()
+
+    // No tool-surface tab renders at all (defensive default: the tab value is
+    // inert — no panel can render for this caller).
+    expect(screen.queryByRole('tab', { name: 'Typen' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'Werkzeuge' })).not.toBeInTheDocument()
+    // The fallback EmptyState shows (no tabpanel — a panel must not reference
+    // a tab that does not exist).
+    expect(
+      screen.getByText('Werkzeuge und Gerätetypen sind für dein Konto nicht verfügbar.'),
+    ).toBeInTheDocument()
+    // No tool data is requested from the server (no tab, no panels, no fetch).
+    expect(fetchMock).not.toHaveBeenCalled()
+  })
+
   it('TOOLS_TAB: a tools.manage holder sees the Werkzeuge tab with the tool list + editor + type dropdown + override select', async () => {
     localStorage.setItem('gear.permissions', JSON.stringify(['tools.manage']))
     stubFetchRoutes([
@@ -175,6 +196,12 @@ describe('AdminWerkzeugePage', () => {
     expect(screen.getByRole('option', { name: 'Standard für diesen Typ' })).toBeInTheDocument()
     expect(overrideSelect).toHaveValue('')
     expect(screen.getByRole('button', { name: 'Speichern' })).toBeInTheDocument()
+    // The list row shows the inventory number (Story 4-3b).
+    expect(screen.getByText('GEAR000001')).toBeInTheDocument()
+    // The create form shows the inventory number READ-ONLY (server auto-assigns).
+    const createInv = screen.getByLabelText('Gerätenummer')
+    expect(createInv).toHaveValue('wird automatisch vergeben')
+    expect(createInv).toHaveAttribute('readonly')
   })
 
   it('TOOLS_CREATE: creates a tool with name + type + override via POST /tools', async () => {
@@ -213,6 +240,9 @@ describe('AdminWerkzeugePage', () => {
     expect(body.name).toBe('Bohrmaschine-02')
     expect(body.tool_type_id).toBe('id-t1')
     expect(body.schedule_id).toBe('id-s1')
+    // CREATE_IGNORE_CLIENT: the create body never carries the inventory number
+    // (the server auto-assigns it).
+    expect(body.inventory_number).toBeUndefined()
   })
 
   it('TOOLS_DEFAULT_OVERRIDE: leaving the override on "Standard für diesen Typ" submits an empty schedule_id', async () => {
@@ -440,6 +470,95 @@ describe('AdminWerkzeugePage', () => {
 
   it('TOOLS_403: a 403 on the tool list leaves the admin module back to the dashboard', async () => {
     localStorage.setItem('gear.permissions', JSON.stringify(['tools.manage']))
+    stubFetchRoutes([
+      {
+        matcher: (url: string) => url === TOOLS_URL,
+        response: { ok: false, status: 403, body: { error: { code: 'forbidden', message: 'Keine Berechtigung.' } } },
+      },
+    ])
+    renderPage()
+
+    expect(await screen.findByText('Dashboard')).toBeInTheDocument()
+  })
+
+  it('TOOLS_EDIT_INVENTORY: editing the inventory number PUTs it (UPDATE_INVENTORY)', async () => {
+    localStorage.setItem('gear.permissions', JSON.stringify(['tools.manage']))
+    const fetchMock = stubFetchRoutes([
+      stubTools([toolItemFixture()]),
+      stubToolTypes([toolTypeFixture()]),
+      stubSchedules([scheduleFixture()]),
+      {
+        matcher: (url: string, init?: RequestInit) => url === `${TOOLS_URL}/id-w1` && init?.method === 'PUT',
+        response: { ok: true, status: 200, body: { ...toolItemFixture(), inventory_number: 'GEAR0042', message: 'Werkzeug gespeichert.' } },
+      },
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByText('Bohrmaschine-01')
+    await user.click(screen.getByRole('button', { name: 'Bearbeiten' }))
+    // On edit the inventory number is an EDITABLE input starting at the stored
+    // value (unlike the read-only create display).
+    const invInput = screen.getByLabelText('Gerätenummer')
+    expect(invInput).toHaveValue('GEAR000001')
+    expect(invInput).not.toHaveAttribute('readonly')
+    await user.clear(invInput)
+    await user.type(invInput, 'GEAR0042')
+    await user.click(screen.getByRole('button', { name: 'Änderungen speichern' }))
+
+    expect(await screen.findByText('Werkzeug gespeichert.')).toBeInTheDocument()
+    const putCall = fetchMock.mock.calls.find(
+      ([url, init]) => url === `${TOOLS_URL}/id-w1` && init?.method === 'PUT',
+    )
+    expect(putCall).toBeDefined()
+    const body = JSON.parse(String(putCall![1].body))
+    expect(body.inventory_number).toBe('GEAR0042')
+  })
+
+  it('EDITOR_TOOL_EDIT_ONLY: a tool.edit-only holder sees the list + edit form but NO create form and NO archive buttons', async () => {
+    localStorage.setItem('gear.permissions', JSON.stringify(['tool.edit']))
+    const fetchMock = stubFetchRoutes([
+      stubTools([toolItemFixture()]),
+      stubToolTypes([toolTypeFixture()]),
+      stubSchedules([scheduleFixture()]),
+      {
+        matcher: (url: string, init?: RequestInit) => url === `${TOOLS_URL}/id-w1` && init?.method === 'PUT',
+        response: { ok: true, status: 200, body: { ...toolItemFixture(), name: 'Bohrmaschine-01-neu', message: 'Werkzeug gespeichert.' } },
+      },
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    // The tool.edit-only holder reaches the Werkzeuge tab (any-of gate) and
+    // sees the list with the inventory number.
+    expect(await screen.findByText('Bohrmaschine-01')).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'Werkzeuge' })).toBeInTheDocument()
+    expect(screen.getByText('GEAR000001')).toBeInTheDocument()
+    // NO create form (the "Neues Werkzeug" title + its save button are hidden)
+    // and NO archive buttons (tools.manage-only, Story 4-3b).
+    expect(screen.queryByText('Neues Werkzeug')).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Speichern' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: 'Archivieren' })).not.toBeInTheDocument()
+
+    // Bearbeiten opens the EDIT form with the editable inventory number.
+    await user.click(screen.getByRole('button', { name: 'Bearbeiten' }))
+    expect(screen.getByText('Werkzeug bearbeiten')).toBeInTheDocument()
+    const invInput = screen.getByLabelText('Gerätenummer')
+    expect(invInput).toHaveValue('GEAR000001')
+    expect(invInput).not.toHaveAttribute('readonly')
+
+    // GATE_UPDATE: the tool.edit holder can save the edit (PUT, any-of).
+    await user.type(screen.getByLabelText('Name'), '-neu')
+    await user.click(screen.getByRole('button', { name: 'Änderungen speichern' }))
+    expect(await screen.findByText('Werkzeug gespeichert.')).toBeInTheDocument()
+    const putCall = fetchMock.mock.calls.find(
+      ([url, init]) => url === `${TOOLS_URL}/id-w1` && init?.method === 'PUT',
+    )
+    expect(putCall).toBeDefined()
+  })
+
+  it('TOOLS_403_TOOL_EDIT: a 403 on the tool list for a tool.edit holder still leaves the module (defensive)', async () => {
+    localStorage.setItem('gear.permissions', JSON.stringify(['tool.edit']))
     stubFetchRoutes([
       {
         matcher: (url: string) => url === TOOLS_URL,

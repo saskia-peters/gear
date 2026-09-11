@@ -28,6 +28,14 @@ import (
 // the SPA-facing documentation never drift.
 const ToolsManagePermission = "tools.manage"
 
+// ToolEditPermission is the scoped tool-EDIT gate code (Story 4-3b, AD-6): a
+// holder can VIEW + EDIT tools (incl. the inventory number) but NOT create or
+// archive them — those stay `tools.manage`. The reads (ListTools/UpdateTool)
+// are any-of [tools.manage, tool.edit]; the writes (CreateTool/ArchiveTool) are
+// tools.manage-only. One Go const so the route mount, the core re-check and the
+// SPA-facing documentation never drift.
+const ToolEditPermission = "tool.edit"
+
 // DashboardViewPermission is the server-authoritative gate code for the
 // GEAR-module (non-admin) dashboard tool-list surface (Story 4-3b): the
 // `/api/v1/tools` mount carries it (all base roles hold it), so the core read
@@ -83,7 +91,26 @@ const (
 	// vanished between the core check and the insert (e.g. archived or deleted
 	// concurrently) — the raw pg error must never surface as a 500.
 	MsgToolReferencedGone = "Der referenzierte Gerätetyp oder Zeitplan ist nicht mehr verfügbar."
+	// MsgToolInventoryNumberRequired rejects an update that CLEARS the inventory
+	// number — a tool always has one, it is never empty (UPDATE_CLEAR, 400).
+	MsgToolInventoryNumberRequired = "Die Gerätenummer darf nicht leer sein."
+	// MsgToolInventoryNumberTooLong is the 400 message for an over-long number
+	// (bounded by the DB CHECK <= 16, mirrored here in RUNES).
+	MsgToolInventoryNumberTooLong = "Die Gerätenummer ist zu lang (maximal 16 Zeichen)."
+	// MsgToolInventoryNumberTaken rejects an update whose inventory number
+	// another ACTIVE tool already holds (case-insensitive active-guard; the DB
+	// UNIQUE backstop covers EXACT reuse of an archived number, Story 4.5).
+	MsgToolInventoryNumberTaken = "Es gibt bereits ein Werkzeug mit dieser Gerätenummer."
+	// MsgToolInventoryNumberCollision is the German 400 when the auto-assigned
+	// inventory number collided repeatedly (bounded retry loop exhausted) — a
+	// manual edit raced the sequence; the create must be retried.
+	MsgToolInventoryNumberCollision = "Die Gerätenummer konnte nicht vergeben werden. Bitte versuche es erneut."
 )
+
+// InventoryNumberMaxLength bounds the editable inventory number (16 chars —
+// 'GEAR' + 6 zero-padded digits leaves headroom for future numbering schemes;
+// mirrored by the DB CHECK constraint).
+const InventoryNumberMaxLength = 16
 
 // Tool is the domain representation of one physical tool row (FR-9/FR-10).
 // ToolTypeID is the intra-module FK to a tool type; ToolTypeName is the JOIN
@@ -94,25 +121,31 @@ const (
 // no-migration JSONB extension surface (FR-10, default '{}'). ArchivedAt is
 // nil while the tool is active and set (soft-archive) otherwise.
 type Tool struct {
-	ID           string
-	Name         string
-	ToolTypeID   string
-	ToolTypeName string
-	ScheduleID   string
-	Attributes   map[string]any
-	ArchivedAt   *time.Time
-	CreatedAt    time.Time
-	UpdatedAt    time.Time
+	ID              string
+	Name            string
+	ToolTypeID      string
+	ToolTypeName    string
+	ScheduleID      string
+	InventoryNumber string
+	Attributes      map[string]any
+	ArchivedAt      *time.Time
+	CreatedAt       time.Time
+	UpdatedAt       time.Time
 }
 
 // ToolInput is the shared POST/PUT body (FR-9/FR-10). ScheduleID is the
 // OPTIONAL per-tool override: empty → the tool inherits its type's default
 // (AD-5). Attributes passes the JSONB extension surface through unchanged.
+// InventoryNumber is IGNORED on create (the server auto-assigns 'GEAR%06d'
+// in-SQL, CREATE_IGNORE_CLIENT) and OPTIONAL on update: a non-empty value edits
+// the stored number (bounded, unique); an empty value is REJECTED — a tool
+// always has an inventory number (UPDATE_CLEAR, 400).
 type ToolInput struct {
-	Name       string         `json:"name"`
-	ToolTypeID string         `json:"tool_type_id"`
-	ScheduleID string         `json:"schedule_id"`
-	Attributes map[string]any `json:"attributes"`
+	Name            string         `json:"name"`
+	ToolTypeID      string         `json:"tool_type_id"`
+	ScheduleID      string         `json:"schedule_id"`
+	InventoryNumber string         `json:"inventory_number"`
+	Attributes      map[string]any `json:"attributes"`
 }
 
 // ToolStore is the outbound persistence port over the Tool-owned `tools` table
@@ -147,10 +180,13 @@ type toolModuleStore interface {
 }
 
 // requireToolsPermission re-verifies (defense-in-depth, AD-6) that the actor's
-// LIVE permission set holds tools.manage. The route gateway already enforces
-// it; the core re-checks so no future direct caller can skip it. An empty actor
-// ID never passes.
-func (s *Service) requireToolsPermission(ctx context.Context, actorID string) error {
+// LIVE permission set holds AT LEAST ONE of the given tool codes. The route
+// gateway already enforces the outer any-of gate; the core re-checks the exact
+// per-action code list so no future direct caller can skip it. The reads
+// (ListTools/UpdateTool) pass any-of [tools.manage, tool.edit]; the writes
+// (CreateTool/ArchiveTool) pass tools.manage-only. An empty actor ID never
+// passes.
+func (s *Service) requireToolsPermission(ctx context.Context, actorID string, required []string) error {
 	if actorID == "" {
 		return ErrForbidden
 	}
@@ -158,9 +194,11 @@ func (s *Service) requireToolsPermission(ctx context.Context, actorID string) er
 	if err != nil {
 		return fmt.Errorf("tools core: failed to resolve actor permissions: %w", err)
 	}
-	for _, p := range perms {
-		if p == ToolsManagePermission {
-			return nil
+	for _, want := range required {
+		for _, p := range perms {
+			if p == want {
+				return nil
+			}
 		}
 	}
 	return ErrForbidden
@@ -182,7 +220,7 @@ func (s *Service) auditTool(ctx context.Context, actorID, operation, detail stri
 // display name (GET_LIST_EMPTY / GET_LIST). Archived rows are filtered by the
 // store and never reach the surface.
 func (s *Service) ListTools(ctx context.Context, actorID string) ([]*Tool, error) {
-	if err := s.requireToolsPermission(ctx, actorID); err != nil {
+	if err := s.requireToolsPermission(ctx, actorID, []string{ToolsManagePermission, ToolEditPermission}); err != nil {
 		return nil, err
 	}
 	tools, err := s.store.ListTools(ctx)
@@ -218,7 +256,7 @@ func (s *Service) ListToolsForDashboard(ctx context.Context) ([]*Tool, error) {
 // The write goes through the Tool module's configuration port (AD-10). Audited
 // (tool.create).
 func (s *Service) CreateTool(ctx context.Context, actorID string, input ToolInput) (*Tool, error) {
-	if err := s.requireToolsPermission(ctx, actorID); err != nil {
+	if err := s.requireToolsPermission(ctx, actorID, []string{ToolsManagePermission}); err != nil {
 		return nil, err
 	}
 	if err := validateToolInput(input); err != nil {
@@ -260,7 +298,7 @@ func (s *Service) CreateTool(ctx context.Context, actorID string, input ToolInpu
 // sentinel wins over any 400). The type and the (non-empty) override are then
 // re-validated. Audited (tool.update).
 func (s *Service) UpdateTool(ctx context.Context, actorID, id string, input ToolInput) (*Tool, error) {
-	if err := s.requireToolsPermission(ctx, actorID); err != nil {
+	if err := s.requireToolsPermission(ctx, actorID, []string{ToolsManagePermission, ToolEditPermission}); err != nil {
 		return nil, err
 	}
 	if err := validateToolInput(input); err != nil {
@@ -278,6 +316,20 @@ func (s *Service) UpdateTool(ctx context.Context, actorID, id string, input Tool
 		return nil, ErrToolNotFound
 	}
 
+	// Validate the inventory number (Story 4-3b): a tool always has one (an
+	// empty value is REJECTED — it can never be cleared, UPDATE_CLEAR), it is
+	// bounded, and it is unique case-insensitively among ACTIVE tools. This
+	// runs AFTER the existence check so an unknown/archived id answers the 404
+	// sentinel even with an invalid inventory number (the sentinel wins over
+	// any 400).
+	inventoryNumber, err := validateToolInventoryNumber(input.InventoryNumber)
+	if err != nil {
+		return nil, err
+	}
+	if err := s.ensureUniqueToolInventoryNumber(ctx, inventoryNumber, id); err != nil {
+		return nil, err
+	}
+
 	if err := s.validateToolFKs(ctx, input); err != nil {
 		return nil, err
 	}
@@ -287,11 +339,12 @@ func (s *Service) UpdateTool(ctx context.Context, actorID, id string, input Tool
 	}
 
 	tool := &Tool{
-		ID:         id,
-		Name:       strings.TrimSpace(input.Name),
-		ToolTypeID: strings.TrimSpace(input.ToolTypeID),
-		ScheduleID: strings.TrimSpace(input.ScheduleID),
-		Attributes: input.Attributes,
+		ID:              id,
+		Name:            strings.TrimSpace(input.Name),
+		ToolTypeID:      strings.TrimSpace(input.ToolTypeID),
+		ScheduleID:      strings.TrimSpace(input.ScheduleID),
+		InventoryNumber: inventoryNumber,
+		Attributes:      input.Attributes,
 	}
 	if tool.Attributes == nil {
 		tool.Attributes = map[string]any{}
@@ -314,7 +367,7 @@ func (s *Service) UpdateTool(ctx context.Context, actorID, id string, input Tool
 // V1. Archiving an already-archived row answers the 404 sentinel (the row is
 // non-existent to the surface). Audited (tool.archive).
 func (s *Service) ArchiveTool(ctx context.Context, actorID, id string) (*Tool, error) {
-	if err := s.requireToolsPermission(ctx, actorID); err != nil {
+	if err := s.requireToolsPermission(ctx, actorID, []string{ToolsManagePermission}); err != nil {
 		return nil, err
 	}
 
@@ -411,6 +464,51 @@ func (s *Service) ensureUniqueToolName(ctx context.Context, name, exceptID strin
 		}
 		if strings.EqualFold(tool.Name, name) {
 			return &InvalidToolError{Message: MsgToolNameTaken}
+		}
+	}
+	return nil
+}
+
+// validateToolInventoryNumber enforces the editable-inventory invariants
+// (UPDATE_INVENTORY / UPDATE_CLEAR / Story 4-3b): the number must be NON-EMPTY
+// (a tool always has one — clearing is rejected, 400), bounded to
+// InventoryNumberMaxLength RUNES and returned trimmed. Validity of the format
+// is intentionally free-form text (char, not number-only — the only hard shape
+// is the auto-assigned 'GEAR%06d').
+func validateToolInventoryNumber(inventoryNumber string) (string, error) {
+	inv := strings.TrimSpace(inventoryNumber)
+	if inv == "" {
+		return "", &InvalidToolError{Message: MsgToolInventoryNumberRequired}
+	}
+	if utf8.RuneCountInString(inv) > InventoryNumberMaxLength {
+		return "", &InvalidToolError{Message: MsgToolInventoryNumberTooLong}
+	}
+	return inv, nil
+}
+
+// ensureUniqueToolInventoryNumber rejects an edit whose inventory number
+// another ACTIVE tool already holds (case-insensitive, finding): two ACTIVE
+// tools must not share a number. exceptID excludes the tool being updated from
+// the comparison.
+//
+// The overall duplicate-inventory semantics are ONE coherent rule split across
+// two guards, mirroring the duplicate-name convention:
+//   - This core guard: case-insensitive over the ACTIVE catalog only.
+//   - The DB UNIQUE index (tools_inventory_number_key) backstop: EXACT over ALL
+//     rows (active AND archived) — an archived tool's number stays "taken"
+//     (the Story 4.5 import backstop). The repository maps SQLSTATE 23505 on
+//     that index to the same German duplicate-inventory 400.
+func (s *Service) ensureUniqueToolInventoryNumber(ctx context.Context, inventoryNumber, exceptID string) error {
+	tools, err := s.store.ListTools(ctx)
+	if err != nil {
+		return fmt.Errorf("tools core: failed to check inventory-number uniqueness: %w", err)
+	}
+	for _, tool := range tools {
+		if tool.ID == exceptID {
+			continue
+		}
+		if strings.EqualFold(tool.InventoryNumber, inventoryNumber) {
+			return &InvalidToolError{Message: MsgToolInventoryNumberTaken}
 		}
 	}
 	return nil

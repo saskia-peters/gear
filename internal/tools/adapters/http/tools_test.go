@@ -69,6 +69,7 @@ func (f *fakeToolService) CreateTool(_ context.Context, _ string, input toolscor
 	return &toolscore.Tool{
 		ID: "id-new", Name: input.Name, ToolTypeID: input.ToolTypeID,
 		ToolTypeName: "Bohrmaschine", ScheduleID: input.ScheduleID,
+		InventoryNumber: "GEAR000001",
 	}, nil
 }
 
@@ -81,6 +82,7 @@ func (f *fakeToolService) UpdateTool(_ context.Context, _, id string, input tool
 	return &toolscore.Tool{
 		ID: id, Name: input.Name, ToolTypeID: input.ToolTypeID,
 		ToolTypeName: "Bohrmaschine", ScheduleID: input.ScheduleID,
+		InventoryNumber: input.InventoryNumber,
 	}, nil
 }
 
@@ -95,16 +97,17 @@ func (f *fakeToolService) ArchiveTool(_ context.Context, _, id string) (*toolsco
 
 var _ toolports.Service = (*fakeToolService)(nil)
 
-// toolGateway wraps the REAL ToolRoutes() behind the same RequireAnyPermission
-// gate the composition root uses (tools.manage), with a fake session validator
-// + permission resolver.
+// toolGateway wraps the REAL ToolRoutes() behind the same ANY-of gate the
+// composition root uses ([tools.manage, tool.edit], Story 4-3b), with a fake
+// session validator + permission resolver. The write-only tools.manage sub-gate
+// lives INSIDE ToolRoutes, so the per-action split is exercised here too.
 func toolGateway(perms []string, session *usercore.Session, svc toolports.Service) http.Handler {
-	h := NewHandler(svc, discardLogger())
+	h := NewHandler(svc, &gateValidator{session: session}, &gateResolver{perms: perms}, discardLogger())
 	return auth.RequireAnyPermission(
 		&gateValidator{session: session},
 		&gateResolver{perms: perms},
-		[]string{toolscore.ToolsManagePermission},
-		"tools.manage access denied", discardLogger(),
+		[]string{toolscore.ToolsManagePermission, toolscore.ToolEditPermission},
+		"tools.manage/tool.edit access denied", discardLogger(),
 	)(h.ToolRoutes())
 }
 
@@ -112,7 +115,7 @@ func toolGateway(perms []string, session *usercore.Session, svc toolports.Servic
 // RequirePermission gate the composition root uses (dashboard.view, Story
 // 4-3b), with a fake session validator + permission resolver.
 func dashboardToolGateway(perms []string, session *usercore.Session, svc toolports.Service) http.Handler {
-	h := NewHandler(svc, discardLogger())
+	h := NewHandler(svc, &gateValidator{session: session}, &gateResolver{perms: perms}, discardLogger())
 	return auth.RequirePermission(
 		&gateValidator{session: session},
 		&gateResolver{perms: perms},
@@ -124,12 +127,19 @@ func toolFixture(id, name string) *toolscore.Tool {
 	return &toolscore.Tool{
 		ID: id, Name: name,
 		ToolTypeID: "id-t1", ToolTypeName: "Bohrmaschine",
-		ScheduleID: "id-s1",
+		ScheduleID:      "id-s1",
+		InventoryNumber: "GEAR00000X",
 	}
 }
 
 func writeToolBody() string {
 	return `{"name":"Bohrmaschine-01","tool_type_id":"id-t1","schedule_id":""}`
+}
+
+// writeToolBodyInventory is the PUT body WITH an inventory-number edit (Story
+// 4-3b, UPDATE_INVENTORY).
+func writeToolBodyInventory() string {
+	return `{"name":"Bohrmaschine-01","tool_type_id":"id-t1","schedule_id":"","inventory_number":"GEAR0042"}`
 }
 
 func TestToolsGetListEmpty(t *testing.T) {
@@ -172,6 +182,9 @@ func TestToolsGetList(t *testing.T) {
 	}
 	if body[0]["schedule_id"] != "id-s1" {
 		t.Errorf("row 0 schedule override = %+v", body[0]["schedule_id"])
+	}
+	if body[0]["inventory_number"] != "GEAR00000X" {
+		t.Errorf("row 0 inventory_number = %+v, want GEAR00000X", body[0]["inventory_number"])
 	}
 	attrs, ok := body[0]["attributes"].(map[string]any)
 	if !ok || attrs["standort"] != "Werkstatt" {
@@ -228,8 +241,9 @@ func TestDashboardToolsGetListEmpty(t *testing.T) {
 
 func TestDashboardToolsGetList(t *testing.T) {
 	// GET_LIST (Story 4-3b): 200 with the MINIMAL dashboard DTO — id, name,
-	// tool_type_id, tool_type_name only. No schedule_id, no attributes, no
-	// audit timestamps, no status derivation on this surface.
+	// tool_type_id, tool_type_name + inventory_number (shown as row meta in the
+	// Werkzeugliste). No schedule_id, no attributes, no audit timestamps, no
+	// status derivation on this surface.
 	svc := &fakeToolService{tools: []*toolscore.Tool{
 		toolFixture("id-a", "Bohrmaschine-01"),
 		toolFixture("id-b", "Bohrmaschine-02"),
@@ -251,6 +265,9 @@ func TestDashboardToolsGetList(t *testing.T) {
 	}
 	if body[0]["tool_type_id"] != "id-t1" || body[0]["tool_type_name"] != "Bohrmaschine" {
 		t.Errorf("row 0 type = %+v", body[0])
+	}
+	if body[0]["inventory_number"] != "GEAR00000X" {
+		t.Errorf("row 0 inventory_number = %+v, want GEAR00000X", body[0]["inventory_number"])
 	}
 	for _, row := range body {
 		for _, leak := range []string{"schedule_id", "attributes", "archived_at", "created_at", "updated_at"} {
@@ -349,6 +366,11 @@ func TestToolsCreateValid(t *testing.T) {
 	}
 	if body["name"] != "Bohrmaschine-01" {
 		t.Errorf("body = %+v, want persisted name", body)
+	}
+	// CREATE_AUTO: the server auto-assigns the inventory number (a client value
+	// is ignored) and the response carries it.
+	if body["inventory_number"] != "GEAR000001" {
+		t.Errorf("body inventory_number = %v, want the auto-assigned GEAR000001", body["inventory_number"])
 	}
 	if svc.lastInput.ScheduleID != "" {
 		t.Errorf("core input schedule override = %q, want empty", svc.lastInput.ScheduleID)
@@ -546,6 +568,121 @@ func TestToolsWriteForbidden(t *testing.T) {
 	}
 	if rec := doRequest(surface, http.MethodPost, "/id-a/archive", "tok", ""); rec.Code != http.StatusForbidden {
 		t.Errorf("archive status = %d, want 403", rec.Code)
+	}
+}
+
+func TestToolsEditOnlyCanReadAndUpdate(t *testing.T) {
+	// GATE_GET / GATE_UPDATE (Story 4-3b): a tool.edit-ONLY holder (no
+	// tools.manage) can GET (list) and PUT (edit) through the any-of outer gate —
+	// the write-only sub-gate does NOT cover GET/PUT.
+	svc := &fakeToolService{tools: []*toolscore.Tool{toolFixture("id-a", "Bohrmaschine-01")}}
+	surface := toolGateway([]string{toolscore.ToolEditPermission}, activeAdmin(), svc)
+
+	rec := doRequest(surface, http.MethodGet, "/", "tok", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("GET status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var body []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding GET err = %v", err)
+	}
+	if len(body) != 1 || body[0]["id"] != "id-a" {
+		t.Errorf("GET body = %+v, want the tool list", body)
+	}
+
+	rec = doRequest(surface, http.MethodPut, "/id-a", "tok", writeToolBodyInventory())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if svc.lastInput.InventoryNumber != "GEAR0042" {
+		t.Errorf("core received inventory_number = %q, want GEAR0042", svc.lastInput.InventoryNumber)
+	}
+}
+
+func TestToolsEditOnlyCannotCreateOrArchive(t *testing.T) {
+	// GATE_CREATE / GATE_ARCHIVE (Story 4-3b): the write-only sub-router
+	// re-applies a tools.manage-ONLY gate, so a tool.edit-only holder is denied
+	// POST (create) and POST /{id}/archive with the uniform 403 — no tool data.
+	svc := &fakeToolService{tools: []*toolscore.Tool{toolFixture("id-a", "Bohrmaschine-01")}}
+	surface := toolGateway([]string{toolscore.ToolEditPermission}, activeAdmin(), svc)
+
+	rec := doRequest(surface, http.MethodPost, "/", "tok", writeToolBody())
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("POST status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(strings.ToLower(rec.Body.String()), "bohrmaschine") {
+		t.Errorf("POST 403 body leaks tool data: %s", rec.Body.String())
+	}
+
+	rec = doRequest(surface, http.MethodPost, "/id-a/archive", "tok", "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("archive status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	if svc.lastID != "" {
+		t.Errorf("core received archive id = %q, want none (denied at the sub-gate)", svc.lastID)
+	}
+}
+
+func TestToolsUpdateInventory(t *testing.T) {
+	// UPDATE_INVENTORY: a PUT carrying an inventory_number edits it — the value
+	// travels to the core and the response reflects it.
+	svc := &fakeToolService{}
+	surface := toolGateway([]string{toolscore.ToolsManagePermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPut, "/id-a", "tok", writeToolBodyInventory())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding err = %v", err)
+	}
+	if body["inventory_number"] != "GEAR0042" {
+		t.Errorf("response inventory_number = %v, want GEAR0042", body["inventory_number"])
+	}
+	if svc.lastInput.InventoryNumber != "GEAR0042" {
+		t.Errorf("core received inventory_number = %q, want GEAR0042", svc.lastInput.InventoryNumber)
+	}
+}
+
+func TestToolsUpdateInventoryCleared(t *testing.T) {
+	// UPDATE_CLEAR: the core rejects an empty inventory_number (a tool always
+	// has one) — mapped to the uniform 400 German message.
+	svc := &fakeToolService{writeErr: &toolscore.InvalidToolError{Message: toolscore.MsgToolInventoryNumberRequired}}
+	surface := toolGateway([]string{toolscore.ToolsManagePermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPut, "/id-a", "tok", `{"name":"Bohrmaschine-01","tool_type_id":"id-t1","schedule_id":"","inventory_number":""}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 400 err = %v", err)
+	}
+	if env.Error.Code != "invalid_request" {
+		t.Errorf("code = %q, want invalid_request", env.Error.Code)
+	}
+	if !strings.Contains(env.Error.Message, "leer") {
+		t.Errorf("message = %q, want the never-empty microcopy", env.Error.Message)
+	}
+}
+
+func TestToolsCreateIgnoresClientInventory(t *testing.T) {
+	// CREATE_IGNORE_CLIENT: a client-sent inventory_number on create is passed
+	// through the handler but the SERVER auto-assigns the returned number (the
+	// fake service mimics the auto-assignment; the core ignores the client
+	// value entirely — pinned at the core level).
+	svc := &fakeToolService{}
+	surface := toolGateway([]string{toolscore.ToolsManagePermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPost, "/", "tok",
+		`{"name":"Bohrmaschine-01","tool_type_id":"id-t1","schedule_id":"","inventory_number":"GEAR999999"}`)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (body %s)", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding err = %v", err)
+	}
+	if body["inventory_number"] != "GEAR000001" {
+		t.Errorf("response inventory_number = %v, want the server-assigned GEAR000001", body["inventory_number"])
 	}
 }
 

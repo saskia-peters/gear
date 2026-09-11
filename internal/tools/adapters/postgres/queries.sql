@@ -103,7 +103,7 @@ RETURNING id, name, default_schedule_id, required_qualification_id, inspection_m
 -- filtered out — the active surface never shows them. The order is
 -- deterministic: created_at ASC with a name tiebreaker. An empty schedule_id
 -- (SQL NULL) means the tool inherits its type's default schedule (AD-5).
-SELECT t.id, t.name, t.tool_type_id, tt.name AS tool_type_name, t.schedule_id, t.attributes, t.archived_at, t.created_at, t.updated_at
+SELECT t.id, t.name, t.tool_type_id, tt.name AS tool_type_name, t.schedule_id, t.inventory_number, t.attributes, t.archived_at, t.created_at, t.updated_at
 FROM tools t
 JOIN tool_types tt ON tt.id = t.tool_type_id
 WHERE t.archived_at IS NULL
@@ -122,17 +122,26 @@ SELECT EXISTS (
 
 -- name: CreateTool :one
 -- Insert a tool and return the resulting row JOINed with its type name. The
--- core validated the type EXISTS + ACTIVE and the (optional) schedule override
--- against the SchedulesPort first; an EMPTY schedule_id is passed as NULL
--- (inherit the type default, AD-5). A name already held by ANY row (active or
--- archived) trips the UNIQUE constraint and is mapped by the repository to the
--- German duplicate-name 400.
+-- inventory number is AUTO-ASSIGNED in-SQL (Story 4-3b): 'GEAR' || zero-padded
+-- nextval from the dedicated sequence — atomic, monotonic, one round-trip, no
+-- client input (CREATE_IGNORE_CLIENT). NOTE: the zero-pad width is 6 for the
+-- backfill/early numbering; once the sequence exceeds 999999 the number
+-- NATURALLY widens to 7+ digits (e.g. 'GEAR1000000') — still well inside the
+-- CHECK (char_length <= 16), monotonic, and fine for the surface. A manual edit
+-- can consume a future sequence value; a UNIQUE collision on
+-- tools_inventory_number_key (a case-insensitive functional index) is handled
+-- by the repository's bounded retry loop (re-running this INSERT computes a
+-- FRESH nextval). The core validated the type EXISTS + ACTIVE and the
+-- (optional) schedule override against the SchedulesPort first; an EMPTY
+-- schedule_id is passed as NULL (inherit the type default, AD-5). A name
+-- already held by ANY row (active or archived) trips the UNIQUE constraint and
+-- is mapped by the repository to the German duplicate-name 400.
 WITH new_tool AS (
-    INSERT INTO tools (name, tool_type_id, schedule_id, attributes)
-    VALUES ($1, $2, $3, $4)
-    RETURNING id, name, tool_type_id, schedule_id, attributes, archived_at, created_at, updated_at
+    INSERT INTO tools (name, tool_type_id, schedule_id, inventory_number, attributes)
+    VALUES ($1, $2, $3, 'GEAR' || lpad(nextval('tools_inventory_number_seq')::text, 6, '0'), $4)
+    RETURNING id, name, tool_type_id, schedule_id, inventory_number, attributes, archived_at, created_at, updated_at
 )
-SELECT nt.id, nt.name, nt.tool_type_id, tt.name AS tool_type_name, nt.schedule_id, nt.attributes, nt.archived_at, nt.created_at, nt.updated_at
+SELECT nt.id, nt.name, nt.tool_type_id, tt.name AS tool_type_name, nt.schedule_id, nt.inventory_number, nt.attributes, nt.archived_at, nt.created_at, nt.updated_at
 FROM new_tool nt
 JOIN tool_types tt ON tt.id = nt.tool_type_id;
 
@@ -143,18 +152,24 @@ JOIN tool_types tt ON tt.id = nt.tool_type_id;
 -- (soft archive is irreversible in V1; the archived row is non-existent to the
 -- surface). The schedule override REPLACES the stored value, so clearing it
 -- (schedule_id NULL) makes the tool inherit its type's default again
--- (UPDATE_CLEAR_OVERRIDE, AD-5).
+-- (UPDATE_CLEAR_OVERRIDE, AD-5). The inventory number REPLACES the stored value
+-- too (Story 4-3b, UPDATE_INVENTORY): the core already validated it non-empty
+-- + bounded + unique case-insensitively among active tools; a reuse of a number
+-- held by ANOTHER row (active or archived — incl. case-variants, via the
+-- lower() functional UNIQUE index) is mapped by the repository to the German
+-- duplicate-inventory 400.
 WITH updated AS (
     UPDATE tools
     SET name = $2,
         tool_type_id = $3,
         schedule_id = $4,
-        attributes = $5,
+        inventory_number = $5,
+        attributes = $6,
         updated_at = now()
     WHERE tools.id = $1 AND tools.archived_at IS NULL
-    RETURNING tools.id, tools.name, tools.tool_type_id, tools.schedule_id, tools.attributes, tools.archived_at, tools.created_at, tools.updated_at
+    RETURNING tools.id, tools.name, tools.tool_type_id, tools.schedule_id, tools.inventory_number, tools.attributes, tools.archived_at, tools.created_at, tools.updated_at
 )
-SELECT u.id, u.name, u.tool_type_id, tt.name AS tool_type_name, u.schedule_id, u.attributes, u.archived_at, u.created_at, u.updated_at
+SELECT u.id, u.name, u.tool_type_id, tt.name AS tool_type_name, u.schedule_id, u.inventory_number, u.attributes, u.archived_at, u.created_at, u.updated_at
 FROM updated u
 JOIN tool_types tt ON tt.id = u.tool_type_id;
 
@@ -168,8 +183,8 @@ WITH archived AS (
     SET archived_at = now(),
         updated_at = now()
     WHERE tools.id = $1 AND tools.archived_at IS NULL
-    RETURNING tools.id, tools.name, tools.tool_type_id, tools.schedule_id, tools.attributes, tools.archived_at, tools.created_at, tools.updated_at
+    RETURNING tools.id, tools.name, tools.tool_type_id, tools.schedule_id, tools.inventory_number, tools.attributes, tools.archived_at, tools.created_at, tools.updated_at
 )
-SELECT a.id, a.name, a.tool_type_id, tt.name AS tool_type_name, a.schedule_id, a.attributes, a.archived_at, a.created_at, a.updated_at
+SELECT a.id, a.name, a.tool_type_id, tt.name AS tool_type_name, a.schedule_id, a.inventory_number, a.attributes, a.archived_at, a.created_at, a.updated_at
 FROM archived a
 JOIN tool_types tt ON tt.id = a.tool_type_id;

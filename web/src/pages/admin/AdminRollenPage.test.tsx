@@ -184,7 +184,7 @@ describe('AdminRollenPage', () => {
     expect(screen.queryByRole('button', { name: 'Neue Rolle' })).not.toBeInTheDocument()
   })
 
-  it('CATALOG_FALLBACK: an empty server catalog falls back to the shipped 23-code grid', async () => {
+  it('CATALOG_FALLBACK: an empty server catalog falls back to the shipped 24-code grid', async () => {
     stubFetchRoutes([
       {
         matcher: (url) => url === GROUPS_URL,
@@ -198,9 +198,10 @@ describe('AdminRollenPage', () => {
     await user.click(screen.getByRole('button', { name: 'Neue Rolle' }))
 
     // A label that exists only in the shipped fallback (not the 2-entry test
-    // catalog), plus the full 23-code grid.
+    // catalog), plus the full 24-code grid (tool.edit added in Story 4-3b).
     expect(await screen.findByRole('checkbox', { name: 'Rollen zuweisen' })).toBeInTheDocument()
-    expect(screen.getAllByRole('checkbox')).toHaveLength(23)
+    expect(screen.getAllByRole('checkbox')).toHaveLength(24)
+    expect(screen.getByRole('checkbox', { name: 'Geräte bearbeiten' })).toBeInTheDocument()
   })
 
   it('FORBIDDEN: a 403 on load clears the admin flag and leaves the admin module', async () => {

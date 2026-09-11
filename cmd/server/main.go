@@ -135,7 +135,7 @@ func main() {
 	toolStore := toolpostgres.New(pool)
 	toolRepo := toolpostgres.NewRepository(toolStore)
 	toolService := toolscore.NewService(toolRepo, adminSettingsService, userService, userRepo, userRepo, log)
-	toolHandler := toolhttp.NewHandler(toolService, log)
+	toolHandler := toolhttp.NewHandler(toolService, sessionManager, userRepo, log)
 
 	// The tool-type surface mounts under /api/v1/admin/tool-types with its OWN
 	// gate — one permission per surface (AD-6/AD-10): only holders of
@@ -143,11 +143,15 @@ func main() {
 	// defense-in-depth. It deliberately does NOT widen any existing gate.
 	toolTypesSurface := auth.RequireAnyPermission(sessionManager, userRepo, []string{toolscore.ToolTypesManagePermission}, "tool_types.manage access denied", log)(toolHandler.ToolTypeRoutes())
 
-	// The tool surface mounts under /api/v1/admin/tools with its OWN gate — one
-	// permission per surface (AD-6/AD-10): only holders of `tools.manage`
-	// reach it (Story 4.3). The core re-checks the same code
+	// The tool surface mounts under /api/v1/admin/tools with its OWN gate —
+	// ANY-of [tools.manage, tool.edit] (Spec 4-3b, AD-6): a tool.edit-only
+	// holder (e.g. a Führende with only the scoped code) can VIEW + EDIT tools
+	// (incl. the inventory number) but NOT create/archive. The reads (GET/PUT)
+	// are the any-of gate; POST (create) and POST /{id}/archive re-apply a
+	// tools.manage-ONLY gate inside ToolRoutes (the write-only sub-router, the
+	// admin sub-surface precedent). The core re-checks the same split
 	// defense-in-depth. It deliberately does NOT widen the tool_types gate.
-	toolToolsSurface := auth.RequireAnyPermission(sessionManager, userRepo, []string{toolscore.ToolsManagePermission}, "tools.manage access denied", log)(toolHandler.ToolRoutes())
+	toolToolsSurface := auth.RequireAnyPermission(sessionManager, userRepo, []string{toolscore.ToolsManagePermission, toolscore.ToolEditPermission}, "tools.manage/tool.edit access denied", log)(toolHandler.ToolRoutes())
 
 	// The dashboard tool-list surface mounts under /api/v1/tools with its OWN
 	// gate — one permission per surface (AD-6, Story 4-3b): any `dashboard.view`

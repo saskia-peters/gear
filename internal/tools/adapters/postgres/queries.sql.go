@@ -17,23 +17,24 @@ WITH archived AS (
     SET archived_at = now(),
         updated_at = now()
     WHERE tools.id = $1 AND tools.archived_at IS NULL
-    RETURNING tools.id, tools.name, tools.tool_type_id, tools.schedule_id, tools.attributes, tools.archived_at, tools.created_at, tools.updated_at
+    RETURNING tools.id, tools.name, tools.tool_type_id, tools.schedule_id, tools.inventory_number, tools.attributes, tools.archived_at, tools.created_at, tools.updated_at
 )
-SELECT a.id, a.name, a.tool_type_id, tt.name AS tool_type_name, a.schedule_id, a.attributes, a.archived_at, a.created_at, a.updated_at
+SELECT a.id, a.name, a.tool_type_id, tt.name AS tool_type_name, a.schedule_id, a.inventory_number, a.attributes, a.archived_at, a.created_at, a.updated_at
 FROM archived a
 JOIN tool_types tt ON tt.id = a.tool_type_id
 `
 
 type ArchiveToolRow struct {
-	ID           pgtype.UUID        `json:"id"`
-	Name         string             `json:"name"`
-	ToolTypeID   pgtype.UUID        `json:"tool_type_id"`
-	ToolTypeName string             `json:"tool_type_name"`
-	ScheduleID   pgtype.UUID        `json:"schedule_id"`
-	Attributes   []byte             `json:"attributes"`
-	ArchivedAt   pgtype.Timestamptz `json:"archived_at"`
-	CreatedAt    pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+	ID              pgtype.UUID        `json:"id"`
+	Name            string             `json:"name"`
+	ToolTypeID      pgtype.UUID        `json:"tool_type_id"`
+	ToolTypeName    string             `json:"tool_type_name"`
+	ScheduleID      pgtype.UUID        `json:"schedule_id"`
+	InventoryNumber string             `json:"inventory_number"`
+	Attributes      []byte             `json:"attributes"`
+	ArchivedAt      pgtype.Timestamptz `json:"archived_at"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
 }
 
 // Soft-archive one tool: archived_at = now() (never a hard delete — FK
@@ -49,6 +50,7 @@ func (q *Queries) ArchiveTool(ctx context.Context, id pgtype.UUID) (ArchiveToolR
 		&i.ToolTypeID,
 		&i.ToolTypeName,
 		&i.ScheduleID,
+		&i.InventoryNumber,
 		&i.Attributes,
 		&i.ArchivedAt,
 		&i.CreatedAt,
@@ -88,11 +90,11 @@ func (q *Queries) ArchiveToolType(ctx context.Context, id pgtype.UUID) (ToolType
 
 const createTool = `-- name: CreateTool :one
 WITH new_tool AS (
-    INSERT INTO tools (name, tool_type_id, schedule_id, attributes)
-    VALUES ($1, $2, $3, $4)
-    RETURNING id, name, tool_type_id, schedule_id, attributes, archived_at, created_at, updated_at
+    INSERT INTO tools (name, tool_type_id, schedule_id, inventory_number, attributes)
+    VALUES ($1, $2, $3, 'GEAR' || lpad(nextval('tools_inventory_number_seq')::text, 6, '0'), $4)
+    RETURNING id, name, tool_type_id, schedule_id, inventory_number, attributes, archived_at, created_at, updated_at
 )
-SELECT nt.id, nt.name, nt.tool_type_id, tt.name AS tool_type_name, nt.schedule_id, nt.attributes, nt.archived_at, nt.created_at, nt.updated_at
+SELECT nt.id, nt.name, nt.tool_type_id, tt.name AS tool_type_name, nt.schedule_id, nt.inventory_number, nt.attributes, nt.archived_at, nt.created_at, nt.updated_at
 FROM new_tool nt
 JOIN tool_types tt ON tt.id = nt.tool_type_id
 `
@@ -105,23 +107,33 @@ type CreateToolParams struct {
 }
 
 type CreateToolRow struct {
-	ID           pgtype.UUID        `json:"id"`
-	Name         string             `json:"name"`
-	ToolTypeID   pgtype.UUID        `json:"tool_type_id"`
-	ToolTypeName string             `json:"tool_type_name"`
-	ScheduleID   pgtype.UUID        `json:"schedule_id"`
-	Attributes   []byte             `json:"attributes"`
-	ArchivedAt   pgtype.Timestamptz `json:"archived_at"`
-	CreatedAt    pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+	ID              pgtype.UUID        `json:"id"`
+	Name            string             `json:"name"`
+	ToolTypeID      pgtype.UUID        `json:"tool_type_id"`
+	ToolTypeName    string             `json:"tool_type_name"`
+	ScheduleID      pgtype.UUID        `json:"schedule_id"`
+	InventoryNumber string             `json:"inventory_number"`
+	Attributes      []byte             `json:"attributes"`
+	ArchivedAt      pgtype.Timestamptz `json:"archived_at"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
 }
 
 // Insert a tool and return the resulting row JOINed with its type name. The
-// core validated the type EXISTS + ACTIVE and the (optional) schedule override
-// against the SchedulesPort first; an EMPTY schedule_id is passed as NULL
-// (inherit the type default, AD-5). A name already held by ANY row (active or
-// archived) trips the UNIQUE constraint and is mapped by the repository to the
-// German duplicate-name 400.
+// inventory number is AUTO-ASSIGNED in-SQL (Story 4-3b): 'GEAR' || zero-padded
+// nextval from the dedicated sequence — atomic, monotonic, one round-trip, no
+// client input (CREATE_IGNORE_CLIENT). NOTE: the zero-pad width is 6 for the
+// backfill/early numbering; once the sequence exceeds 999999 the number
+// NATURALLY widens to 7+ digits (e.g. 'GEAR1000000') — still well inside the
+// CHECK (char_length <= 16), monotonic, and fine for the surface. A manual edit
+// can consume a future sequence value; a UNIQUE collision on
+// tools_inventory_number_key (a case-insensitive functional index) is handled
+// by the repository's bounded retry loop (re-running this INSERT computes a
+// FRESH nextval). The core validated the type EXISTS + ACTIVE and the
+// (optional) schedule override against the SchedulesPort first; an EMPTY
+// schedule_id is passed as NULL (inherit the type default, AD-5). A name
+// already held by ANY row (active or archived) trips the UNIQUE constraint and
+// is mapped by the repository to the German duplicate-name 400.
 func (q *Queries) CreateTool(ctx context.Context, arg CreateToolParams) (CreateToolRow, error) {
 	row := q.db.QueryRow(ctx, createTool,
 		arg.Name,
@@ -136,6 +148,7 @@ func (q *Queries) CreateTool(ctx context.Context, arg CreateToolParams) (CreateT
 		&i.ToolTypeID,
 		&i.ToolTypeName,
 		&i.ScheduleID,
+		&i.InventoryNumber,
 		&i.Attributes,
 		&i.ArchivedAt,
 		&i.CreatedAt,
@@ -335,7 +348,7 @@ func (q *Queries) ListToolTypes(ctx context.Context) ([]ToolType, error) {
 
 const listTools = `-- name: ListTools :many
 
-SELECT t.id, t.name, t.tool_type_id, tt.name AS tool_type_name, t.schedule_id, t.attributes, t.archived_at, t.created_at, t.updated_at
+SELECT t.id, t.name, t.tool_type_id, tt.name AS tool_type_name, t.schedule_id, t.inventory_number, t.attributes, t.archived_at, t.created_at, t.updated_at
 FROM tools t
 JOIN tool_types tt ON tt.id = t.tool_type_id
 WHERE t.archived_at IS NULL
@@ -343,15 +356,16 @@ ORDER BY t.created_at ASC, t.name ASC
 `
 
 type ListToolsRow struct {
-	ID           pgtype.UUID        `json:"id"`
-	Name         string             `json:"name"`
-	ToolTypeID   pgtype.UUID        `json:"tool_type_id"`
-	ToolTypeName string             `json:"tool_type_name"`
-	ScheduleID   pgtype.UUID        `json:"schedule_id"`
-	Attributes   []byte             `json:"attributes"`
-	ArchivedAt   pgtype.Timestamptz `json:"archived_at"`
-	CreatedAt    pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+	ID              pgtype.UUID        `json:"id"`
+	Name            string             `json:"name"`
+	ToolTypeID      pgtype.UUID        `json:"tool_type_id"`
+	ToolTypeName    string             `json:"tool_type_name"`
+	ScheduleID      pgtype.UUID        `json:"schedule_id"`
+	InventoryNumber string             `json:"inventory_number"`
+	Attributes      []byte             `json:"attributes"`
+	ArchivedAt      pgtype.Timestamptz `json:"archived_at"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
 }
 
 // ============================================================================
@@ -381,6 +395,7 @@ func (q *Queries) ListTools(ctx context.Context) ([]ListToolsRow, error) {
 			&i.ToolTypeID,
 			&i.ToolTypeName,
 			&i.ScheduleID,
+			&i.InventoryNumber,
 			&i.Attributes,
 			&i.ArchivedAt,
 			&i.CreatedAt,
@@ -440,34 +455,37 @@ WITH updated AS (
     SET name = $2,
         tool_type_id = $3,
         schedule_id = $4,
-        attributes = $5,
+        inventory_number = $5,
+        attributes = $6,
         updated_at = now()
     WHERE tools.id = $1 AND tools.archived_at IS NULL
-    RETURNING tools.id, tools.name, tools.tool_type_id, tools.schedule_id, tools.attributes, tools.archived_at, tools.created_at, tools.updated_at
+    RETURNING tools.id, tools.name, tools.tool_type_id, tools.schedule_id, tools.inventory_number, tools.attributes, tools.archived_at, tools.created_at, tools.updated_at
 )
-SELECT u.id, u.name, u.tool_type_id, tt.name AS tool_type_name, u.schedule_id, u.attributes, u.archived_at, u.created_at, u.updated_at
+SELECT u.id, u.name, u.tool_type_id, tt.name AS tool_type_name, u.schedule_id, u.inventory_number, u.attributes, u.archived_at, u.created_at, u.updated_at
 FROM updated u
 JOIN tool_types tt ON tt.id = u.tool_type_id
 `
 
 type UpdateToolParams struct {
-	ID         pgtype.UUID `json:"id"`
-	Name       string      `json:"name"`
-	ToolTypeID pgtype.UUID `json:"tool_type_id"`
-	ScheduleID pgtype.UUID `json:"schedule_id"`
-	Attributes []byte      `json:"attributes"`
+	ID              pgtype.UUID `json:"id"`
+	Name            string      `json:"name"`
+	ToolTypeID      pgtype.UUID `json:"tool_type_id"`
+	ScheduleID      pgtype.UUID `json:"schedule_id"`
+	InventoryNumber string      `json:"inventory_number"`
+	Attributes      []byte      `json:"attributes"`
 }
 
 type UpdateToolRow struct {
-	ID           pgtype.UUID        `json:"id"`
-	Name         string             `json:"name"`
-	ToolTypeID   pgtype.UUID        `json:"tool_type_id"`
-	ToolTypeName string             `json:"tool_type_name"`
-	ScheduleID   pgtype.UUID        `json:"schedule_id"`
-	Attributes   []byte             `json:"attributes"`
-	ArchivedAt   pgtype.Timestamptz `json:"archived_at"`
-	CreatedAt    pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt    pgtype.Timestamptz `json:"updated_at"`
+	ID              pgtype.UUID        `json:"id"`
+	Name            string             `json:"name"`
+	ToolTypeID      pgtype.UUID        `json:"tool_type_id"`
+	ToolTypeName    string             `json:"tool_type_name"`
+	ScheduleID      pgtype.UUID        `json:"schedule_id"`
+	InventoryNumber string             `json:"inventory_number"`
+	Attributes      []byte             `json:"attributes"`
+	ArchivedAt      pgtype.Timestamptz `json:"archived_at"`
+	CreatedAt       pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
 }
 
 // Replace one ACTIVE tool's core fields and refresh updated_at, returning the
@@ -476,13 +494,19 @@ type UpdateToolRow struct {
 // (soft archive is irreversible in V1; the archived row is non-existent to the
 // surface). The schedule override REPLACES the stored value, so clearing it
 // (schedule_id NULL) makes the tool inherit its type's default again
-// (UPDATE_CLEAR_OVERRIDE, AD-5).
+// (UPDATE_CLEAR_OVERRIDE, AD-5). The inventory number REPLACES the stored value
+// too (Story 4-3b, UPDATE_INVENTORY): the core already validated it non-empty
+// + bounded + unique case-insensitively among active tools; a reuse of a number
+// held by ANOTHER row (active or archived — incl. case-variants, via the
+// lower() functional UNIQUE index) is mapped by the repository to the German
+// duplicate-inventory 400.
 func (q *Queries) UpdateTool(ctx context.Context, arg UpdateToolParams) (UpdateToolRow, error) {
 	row := q.db.QueryRow(ctx, updateTool,
 		arg.ID,
 		arg.Name,
 		arg.ToolTypeID,
 		arg.ScheduleID,
+		arg.InventoryNumber,
 		arg.Attributes,
 	)
 	var i UpdateToolRow
@@ -492,6 +516,7 @@ func (q *Queries) UpdateTool(ctx context.Context, arg UpdateToolParams) (UpdateT
 		&i.ToolTypeID,
 		&i.ToolTypeName,
 		&i.ScheduleID,
+		&i.InventoryNumber,
 		&i.Attributes,
 		&i.ArchivedAt,
 		&i.CreatedAt,

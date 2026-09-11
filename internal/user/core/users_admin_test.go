@@ -66,7 +66,7 @@ func TestAdminModuleAccessCodesCoversSubMountGates(t *testing.T) {
 		// recovery + admin sub-surfaces
 		"admin.recovery.approve",
 		// tool + settings + dsgvo surfaces
-		"tools.manage", "tool_types.manage",
+		"tools.manage", "tool.edit", "tool_types.manage",
 		"admin.settings.email", "admin.settings.backup",
 		// schedule-catalog surface (Story 4.1, AD-16)
 		"schedules.manage",

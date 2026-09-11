@@ -75,6 +75,7 @@ development_status:
   4-1-schedule-catalog-management: done
   4-2-tool-type-management: done
   4-3-tool-management: done
+  4-3b-inventory-number-tool-edit: done
   4-4-flexible-attributes-on-tools-tool-types: backlog
   4-5-bulk-csv-import: backlog
   epic-4-retrospective: optional

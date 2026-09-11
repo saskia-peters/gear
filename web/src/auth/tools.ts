@@ -13,8 +13,12 @@ import { ApiError, request, authTokenHeaders } from './http.ts'
 
 // Permission codes gating the two Tool surfaces (AD-6, server-side source of
 // truth). Kept here so the per-tab gating cannot drift from the server code.
+// TOOL_EDIT_PERMISSION (Story 4-3b) is the scoped tool-EDIT code: a holder can
+// view + edit tools (incl. the inventory number) but NOT create/archive those
+// stays tools.manage-only.
 export const TOOL_TYPES_PERMISSION = 'tool_types.manage'
 export const TOOLS_PERMISSION = 'tools.manage'
+export const TOOL_EDIT_PERMISSION = 'tool.edit'
 
 export type InspectionMode = 'pass_fail' | 'checklist'
 
@@ -118,14 +122,16 @@ function buildToolTypeBody(input: ToolTypeInput): Record<string, unknown> {
 // ============================================================================
 
 // Tool is the GET payload — the typed core fields plus the tool type's display
-// name (server JOIN) and the attributes jsonb passthrough. Archived tools never
-// reach the active list.
+// name (server JOIN), the inventory number (Story 4-3b: server-assigned on
+// create, editable on edit) and the attributes jsonb passthrough. Archived
+// tools never reach the active list.
 export interface Tool {
   id: string
   name: string
   tool_type_id: string
   tool_type_name: string
   schedule_id: string
+  inventory_number: string
   attributes: Record<string, unknown>
   created_at: string
   updated_at: string
@@ -139,11 +145,14 @@ export interface ToolWriteResult extends Tool {
 
 // ToolInput is the POST/PUT body (FR-9/FR-10). schedule_id is the OPTIONAL
 // per-tool override: an empty value CLEARS it (the tool inherits its type's
-// default schedule, AD-5).
+// default schedule, AD-5). inventory_number is OPTIONAL and travels ONLY on
+// PUT (Story 4-3b): on create the server AUTO-ASSIGNS it (a client value is
+// ignored), on edit a non-empty value updates the stored number.
 export interface ToolInput {
   name: string
   tool_type_id: string
   schedule_id: string
+  inventory_number?: string
   attributes: Record<string, unknown>
 }
 
@@ -191,13 +200,20 @@ export async function archiveTool(id: string): Promise<ToolWriteResult> {
 // passthrough surface for Story 4.4: the server stores exactly what is sent
 // and returns it on read. The V1 editor has no attributes UI, so it submits
 // {}; a future Story 4.4 editor fills it in without a client contract change.
+// inventory_number is sent ONLY when the input carries one (the PUT edit path,
+// Story 4-3b): on create the server auto-assigns it, so the create body NEVER
+// includes it (CREATE_IGNORE_CLIENT).
 function buildToolBody(input: ToolInput): Record<string, unknown> {
-  return {
+  const body: Record<string, unknown> = {
     name: input.name,
     tool_type_id: input.tool_type_id,
     schedule_id: input.schedule_id,
     attributes: input.attributes ?? {},
   }
+  if (input.inventory_number) {
+    body.inventory_number = input.inventory_number
+  }
+  return body
 }
 
 // ============================================================================
@@ -210,12 +226,15 @@ function buildToolBody(input: ToolInput): Record<string, unknown> {
 // every tool renders as "verfügbar" statically).
 // ============================================================================
 
-// DashboardTool is the minimal GET /api/v1/tools payload.
+// DashboardTool is the minimal GET /api/v1/tools payload (Story 4-3b): the
+// id, name, type display name and the inventory number (shown as row meta in
+// the Werkzeugliste).
 export interface DashboardTool {
   id: string
   name: string
   tool_type_id: string
   tool_type_name: string
+  inventory_number: string
 }
 
 const DASHBOARD_TOOLS_URL = '/api/v1/tools'

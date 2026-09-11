@@ -1,6 +1,6 @@
 // Role & Permission-Group Management data module (Story 2.5). It holds the
 // server-authoritative permission catalog types plus the three API calls
-// (list / create / update) for the "Rollen" surface. The 22-code catalog is
+// (list / create / update) for the "Rollen" surface. The 24-code catalog is
 // fetched from the backend so the SPA editor never hardcodes a stale list
 // (Design Notes spec 2.5); PERMISSION_LABELS is only a local fallback when the
 // fetch fails.
@@ -33,7 +33,7 @@ export interface RoleInput {
 
 const GROUPS_URL = '/api/v1/admin/groups'
 
-// German display labels for the 22 base codes (UX-DR4/DR8). Local fallback; the
+// German display labels for the 24 base codes (UX-DR4/DR8). Local fallback; the
 // server is authoritative for the code list and labels.
 export const PERMISSION_LABELS: Record<string, string> = {
   'dashboard.view': 'Dashboard ansehen',
@@ -42,6 +42,7 @@ export const PERMISSION_LABELS: Record<string, string> = {
   'report.export': 'Berichte exportieren',
   'tool.reinstate': 'Gerät wiederherstellen',
   'tools.manage': 'Geräte verwalten',
+  'tool.edit': 'Geräte bearbeiten',
   'tool_types.manage': 'Gerätetypen verwalten',
   'users.view': 'Benutzer ansehen',
   'users.approve': 'Benutzerfreigaben erteilen',
@@ -61,7 +62,7 @@ export const PERMISSION_LABELS: Record<string, string> = {
   'schedules.manage': 'Zeitpläne verwalten',
 }
 
-// The full 23-code base series (AD-12). Used to sort/validate the local fallback
+// The full 24-code base series (AD-12). Used to sort/validate the local fallback
 // only; the server remains authoritative.
 export const BASE_PERMISSION_CODES: readonly string[] = [
   'dashboard.view',
@@ -70,6 +71,7 @@ export const BASE_PERMISSION_CODES: readonly string[] = [
   'report.export',
   'tool.reinstate',
   'tools.manage',
+  'tool.edit',
   'tool_types.manage',
   'users.view',
   'users.approve',
@@ -94,10 +96,10 @@ export function permissionLabel(code: string): string {
   return PERMISSION_LABELS[code] ?? code
 }
 
-// fallbackCatalog builds the full 23-code catalog from the shipped local copies
+// fallbackCatalog builds the full 24-code catalog from the shipped local copies
 // (BASE_PERMISSION_CODES + PERMISSION_LABELS). It is used when the server's
 // list response omits or empties available_permissions, so the editor still
-// renders all 23 checkboxes (the save is still validated server-side).
+// renders all 24 checkboxes (the save is still validated server-side).
 function fallbackCatalog(): PermissionCatalogEntry[] {
   return BASE_PERMISSION_CODES.map((code) => ({
     code,
@@ -112,7 +114,7 @@ function fallbackCatalog(): PermissionCatalogEntry[] {
 export { ApiError }
 
 // listRoles fetches every permission group (base roles + custom) plus the
-// server-authoritative 23-code catalog. If the server response omits or empties
+// server-authoritative 24-code catalog. If the server response omits or empties
 // the catalog, the shipped BASE_PERMISSION_CODES/PERMISSION_LABELS fallback is
 // used so the editor never renders an empty grid.
 export async function listRoles(): Promise<RoleList> {

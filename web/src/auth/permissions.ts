@@ -78,7 +78,10 @@ export const ADMIN_NAV_ENTRIES: readonly AdminNavEntry[] = [
     route: '/admin/werkzeuge',
     label: 'Werkzeuge',
     description: 'Geräte und Gerätetypen verwalten.',
-    codes: ['tools.manage', 'tool_types.manage'],
+    // tool.edit (Story 4-3b) is the scoped tool-EDIT code: a Führende with
+    // only it can view + edit tools (incl. the inventory number) but not
+    // create/archive (those stay tools.manage).
+    codes: ['tools.manage', 'tool.edit', 'tool_types.manage'],
   },
   {
     key: 'einstellungen',

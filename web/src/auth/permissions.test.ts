@@ -74,4 +74,10 @@ describe('permissions admin-nav model', () => {
   it('hasAnyAdminCode: unknown/garbage codes never open the admin module', () => {
     expect(hasAnyAdminCode(['nonsense.code', 'totally.made.up'])).toBe(false)
   })
+
+  it('tool.edit (Story 4-3b): a scoped tool-EDIT holder sees the Werkzeuge entry and opens the admin module without tools.manage', () => {
+    const got = filteredAdminNav(['tool.edit'])
+    expect(got.map((e) => e.key)).toEqual(['werkzeuge'])
+    expect(hasAnyAdminCode(['tool.edit'])).toBe(true)
+  })
 })

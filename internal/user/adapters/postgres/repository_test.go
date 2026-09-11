@@ -1337,8 +1337,8 @@ func TestPostgresAdminRecoveryRepository(t *testing.T) {
 }
 
 // basePermissionCodes is the AD-12 base series seeded by migration 000010
-// (Story 2.2 + 000013 + 000016): the 23 codes the architecture spine maps
-// every action to.
+// (Story 2.2 + 000013 + 000016 + 000025): the 24 codes the architecture spine
+// maps every action to.
 func basePermissionCodes() []string {
 	return []string{
 		"admin.recovery.approve",
@@ -1356,8 +1356,9 @@ func basePermissionCodes() []string {
 		"roles.edit",
 		"schedules.manage",
 		"tool.reinstate",
-		"tool_types.manage",
 		"tools.manage",
+		"tool.edit",
+		"tool_types.manage",
 		"user.account.approve",
 		"user_groups.manage",
 		"users.approve",
@@ -1405,8 +1406,19 @@ func containsAllCodes(got, want []string) bool {
 	return true
 }
 
+// containsPermission reports whether got contains the given code (used for the
+// negative grant-matrix pin: a role must NOT hold a code).
+func containsPermission(got []string, code string) bool {
+	for _, c := range got {
+		if c == code {
+			return true
+		}
+	}
+	return false
+}
+
 // TestPostgresBasePermissionSeedResolution verifies the seed migration 000010
-// end to end (Story 2.2, I/O matrix): all 23 base codes are installed, each
+// end to end (Story 2.2, I/O matrix): all 24 base codes are installed, each
 // base role resolves its matrix, a multi-role user resolves a DEDUPLICATED
 // union, a direct grant joins the union, and revocation is immediate (no
 // cache). Test users are deleted via t.Cleanup (CASCADE removes memberships
@@ -1443,7 +1455,7 @@ func TestPostgresBasePermissionSeedResolution(t *testing.T) {
 	}
 	t.Cleanup(func() { cleanupPool.Close() })
 
-	// 1. All 23 base codes are present in the permissions table. A set
+	// 1. All 24 base codes are present in the permissions table. A set
 	// comparison (subset check), so a DB that already holds unrelated
 	// permission rows does not break the assertion.
 	var permCodes []string
@@ -1466,7 +1478,7 @@ func TestPostgresBasePermissionSeedResolution(t *testing.T) {
 		t.Errorf("permissions table = %v, missing base codes from the AD-12 series", permCodes)
 	}
 
-	// 2. The seeded admin resolves ALL 23 codes via the admin-group matrix.
+	// 2. The seeded admin resolves ALL 24 codes via the admin-group matrix.
 	admin, err := repo.GetUserByEmail(ctx, "admin.1@gear.local")
 	if err != nil || admin == nil {
 		t.Skip("seeded admin not present — skipping admin resolution assertion")
@@ -1476,7 +1488,7 @@ func TestPostgresBasePermissionSeedResolution(t *testing.T) {
 		t.Fatalf("ListPermissionsByUser(admin) failed: %v", err)
 	}
 	if !sameCodeSet(adminPerms, basePermissionCodes()) {
-		t.Errorf("admin permissions = %v, want the full 23-code base series", adminPerms)
+		t.Errorf("admin permissions = %v, want the full 24-code base series", adminPerms)
 	}
 
 	// newGroupUser creates a fresh user, assigns it to the named group(s) and
@@ -1523,27 +1535,35 @@ func TestPostgresBasePermissionSeedResolution(t *testing.T) {
 	if got := resolve(helfende); !sameCodeSet(got, []string{"dashboard.view", "inspection.submit"}) {
 		t.Errorf("helfende permissions = %v, want [dashboard.view inspection.submit]", got)
 	}
+	// Negative pin (finding 11): helfende must NOT receive tool.edit — the
+	// grant matrix is pinned both ways (only admin/schirrmeister/fuehrende are
+	// granted it in 000025).
+	if got := resolve(helfende); containsPermission(got, "tool.edit") {
+		t.Errorf("helfende permissions = %v, must NOT include tool.edit (000025 grants it to admin/schirrmeister/fuehrende only)", got)
+	}
 
 	schirrmeister := newGroupUser("schirrmeister")
-	// 9 codes after migrations 000011 + 000013 (user decision + Spec 2.9):
-	// schirrmeister now also carries users.view + users.qualifications.manage.
-	if got := resolve(schirrmeister); !sameCodeSet(got, []string{"dashboard.view", "inspection.submit", "tools.manage", "tool_types.manage", "users.qualifications.manage", "users.view"}) {
-		t.Errorf("schirrmeister permissions = %v, want [dashboard.view inspection.submit tools.manage tool_types.manage users.qualifications.manage users.view]", got)
+	// 10 codes after migrations 000011 + 000013 + 000025 (user decision + Spec
+	// 2.9 + Story 4-3b): schirrmeister now also carries users.view +
+	// users.qualifications.manage + tool.edit.
+	if got := resolve(schirrmeister); !sameCodeSet(got, []string{"dashboard.view", "inspection.submit", "tool.edit", "tools.manage", "tool_types.manage", "users.qualifications.manage", "users.view"}) {
+		t.Errorf("schirrmeister permissions = %v, want [dashboard.view inspection.submit tool.edit tools.manage tool_types.manage users.qualifications.manage users.view]", got)
 	}
 
 	fuehrende := newGroupUser("fuehrende")
-	// 9 codes after migrations 000011 + 000013 (Story 2.3 user decision + Spec
-	// 2.9): fuehrende carries tools.manage + tool_types.manage like
-	// schirrmeister, plus users.view + users.qualifications.manage.
-	if got := resolve(fuehrende); !sameCodeSet(got, []string{"dashboard.view", "inspection.submit", "inspection.history.view", "report.export", "tool.reinstate", "tools.manage", "tool_types.manage", "users.qualifications.manage", "users.view"}) {
-		t.Errorf("fuehrende permissions = %v, want [dashboard.view inspection.submit inspection.history.view report.export tool.reinstate tools.manage tool_types.manage users.qualifications.manage users.view]", got)
+	// 10 codes after migrations 000011 + 000013 + 000025 (Story 2.3 user
+	// decision + Spec 2.9 + Story 4-3b): fuehrende carries tools.manage +
+	// tool_types.manage + tool.edit like schirrmeister, plus users.view +
+	// users.qualifications.manage.
+	if got := resolve(fuehrende); !sameCodeSet(got, []string{"dashboard.view", "inspection.submit", "inspection.history.view", "report.export", "tool.edit", "tool.reinstate", "tools.manage", "tool_types.manage", "users.qualifications.manage", "users.view"}) {
+		t.Errorf("fuehrende permissions = %v, want [dashboard.view inspection.submit inspection.history.view report.export tool.edit tool.reinstate tools.manage tool_types.manage users.qualifications.manage users.view]", got)
 	}
 
 	// 4. UNION/DISTINCT: a user in helfende + schirrmeister (BOTH grant
 	// dashboard.view + inspection.submit) resolves a DEDUPLICATED set — no
 	// repeated codes.
 	multi := newGroupUser("helfende", "schirrmeister")
-	if got := resolve(multi); !sameCodeSet(got, []string{"dashboard.view", "inspection.submit", "tools.manage", "tool_types.manage", "users.qualifications.manage", "users.view"}) {
+	if got := resolve(multi); !sameCodeSet(got, []string{"dashboard.view", "inspection.submit", "tool.edit", "tools.manage", "tool_types.manage", "users.qualifications.manage", "users.view"}) {
 		t.Errorf("multi-role permissions = %v, want the deduplicated union (no repeated codes)", got)
 	}
 

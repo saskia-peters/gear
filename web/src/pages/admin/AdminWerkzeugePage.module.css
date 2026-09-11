@@ -290,6 +290,26 @@
   width: 100%;
 }
 
+/* The inventory-number read-only display on the create form (Story 4-3b): the
+   server auto-assigns the number, so the create editor shows it as a disabled
+   value instead of an editable input. */
+.inputReadonly {
+  min-height: 48px;
+  padding: 0 var(--gear-space-3);
+  border-radius: var(--gear-radius-md);
+  border: 1px solid var(--gear-color-border-hairline);
+  background-color: var(--gear-color-surface-base);
+  color: var(--gear-color-ink-secondary);
+  font-size: var(--gear-font-body-size);
+  font-family: var(--gear-font-family);
+  box-sizing: border-box;
+}
+
+.fieldHint {
+  font-size: var(--gear-font-meta-size);
+  color: var(--gear-color-ink-secondary);
+}
+
 .modeFieldset {
   border: none;
   padding: 0;

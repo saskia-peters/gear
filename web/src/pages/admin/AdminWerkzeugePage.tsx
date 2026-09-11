@@ -7,6 +7,7 @@ import { filteredAdminNav } from '../../auth/permissions.ts'
 import {
   TOOL_TYPES_PERMISSION,
   TOOLS_PERMISSION,
+  TOOL_EDIT_PERMISSION,
   listToolTypes,
   createToolType,
   updateToolType,
@@ -43,8 +44,21 @@ export function AdminWerkzeugePage() {
   const navigate = useNavigate()
   const perms = getPermissions()
   const canToolTypes = perms.includes(TOOL_TYPES_PERMISSION)
-  const canTools = perms.includes(TOOLS_PERMISSION)
-  const [activeTab, setActiveTab] = useState<Tab>(canToolTypes ? 'typen' : canTools ? 'werkzeuge' : 'typen')
+  // The Werkzeuge tab opens ANY-of [tools.manage, tool.edit] (Story 4-3b): a
+  // tool.edit-only holder (e.g. a Führende) can view + edit tools.
+  const canTools = perms.includes(TOOLS_PERMISSION) || perms.includes(TOOL_EDIT_PERMISSION)
+  // create/archive stay tools.manage-ONLY — a tool.edit-only holder sees the
+  // list + editor but NO create form and NO archive button.
+  const canManageTools = perms.includes(TOOLS_PERMISSION)
+  // Defensive tab default (finding 15): default to a tab whose panel can
+  // render. When the caller holds NO tool surface code (neither
+  // tool_types.manage nor tools.manage/tool.edit), the tab stays '' — a value
+  // NO panel renders for — and the EmptyState fallback shows (the render's
+  // `&& canX` guards already prevent a tab-less panel; the '' sentinel makes
+  // the no-access state explicit instead of defaulting to an inert 'typen').
+  const [activeTab, setActiveTab] = useState<Tab | ''>(
+    canToolTypes ? 'typen' : canTools ? 'werkzeuge' : '',
+  )
 
   const handleApiError = useCallback(
     (err: unknown): boolean => {
@@ -108,7 +122,7 @@ export function AdminWerkzeugePage() {
             </div>
           ) : activeTab === 'werkzeuge' && canTools ? (
             <div id="panel-werkzeuge" role="tabpanel" aria-labelledby="tab-werkzeuge">
-              <ToolsTab onApiError={handleApiError} />
+              <ToolsTab onApiError={handleApiError} canManageTools={canManageTools} />
             </div>
           ) : (
             // The fallback only renders when NEITHER Tab tab is shown, so it
@@ -480,13 +494,17 @@ function ToolTypesTab({ onApiError }: { onApiError: (err: unknown) => boolean })
   )
 }
 
-// ToolsTab is the "Werkzeuge" surface (Story 4.3, FR-9/FR-10/AD-5/AD-6): the
-// active physical-tool list (each with its tool type's display name), a
-// create/edit form (Name + mandatory tool-type dropdown + OPTIONAL
-// schedule-override dropdown whose default option is EXACTLY "Standard für
-// diesen Typ" = inherit the type's default, AD-5) and a per-row archive action
-// with a confirm. No checklist items, no inspection mode — tools carry neither.
-function ToolsTab({ onApiError }: { onApiError: (err: unknown) => boolean }) {
+// ToolsTab is the "Werkzeuge" surface (Story 4.3 + 4-3b, FR-9/FR-10/AD-5/AD-6):
+// the active physical-tool list (each with its tool type's display name and
+// inventory number), a create/edit form (Name + mandatory tool-type dropdown +
+// OPTIONAL schedule-override dropdown whose default option is EXACTLY "Standard
+// für diesen Typ" = inherit the type's default, AD-5 + the editable inventory
+// number on edit) and a per-row archive action with a confirm (tools.manage
+// holders only). canManageTools (has tools.manage) toggles the create form and
+// the archive buttons: a tool.edit-only holder sees the list + the edit form
+// but NO create form and NO archive buttons (Story 4-3b). No checklist items,
+// no inspection mode — tools carry neither.
+function ToolsTab({ onApiError, canManageTools }: { onApiError: (err: unknown) => boolean; canManageTools: boolean }) {
   const [loaded, setLoaded] = useState(false)
   const [loadError, setLoadError] = useState('')
   const [tools, setTools] = useState<Tool[]>([])
@@ -499,6 +517,7 @@ function ToolsTab({ onApiError }: { onApiError: (err: unknown) => boolean }) {
   const [name, setName] = useState('')
   const [toolTypeId, setToolTypeId] = useState('')
   const [scheduleId, setScheduleId] = useState('')
+  const [inventoryNumber, setInventoryNumber] = useState('')
 
   useEffect(() => {
     let cancelled = false
@@ -553,6 +572,7 @@ function ToolsTab({ onApiError }: { onApiError: (err: unknown) => boolean }) {
     setName('')
     setToolTypeId(toolTypes[0]?.id ?? '')
     setScheduleId('')
+    setInventoryNumber('')
   }
 
   function startEdit(tool: Tool) {
@@ -571,6 +591,9 @@ function ToolsTab({ onApiError }: { onApiError: (err: unknown) => boolean }) {
     setScheduleId(
       schedules.some((s) => s.id === tool.schedule_id) ? tool.schedule_id : '',
     )
+    // The inventory number is editable on edit (Story 4-3b); it starts from
+    // the stored value so an inventory-preserving edit submits it unchanged.
+    setInventoryNumber(tool.inventory_number)
     setFeedback(null)
   }
 
@@ -582,6 +605,9 @@ function ToolsTab({ onApiError }: { onApiError: (err: unknown) => boolean }) {
       tool_type_id: toolTypeId,
       schedule_id: scheduleId,
       attributes: {},
+      // The inventory number travels ONLY on the edit path (Story 4-3b): on
+      // create the server auto-assigns it — the create body never carries one.
+      inventory_number: editingId ? inventoryNumber : undefined,
     }
     try {
       if (editingId) {
@@ -658,6 +684,12 @@ function ToolsTab({ onApiError }: { onApiError: (err: unknown) => boolean }) {
         </div>
       ) : (
         <>
+          {/* The create form is HIDDEN for a tool.edit-only holder (no
+              tools.manage) — only the edit form renders for them (Story 4-3b).
+              The create mode of the form is shown to tools.manage holders with
+              the inventory number as a READ-ONLY display (the server
+              auto-assigns it). */}
+          {(editingId || canManageTools) && (
           <form
             className={styles.editor}
             onSubmit={(e) => {
@@ -751,7 +783,43 @@ function ToolsTab({ onApiError }: { onApiError: (err: unknown) => boolean }) {
                 </select>
               </div>
             </div>
+
+            <div className={styles.field}>
+              <label className={styles.label} htmlFor="tool-inventory">
+                Gerätenummer
+              </label>
+              {editingId ? (
+                <input
+                  id="tool-inventory"
+                  className={styles.input}
+                  value={inventoryNumber}
+                  onChange={(e) => {
+                    setInventoryNumber(e.target.value)
+                    setFeedback(null)
+                  }}
+                  // Mirrors the server's InventoryNumberMaxLength (16 runes) and
+                  // the DB CHECK (char_length(inventory_number) <= 16, 000025) —
+                  // keep in sync if the bound changes.
+                  maxLength={16}
+                  autoComplete="off"
+                />
+              ) : (
+                <>
+                  <input
+                    id="tool-inventory"
+                    className={styles.inputReadonly}
+                    value="wird automatisch vergeben"
+                    readOnly
+                    tabIndex={-1}
+                  />
+                  <span id="tool-inventory-hint" className={styles.fieldHint}>
+                    Die Gerätenummer wird beim Speichern automatisch vergeben.
+                  </span>
+                </>
+              )}
+            </div>
           </form>
+          )}
 
           {tools.length === 0 && (
             <p role="status" className={styles.emptyHint}>
@@ -766,6 +834,7 @@ function ToolsTab({ onApiError }: { onApiError: (err: unknown) => boolean }) {
                   <div className={styles.rowInfo}>
                     <span className={styles.rowName}>{tool.name}</span>
                     <span className={styles.rowMeta}>{tool.tool_type_name}</span>
+                    <span className={styles.rowMeta}>{tool.inventory_number}</span>
                     {tool.schedule_id !== '' && (
                       <span className={styles.rowMeta}>Zeitplan überschrieben</span>
                     )}
@@ -779,14 +848,16 @@ function ToolsTab({ onApiError }: { onApiError: (err: unknown) => boolean }) {
                     >
                       Bearbeiten
                     </button>
-                    <button
-                      type="button"
-                      className={styles.dangerButton}
-                      disabled={busy}
-                      onClick={() => void archive(tool)}
-                    >
-                      Archivieren
-                    </button>
+                    {canManageTools && (
+                      <button
+                        type="button"
+                        className={styles.dangerButton}
+                        disabled={busy}
+                        onClick={() => void archive(tool)}
+                      >
+                        Archivieren
+                      </button>
+                    )}
                   </div>
                 </li>
               ))}
