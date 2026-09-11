@@ -101,6 +101,19 @@
   box-sizing: border-box;
 }
 
+.formHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gear-space-3);
+}
+
+.formHeaderActions {
+  display: flex;
+  gap: var(--gear-space-2);
+  flex-shrink: 0;
+}
+
 .stickyActions {
   position: sticky;
   top: 0;
@@ -122,6 +135,13 @@
   display: flex;
   flex-direction: column;
   gap: var(--gear-space-4);
+}
+
+.scheduleFieldRow {
+  display: flex;
+  flex-direction: row;
+  gap: var(--gear-space-4);
+  align-items: flex-start;
 }
 
 .label {

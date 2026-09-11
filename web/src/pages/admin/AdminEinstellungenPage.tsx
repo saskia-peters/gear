@@ -1001,7 +1001,19 @@ function ScheduleSettingsTab({ onApiError }: { onApiError: (err: unknown) => boo
               void save()
             }}
           >
-            <h3 className={styles.formTitle}>{editingId ? 'Zeitplan bearbeiten' : 'Neuer Zeitplan'}</h3>
+            <div className={styles.formHeader}>
+              <h3 className={styles.formTitle}>{editingId ? 'Zeitplan bearbeiten' : 'Neuer Zeitplan'}</h3>
+              <div className={styles.formHeaderActions}>
+                <button type="submit" className={styles.saveButton} disabled={busy}>
+                  {busy ? 'Wird gespeichert...' : editingId ? 'Änderungen speichern' : 'Speichern'}
+                </button>
+                {editingId && (
+                  <button type="button" className={styles.testButton} disabled={busy} onClick={resetForm}>
+                    Abbrechen
+                  </button>
+                )}
+              </div>
+            </div>
 
             <div className={styles.field}>
               <label className={styles.label} htmlFor="schedule-name">
@@ -1020,7 +1032,7 @@ function ScheduleSettingsTab({ onApiError }: { onApiError: (err: unknown) => boo
               />
             </div>
 
-            <div className={styles.fieldRow}>
+            <div className={styles.scheduleFieldRow}>
               <div className={styles.field}>
                 <label className={styles.label} htmlFor="schedule-unit">
                   Zeiteinheit
@@ -1058,17 +1070,6 @@ function ScheduleSettingsTab({ onApiError }: { onApiError: (err: unknown) => boo
                   }}
                 />
               </div>
-            </div>
-
-            <div className={styles.stickyActions}>
-              <button type="submit" className={styles.saveButton} disabled={busy}>
-                {busy ? 'Wird gespeichert...' : editingId ? 'Änderungen speichern' : 'Speichern'}
-              </button>
-              {editingId && (
-                <button type="button" className={styles.testButton} disabled={busy} onClick={resetForm}>
-                  Abbrechen
-                </button>
-              )}
             </div>
           </form>
 
