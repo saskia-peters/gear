@@ -367,7 +367,7 @@ describe('AdminWerkzeugePage', () => {
     expect(fetchMock).toHaveBeenCalled()
   })
 
-  it('SAVE_DISABLED_EMPTY_CATALOGS: save is disabled with a hint when no schedule/qualification is selectable (Fix 9)', async () => {
+  it('SAVE_DISABLED_EMPTY_CATALOGS: save is disabled with a hint when no schedule is selectable (Fix 9)', async () => {
     localStorage.setItem('gear.permissions', JSON.stringify(['tool_types.manage']))
     stubFetchRoutes([
       stubToolTypes([]),
@@ -379,11 +379,41 @@ describe('AdminWerkzeugePage', () => {
     ])
     renderPage()
 
-    // Empty catalogs → no auto-selection → the save button is disabled.
+    // Empty schedule catalog → no auto-selection → the save button is disabled.
+    // The required qualification is OPTIONAL (000023) and starts unselected.
     expect(await screen.findByLabelText('Name')).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Speichern' })).toBeDisabled()
     expect(
-      screen.getByText('Wähle einen Standard-Zeitplan und eine erforderliche Qualifikation aus, um zu speichern.'),
+      screen.getByText('Wähle einen Standard-Zeitplan aus, um zu speichern.'),
     ).toBeInTheDocument()
+  })
+
+  it('QUALIFICATION_OPTIONAL: a fresh create form starts with "Keine Qualifikation erforderlich" and submits an empty qualification', async () => {
+    localStorage.setItem('gear.permissions', JSON.stringify(['tool_types.manage']))
+    const fetchMock = stubFetchRoutes([
+      stubToolTypes([]),
+      ...baseRoutes(),
+      {
+        matcher: (url: string, init?: RequestInit) => url === TOOL_TYPES_URL && init?.method === 'POST',
+        response: { ok: true, status: 201, body: { ...toolTypeFixture(), id: 'id-new', name: 'Säge', message: 'Gerätetyp gespeichert.' } },
+      },
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByLabelText('Name')
+    // The qualification select offers the no-qualification option.
+    const qualSelect = screen.getByLabelText('Erforderliche Qualifikation')
+    expect(screen.getByRole('option', { name: 'Keine Qualifikation erforderlich' })).toBeInTheDocument()
+    expect(qualSelect).toHaveValue('')
+
+    await user.type(screen.getByLabelText('Name'), 'Säge')
+    await user.click(screen.getByRole('button', { name: 'Speichern' }))
+
+    expect(await screen.findByText('Gerätetyp gespeichert.')).toBeInTheDocument()
+    const postCall = fetchMock.mock.calls.find(([url, init]) => url === TOOL_TYPES_URL && init?.method === 'POST')
+    expect(postCall).toBeDefined()
+    const body = JSON.parse(String(postCall![1].body))
+    expect(body.required_qualification_id).toBe('')
   })
 })

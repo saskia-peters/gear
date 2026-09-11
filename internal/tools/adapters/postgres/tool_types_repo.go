@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strings"
 
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgconn"
@@ -311,6 +312,11 @@ func checklistItemsFromRows(rows []ToolTypeChecklistItem) []core.ToolTypeCheckli
 // parseToolTypeID parses a URL-path uuidv7 into pgtype.UUID. A malformed id is
 // treated as not-found (no existence hint to a caller).
 func parseToolTypeID(id string) (pgtype.UUID, error) {
+	// An EMPTY id means "no FK" (e.g. the OPTIONAL required qualification,
+	// 000023): a zero pgtype.UUID{} encodes as SQL NULL, never an error.
+	if strings.TrimSpace(id) == "" {
+		return pgtype.UUID{}, nil
+	}
 	var uid pgtype.UUID
 	if err := uid.Scan(id); err != nil {
 		return pgtype.UUID{}, core.ErrToolTypeNotFound

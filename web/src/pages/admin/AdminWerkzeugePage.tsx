@@ -168,14 +168,12 @@ function ToolTypesTab({ onApiError }: { onApiError: (err: unknown) => boolean })
       const loadedQuals = Array.isArray(quals.qualifications) ? quals.qualifications : []
       setSchedules(loadedScheds)
       setQualifications(loadedQuals)
-      // Fresh create form: auto-select the first catalog entry so the save is
-      // immediately valid (the form is disabled until a schedule AND a
-      // qualification are chosen). Edit mode keeps the type's stored FKs.
+      // Fresh create form: auto-select the first schedule entry so the save is
+      // immediately valid (the form is disabled until a schedule is chosen).
+      // The required qualification is OPTIONAL (most tools need none) — the
+      // fresh form starts WITHOUT a qualification selected.
       if (loadedScheds.length > 0) {
         setDefaultScheduleId((cur) => (cur === '' ? loadedScheds[0].id : cur))
-      }
-      if (loadedQuals.length > 0) {
-        setRequiredQualificationId((cur) => (cur === '' ? loadedQuals[0].id : cur))
       }
     }
     void run()
@@ -188,7 +186,7 @@ function ToolTypesTab({ onApiError }: { onApiError: (err: unknown) => boolean })
     setEditingId(null)
     setName('')
     setDefaultScheduleId(schedules[0]?.id ?? '')
-    setRequiredQualificationId(qualifications[0]?.id ?? '')
+    setRequiredQualificationId('')
     setInspectionMode('pass_fail')
     setChecklistItems([])
   }
@@ -262,11 +260,12 @@ function ToolTypesTab({ onApiError }: { onApiError: (err: unknown) => boolean })
     }
   }
 
-  // A tool type cannot be saved without a default schedule and a required
-  // qualification (both are mandatory server-side FKs). When a catalog is
-  // empty (degraded fetch or genuinely unpopulated) the save is disabled with
-  // an inline hint instead of submitting a 400-ing placeholder value.
-  const canSave = defaultScheduleId !== '' && requiredQualificationId !== ''
+  // A tool type cannot be saved without a default schedule (a mandatory FK).
+  // The required qualification is OPTIONAL (000023): most tools need no
+  // specific qualification — any Helfer*in may inspect them. When the schedule
+  // catalog is empty (degraded fetch or genuinely unpopulated) the save is
+  // disabled with an inline hint instead of submitting a 400-ing placeholder.
+  const canSave = defaultScheduleId !== ''
 
   return (
     <>
@@ -291,51 +290,6 @@ function ToolTypesTab({ onApiError }: { onApiError: (err: unknown) => boolean })
         </div>
       ) : (
         <>
-          {toolTypes.length === 0 && (
-            <p role="status" className={styles.emptyHint}>
-              Keine Gerätetypen vorhanden. Lege den ersten Typ an.
-            </p>
-          )}
-
-          {toolTypes.length > 0 && (
-            <ul className={styles.list} aria-label="Gerätetypen">
-              {toolTypes.map((tt) => (
-                <li key={tt.id} className={styles.row}>
-                  <div className={styles.rowInfo}>
-                    <span className={styles.rowName}>{tt.name}</span>
-                    <span className={styles.rowMeta}>
-                      {tt.inspection_mode === 'checklist' ? 'Checkliste' : 'Pass/Fail'}
-                      {tt.checklist_items.length > 0 ? ` · ${tt.checklist_items.length} Punkte` : ''}
-                    </span>
-                    {tt.checklist_items.length > 0 && (
-                      <span className={styles.rowMeta}>
-                        {tt.checklist_items.map((item) => item.label).join(' · ')}
-                      </span>
-                    )}
-                  </div>
-                  <div className={styles.rowActions}>
-                    <button
-                      type="button"
-                      className={styles.rowButton}
-                      disabled={busy}
-                      onClick={() => startEdit(tt)}
-                    >
-                      Bearbeiten
-                    </button>
-                    <button
-                      type="button"
-                      className={styles.dangerButton}
-                      disabled={busy}
-                      onClick={() => void archive(tt)}
-                    >
-                      Archivieren
-                    </button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-
           <form
             className={styles.editor}
             onSubmit={(e) => {
@@ -358,7 +312,7 @@ function ToolTypesTab({ onApiError }: { onApiError: (err: unknown) => boolean })
             </div>
             {!canSave && (
               <p role="status" className={styles.emptyHint}>
-                Wähle einen Standard-Zeitplan und eine erforderliche Qualifikation aus, um zu speichern.
+                Wähle einen Standard-Zeitplan aus, um zu speichern.
               </p>
             )}
 
@@ -414,6 +368,7 @@ function ToolTypesTab({ onApiError }: { onApiError: (err: unknown) => boolean })
                     setFeedback(null)
                   }}
                 >
+                  <option value="">Keine Qualifikation erforderlich</option>
                   {qualifications.length === 0 && <option value="">Keine Qualifikationen vorhanden</option>}
                   {qualifications.map((q) => (
                     <option key={q.id} value={q.id}>
@@ -464,6 +419,51 @@ function ToolTypesTab({ onApiError }: { onApiError: (err: unknown) => boolean })
               />
             )}
           </form>
+
+          {toolTypes.length === 0 && (
+            <p role="status" className={styles.emptyHint}>
+              Keine Gerätetypen vorhanden. Lege den ersten Typ an.
+            </p>
+          )}
+
+          {toolTypes.length > 0 && (
+            <ul className={styles.list} aria-label="Gerätetypen">
+              {toolTypes.map((tt) => (
+                <li key={tt.id} className={styles.row}>
+                  <div className={styles.rowInfo}>
+                    <span className={styles.rowName}>{tt.name}</span>
+                    <span className={styles.rowMeta}>
+                      {tt.inspection_mode === 'checklist' ? 'Checkliste' : 'Pass/Fail'}
+                      {tt.checklist_items.length > 0 ? ` · ${tt.checklist_items.length} Punkte` : ''}
+                    </span>
+                    {tt.checklist_items.length > 0 && (
+                      <span className={styles.rowMeta}>
+                        {tt.checklist_items.map((item) => item.label).join(' · ')}
+                      </span>
+                    )}
+                  </div>
+                  <div className={styles.rowActions}>
+                    <button
+                      type="button"
+                      className={styles.rowButton}
+                      disabled={busy}
+                      onClick={() => startEdit(tt)}
+                    >
+                      Bearbeiten
+                    </button>
+                    <button
+                      type="button"
+                      className={styles.dangerButton}
+                      disabled={busy}
+                      onClick={() => void archive(tt)}
+                    >
+                      Archivieren
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
         </>
       )}
     </>

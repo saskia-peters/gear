@@ -17,7 +17,7 @@
   width: 100%;
   max-width: 720px;
   margin: 0 auto;
-  padding: var(--gear-space-8) var(--gear-space-margin-mobile);
+  padding: var(--gear-space-4) var(--gear-space-margin-mobile);
   display: flex;
   flex-direction: column;
   gap: var(--gear-space-4);
@@ -101,7 +101,7 @@
 }
 
 .emptyStateWrap {
-  padding-top: var(--gear-space-8);
+  padding-top: var(--gear-space-4);
 }
 
 .skeleton {

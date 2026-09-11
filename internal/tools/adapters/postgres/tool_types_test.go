@@ -100,10 +100,10 @@ func TestPostgresToolTypesStore(t *testing.T) {
 	// CREATE_VALID: a checklist-mode type is persisted with its ordered items
 	// (positions from the input order), attributes at the '{}' DB default.
 	created, err := repo.CreateToolType(ctx, &core.ToolType{
-		Name:                     "Test-Bohrmaschine",
-		DefaultScheduleID:        scheduleID,
-		RequiredQualificationID:  qualificationID,
-		InspectionMode:           core.InspectionModeChecklist,
+		Name:                    "Test-Bohrmaschine",
+		DefaultScheduleID:       scheduleID,
+		RequiredQualificationID: qualificationID,
+		InspectionMode:          core.InspectionModeChecklist,
 		Items: []core.ToolTypeChecklistItem{
 			{Position: 0, Label: "Bohrfutter"},
 			{Position: 1, Label: "Kabel"},
@@ -289,6 +289,58 @@ func TestPostgresToolTypesStore(t *testing.T) {
 // verification-gap finding): two created types come back oldest-first
 // (created_at ASC), and two types sharing ONE created_at come back ordered by
 // name ASC (the tiebreaker).
+func TestPostgresToolTypesOptionalQualification(t *testing.T) {
+	// 000023 made the required qualification OPTIONAL: an empty
+	// required_qualification_id must persist as SQL NULL and read back as an
+	// empty string (no qualification required — any Helfer*in may inspect).
+	pool := toolTestPool(t)
+	ctx := context.Background()
+	t.Cleanup(func() { pool.Close() })
+
+	repo := NewRepository(New(pool))
+	scheduleID, _ := seedToolTypeRefs(t, ctx, pool)
+
+	created, err := repo.CreateToolType(ctx, &core.ToolType{
+		Name:                    "Test-OhneQualifikation",
+		DefaultScheduleID:       scheduleID,
+		RequiredQualificationID: "", // empty → NULL, optional
+		InspectionMode:          core.InspectionModePassFail,
+	})
+	if err != nil {
+		t.Fatalf("CreateToolType(no qualification) err = %v", err)
+	}
+	if created.RequiredQualificationID != "" {
+		t.Errorf("created required qualification = %q, want empty", created.RequiredQualificationID)
+	}
+
+	var dbQual *string
+	if err := pool.QueryRow(ctx,
+		"SELECT required_qualification_id FROM tool_types WHERE id = $1", created.ID,
+	).Scan(&dbQual); err != nil {
+		t.Fatalf("scan required_qualification_id err = %v", err)
+	}
+	if dbQual != nil {
+		t.Errorf("DB required_qualification_id = %v, want SQL NULL", *dbQual)
+	}
+
+	list, err := repo.ListToolTypes(ctx)
+	if err != nil {
+		t.Fatalf("ListToolTypes err = %v", err)
+	}
+	found := false
+	for _, tt := range list {
+		if tt.ID == created.ID {
+			found = true
+			if tt.RequiredQualificationID != "" {
+				t.Errorf("listed required qualification = %q, want empty", tt.RequiredQualificationID)
+			}
+		}
+	}
+	if !found {
+		t.Error("created type not in list")
+	}
+}
+
 func TestPostgresToolTypesListOrder(t *testing.T) {
 	pool := toolTestPool(t)
 	ctx := context.Background()

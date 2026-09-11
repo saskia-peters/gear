@@ -260,6 +260,25 @@ func TestCreateToolTypeValid(t *testing.T) {
 	}
 }
 
+func TestCreateToolTypeWithoutQualification(t *testing.T) {
+	// 000023 made the required qualification OPTIONAL: most tools need no
+	// specific qualification (any Helfer*in may inspect them, FR-8/FR-11), so
+	// an empty required_qualification_id is valid and persists as a nil FK.
+	svc, store, _ := newToolTypeService()
+	input := toolTypeInput()
+	input.RequiredQualificationID = ""
+	got, err := svc.CreateToolType(context.Background(), actorID, input)
+	if err != nil {
+		t.Fatalf("CreateToolType(no qualification) err = %v", err)
+	}
+	if got.RequiredQualificationID != "" {
+		t.Errorf("required qualification = %q, want empty", got.RequiredQualificationID)
+	}
+	if len(store.created) != 1 || store.created[0].RequiredQualificationID != "" {
+		t.Errorf("persisted = %+v, want no required qualification", store.created)
+	}
+}
+
 func TestCreateToolTypePassFailIgnoresItems(t *testing.T) {
 	// A pass_fail type persists with an EMPTY checklist (the item editor is
 	// only shown in checklist mode; any submitted items are ignored).
@@ -293,7 +312,6 @@ func TestCreateToolTypeInvalid(t *testing.T) {
 		{"name too long", func(in *ToolTypeInput) { in.Name = strings.Repeat("ä", 256) }, "zu lang"},
 		{"bad mode", func(in *ToolTypeInput) { in.InspectionMode = "matrix" }, "Prüfmodus"},
 		{"missing schedule", func(in *ToolTypeInput) { in.DefaultScheduleID = "" }, "Zeitplan"},
-		{"missing qualification", func(in *ToolTypeInput) { in.RequiredQualificationID = "" }, "Qualifikation"},
 		{"empty item label", func(in *ToolTypeInput) { in.Items = append(in.Items, ToolTypeChecklistItemInput{Label: "  "}) }, "Eintrag"},
 		{"item label too long", func(in *ToolTypeInput) { in.Items[0].Label = strings.Repeat("x", 256) }, "zu lang"},
 		// Fix 3: a checklist mode with ZERO items has no inspection template.

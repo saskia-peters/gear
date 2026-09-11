@@ -405,12 +405,14 @@ func (s *Service) validateToolTypeFKs(ctx context.Context, input ToolTypeInput) 
 		return &InvalidToolTypeError{Message: MsgToolTypeInvalidSchedule}
 	}
 
-	exists, err := s.qualifications.QualificationExists(ctx, strings.TrimSpace(input.RequiredQualificationID))
-	if err != nil {
-		return fmt.Errorf("tools core: failed to resolve qualification catalog: %w", err)
-	}
-	if !exists {
-		return &InvalidToolTypeError{Message: MsgToolTypeInvalidQualification}
+	if strings.TrimSpace(input.RequiredQualificationID) != "" {
+		exists, err := s.qualifications.QualificationExists(ctx, strings.TrimSpace(input.RequiredQualificationID))
+		if err != nil {
+			return fmt.Errorf("tools core: failed to resolve qualification catalog: %w", err)
+		}
+		if !exists {
+			return &InvalidToolTypeError{Message: MsgToolTypeInvalidQualification}
+		}
 	}
 	return nil
 }
@@ -432,9 +434,11 @@ func validateToolTypeInput(input ToolTypeInput) error {
 	if strings.TrimSpace(input.DefaultScheduleID) == "" {
 		return &InvalidToolTypeError{Message: "Bitte wähle einen Standard-Zeitplan aus."}
 	}
-	if strings.TrimSpace(input.RequiredQualificationID) == "" {
-		return &InvalidToolTypeError{Message: "Bitte wähle eine erforderliche Qualifikation aus."}
-	}
+	// required_qualification_id is OPTIONAL (most tools need no specific
+	// qualification — any Helfer*in may inspect them, FR-8/FR-11): a present
+	// value must reference an existing vocabulary row (validated against the
+	// User QualificationCatalogPort by validateToolTypeFKs), an empty one is
+	// allowed and stored as NULL.
 	switch input.InspectionMode {
 	case InspectionModePassFail, InspectionModeChecklist:
 	default:

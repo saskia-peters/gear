@@ -71,6 +71,7 @@ sql:
     schema:
       - "./migrations/000021_tool_types.up.sql"
       - "./migrations/000022_tool_type_checklist_items_unique_position.up.sql"
+      - "./migrations/000023_tool_type_qualification_optional.up.sql"
     queries: "./internal/tools/adapters/postgres/queries.sql"
     gen:
       go:
