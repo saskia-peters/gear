@@ -9,9 +9,10 @@ import (
 	"github.com/saskia-peters/gear/internal/admin/core"
 )
 
-// TestPostgresSchedulesSeed pins the migration 000019 seed catalog (AD-16): the
-// EXACT five canonical intervals are present, ACTIVE, and in a deterministic
-// order (created_at ASC, name ASC — the seeds share one now() created_at).
+// TestPostgresSchedulesSeed pins the migration 000019 seed catalog (AD-16),
+// whose display names were Germanized by migration 000020: the EXACT five
+// canonical intervals are present, ACTIVE, and in a deterministic order
+// (created_at ASC, name ASC — the seeds share one now() created_at).
 func TestPostgresSchedulesSeed(t *testing.T) {
 	pool := adminTestPool(t)
 	ctx := context.Background()
@@ -27,11 +28,11 @@ func TestPostgresSchedulesSeed(t *testing.T) {
 		unit string
 		magn int
 	}{
-		{"1 month", core.IntervalUnitMonth, 1},
-		{"1 quarter", core.IntervalUnitQuarter, 1},
-		{"1 year", core.IntervalUnitYear, 1},
-		{"2 weeks", core.IntervalUnitWeek, 2},
-		{"3 days", core.IntervalUnitDay, 3},
+		{"1 Jahr", core.IntervalUnitYear, 1},
+		{"1 Monat", core.IntervalUnitMonth, 1},
+		{"1 Quartal", core.IntervalUnitQuarter, 1},
+		{"2 Wochen", core.IntervalUnitWeek, 2},
+		{"3 Tage", core.IntervalUnitDay, 3},
 	}
 
 	got, err := repo.ListSchedules(ctx)

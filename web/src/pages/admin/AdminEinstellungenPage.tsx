@@ -994,37 +994,6 @@ function ScheduleSettingsTab({ onApiError }: { onApiError: (err: unknown) => boo
         </div>
       ) : (
         <>
-          {schedules.length > 0 && (
-            <ul className={styles.list} aria-label="Zeitpläne">
-              {schedules.map((s) => (
-                <li key={s.id} className={styles.row}>
-                  <div className={styles.rowInfo}>
-                    <span className={styles.rowName}>{s.name}</span>
-                    <span className={styles.rowMeta}>{scheduleDisplay(s)}</span>
-                  </div>
-                  <div className={styles.rowActions}>
-                    <button
-                      type="button"
-                      className={styles.rowButton}
-                      disabled={busy}
-                      onClick={() => startEdit(s)}
-                    >
-                      Bearbeiten
-                    </button>
-                    <button
-                      type="button"
-                      className={styles.dangerButton}
-                      disabled={busy}
-                      onClick={() => void archive(s)}
-                    >
-                      Archivieren
-                    </button>
-                  </div>
-                </li>
-              ))}
-            </ul>
-          )}
-
           <form
             className={styles.editor}
             onSubmit={(e) => {
@@ -1102,6 +1071,37 @@ function ScheduleSettingsTab({ onApiError }: { onApiError: (err: unknown) => boo
               )}
             </div>
           </form>
+
+          {schedules.length > 0 && (
+            <ul className={styles.scheduleList} aria-label="Zeitpläne">
+              {schedules.map((s) => (
+                <li key={s.id} className={styles.scheduleRow}>
+                  <div className={styles.scheduleRowInfo}>
+                    <span className={styles.scheduleRowName}>{s.name}</span>
+                    <span className={styles.scheduleRowMeta}>{scheduleDisplay(s)}</span>
+                  </div>
+                  <div className={styles.scheduleRowActions}>
+                    <button
+                      type="button"
+                      className={styles.rowButton}
+                      disabled={busy}
+                      onClick={() => startEdit(s)}
+                    >
+                      Bearbeiten
+                    </button>
+                    <button
+                      type="button"
+                      className={styles.dangerButton}
+                      disabled={busy}
+                      onClick={() => void archive(s)}
+                    >
+                      Archivieren
+                    </button>
+                  </div>
+                </li>
+              ))}
+            </ul>
+          )}
         </>
       )}
     </>

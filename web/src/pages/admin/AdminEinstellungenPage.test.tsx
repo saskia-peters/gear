@@ -14,7 +14,7 @@ const SCHEDULES_URL = '/api/v1/admin/settings/schedules'
 function scheduleFixture() {
   return {
     id: 'id-s1',
-    name: '1 year',
+    name: '1 Jahr',
     interval_unit: 'year',
     interval_magnitude: 1,
     created_at: '2026-09-10T10:00:00Z',
@@ -557,12 +557,12 @@ describe('AdminEinstellungenPage Zeitpläne tab', () => {
     stubFetchRoutes([
       stubSchedulesList([
         scheduleFixture(),
-        { ...scheduleFixture(), id: 'id-s2', name: '2 weeks', interval_unit: 'week', interval_magnitude: 2 },
+        { ...scheduleFixture(), id: 'id-s2', name: '2 Wochen', interval_unit: 'week', interval_magnitude: 2 },
       ]),
     ])
     renderPage()
 
-    expect(await screen.findByText('1 year')).toBeInTheDocument()
+    expect(await screen.findByText('1 Jahr')).toBeInTheDocument()
     expect(screen.getByText('Jährlich − 1 Jahr')).toBeInTheDocument()
     expect(screen.getByText('Wöchentlich − 2 Wochen')).toBeInTheDocument()
     expect(screen.getAllByRole('button', { name: 'Archivieren' })).toHaveLength(2)
@@ -580,7 +580,7 @@ describe('AdminEinstellungenPage Zeitpläne tab', () => {
     renderPage()
 
     await screen.findByRole('button', { name: 'Speichern' })
-    await user.type(screen.getByLabelText('Name'), '1 year')
+    await user.type(screen.getByLabelText('Name'), '1 Jahr')
     await user.selectOptions(screen.getByLabelText('Zeiteinheit'), 'year')
     await user.clear(screen.getByLabelText('Intervallgröße'))
     await user.type(screen.getByLabelText('Intervallgröße'), '1')
@@ -590,10 +590,10 @@ describe('AdminEinstellungenPage Zeitpläne tab', () => {
     const postCall = fetchMock.mock.calls.find(([url, init]) => url === SCHEDULES_URL && init?.method === 'POST')
     expect(postCall).toBeTruthy()
     const body = JSON.parse((postCall![1] as RequestInit).body as string)
-    expect(body.name).toBe('1 year')
+    expect(body.name).toBe('1 Jahr')
     expect(body.interval_unit).toBe('year')
     expect(body.interval_magnitude).toBe(1)
-    expect(await screen.findByText('1 year')).toBeInTheDocument()
+    expect(await screen.findByText('1 Jahr')).toBeInTheDocument()
   })
 
   it('EDIT: Bearbeiten loads the row, PUT persists the changed interval', async () => {
@@ -601,20 +601,20 @@ describe('AdminEinstellungenPage Zeitpläne tab', () => {
       stubSchedulesList([scheduleFixture()]),
       {
         matcher: (url, init) => url === `${SCHEDULES_URL}/id-s1` && init?.method === 'PUT',
-        response: { ok: true, status: 200, body: { ...scheduleFixture(), name: '2 years', interval_magnitude: 2, message: 'Zeitplan gespeichert.' } },
+        response: { ok: true, status: 200, body: { ...scheduleFixture(), name: '2 Jahre', interval_magnitude: 2, message: 'Zeitplan gespeichert.' } },
       },
     ])
     const user = userEvent.setup()
     renderPage()
 
-    await screen.findByText('1 year')
+    await screen.findByText('1 Jahr')
     await user.click(screen.getByRole('button', { name: 'Bearbeiten' }))
     expect(screen.getByRole('heading', { name: 'Zeitplan bearbeiten' })).toBeInTheDocument()
-    expect(screen.getByLabelText('Name')).toHaveValue('1 year')
+    expect(screen.getByLabelText('Name')).toHaveValue('1 Jahr')
     expect(screen.getByLabelText('Zeiteinheit')).toHaveValue('year')
 
     await user.clear(screen.getByLabelText('Name'))
-    await user.type(screen.getByLabelText('Name'), '2 years')
+    await user.type(screen.getByLabelText('Name'), '2 Jahre')
     await user.clear(screen.getByLabelText('Intervallgröße'))
     await user.type(screen.getByLabelText('Intervallgröße'), '2')
     await user.click(screen.getByRole('button', { name: 'Änderungen speichern' }))
@@ -623,9 +623,9 @@ describe('AdminEinstellungenPage Zeitpläne tab', () => {
     const putCall = fetchMock.mock.calls.find(([url, init]) => url === `${SCHEDULES_URL}/id-s1` && init?.method === 'PUT')
     expect(putCall).toBeTruthy()
     const body = JSON.parse((putCall![1] as RequestInit).body as string)
-    expect(body.name).toBe('2 years')
+    expect(body.name).toBe('2 Jahre')
     expect(body.interval_magnitude).toBe(2)
-    expect(await screen.findByText('2 years')).toBeInTheDocument()
+    expect(await screen.findByText('2 Jahre')).toBeInTheDocument()
   })
 
   it('ARCHIVE: confirming the prompt archives the row and removes it inline', async () => {
@@ -640,11 +640,11 @@ describe('AdminEinstellungenPage Zeitpläne tab', () => {
     const user = userEvent.setup()
     renderPage()
 
-    await screen.findByText('1 year')
+    await screen.findByText('1 Jahr')
     await user.click(screen.getByRole('button', { name: 'Archivieren' }))
 
     expect(await screen.findByText('Zeitplan archiviert.')).toBeInTheDocument()
-    expect(screen.queryByText('1 year')).not.toBeInTheDocument()
+    expect(screen.queryByText('1 Jahr')).not.toBeInTheDocument()
     const archiveCall = fetchMock.mock.calls.find(([url, init]) => url === `${SCHEDULES_URL}/id-s1/archive` && init?.method === 'POST')
     expect(archiveCall).toBeTruthy()
   })
@@ -655,12 +655,12 @@ describe('AdminEinstellungenPage Zeitpläne tab', () => {
     const user = userEvent.setup()
     renderPage()
 
-    await screen.findByText('1 year')
+    await screen.findByText('1 Jahr')
     await user.click(screen.getByRole('button', { name: 'Archivieren' }))
 
     const archiveCall = fetchMock.mock.calls.find(([url, init]) => url === `${SCHEDULES_URL}/id-s1/archive` && init?.method === 'POST')
     expect(archiveCall).toBeUndefined()
-    expect(screen.getByText('1 year')).toBeInTheDocument()
+    expect(screen.getByText('1 Jahr')).toBeInTheDocument()
   })
 
   it('FORM_ERROR: a 400 shows the server German message inline', async () => {
