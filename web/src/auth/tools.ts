@@ -200,4 +200,32 @@ function buildToolBody(input: ToolInput): Record<string, unknown> {
   }
 }
 
+// ============================================================================
+// Dashboard tool list (Story 4-3b, dashboard.view): the minimal GEAR-module
+// (non-admin) tool surface. Unlike the admin tools above (which read
+// /api/v1/admin/tools behind tools.manage), this reads /api/v1/tools — gated
+// by dashboard.view on the server (all base roles hold it). It returns ONLY
+// id, name and the type display name: no schedule/attributes/audit data and
+// no status/due-date derivation (Story 6.1 owns the color-coded dashboard —
+// every tool renders as "verfügbar" statically).
+// ============================================================================
+
+// DashboardTool is the minimal GET /api/v1/tools payload.
+export interface DashboardTool {
+  id: string
+  name: string
+  tool_type_id: string
+  tool_type_name: string
+}
+
+const DASHBOARD_TOOLS_URL = '/api/v1/tools'
+
+// listDashboardTools fetches the ACTIVE tool catalog for the Werkzeugliste
+// (GET_LIST_EMPTY when none exist — the server answers an empty array; archived
+// rows never appear).
+export async function listDashboardTools(): Promise<DashboardTool[]> {
+  const data = (await request(DASHBOARD_TOOLS_URL, { headers: authTokenHeaders() })) as DashboardTool[] | null
+  return Array.isArray(data) ? data : []
+}
+
 export { ApiError }

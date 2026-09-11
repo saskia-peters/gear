@@ -149,6 +149,15 @@ func main() {
 	// defense-in-depth. It deliberately does NOT widen the tool_types gate.
 	toolToolsSurface := auth.RequireAnyPermission(sessionManager, userRepo, []string{toolscore.ToolsManagePermission}, "tools.manage access denied", log)(toolHandler.ToolRoutes())
 
+	// The dashboard tool-list surface mounts under /api/v1/tools with its OWN
+	// gate — one permission per surface (AD-6, Story 4-3b): any `dashboard.view`
+	// holder (all base roles) reaches the minimal ACTIVE tool list. The core
+	// read (ListToolsForDashboard) is UNGATED by design — the HTTP mount carries
+	// the gate — so a tools.manage-less dashboard.view holder (e.g. Helfer*in)
+	// can render the Werkzeugliste. No writes, no status/due-date derivation
+	// (Story 6.1 owns the color-coded dashboard).
+	dashboardToolsSurface := auth.RequirePermission(sessionManager, userRepo, toolscore.DashboardViewPermission)(toolHandler.DashboardToolsRoutes())
+
 	// Demo route for the gateway composition tests: any active user holding
 	// `dashboard.view` (all base roles) can reach /api/v1/protected/me.
 	protectedRoute := auth.Route(sessionManager, userRepo, "dashboard.view")
@@ -164,6 +173,7 @@ func main() {
 		router.WithMount("/api/v1/admin/settings/schedules", schedulesSurface),
 		router.WithMount("/api/v1/admin/tool-types", toolTypesSurface),
 		router.WithMount("/api/v1/admin/tools", toolToolsSurface),
+		router.WithMount("/api/v1/tools", dashboardToolsSurface),
 	)
 
 	srv := &http.Server{

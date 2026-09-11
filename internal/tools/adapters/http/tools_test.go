@@ -49,6 +49,18 @@ func (f *fakeToolService) ListTools(_ context.Context, _ string) ([]*toolscore.T
 	return f.tools, nil
 }
 
+// ListToolsForDashboard serves the dashboard.read surface (Story 4-3b) from the
+// same in-memory catalog; the handler calls it ungated.
+func (f *fakeToolService) ListToolsForDashboard(_ context.Context) ([]*toolscore.Tool, error) {
+	if f.listErr != nil {
+		return nil, f.listErr
+	}
+	if f.tools == nil {
+		return []*toolscore.Tool{}, nil
+	}
+	return f.tools, nil
+}
+
 func (f *fakeToolService) CreateTool(_ context.Context, _ string, input toolscore.ToolInput) (*toolscore.Tool, error) {
 	if f.writeErr != nil {
 		return nil, f.writeErr
@@ -94,6 +106,18 @@ func toolGateway(perms []string, session *usercore.Session, svc toolports.Servic
 		[]string{toolscore.ToolsManagePermission},
 		"tools.manage access denied", discardLogger(),
 	)(h.ToolRoutes())
+}
+
+// dashboardToolGateway wraps the REAL DashboardToolsRoutes() behind the same
+// RequirePermission gate the composition root uses (dashboard.view, Story
+// 4-3b), with a fake session validator + permission resolver.
+func dashboardToolGateway(perms []string, session *usercore.Session, svc toolports.Service) http.Handler {
+	h := NewHandler(svc, discardLogger())
+	return auth.RequirePermission(
+		&gateValidator{session: session},
+		&gateResolver{perms: perms},
+		toolscore.DashboardViewPermission,
+	)(h.DashboardToolsRoutes())
 }
 
 func toolFixture(id, name string) *toolscore.Tool {
@@ -186,6 +210,124 @@ func TestToolsGetUnauthenticated(t *testing.T) {
 	}
 	if env.Error.Code != "unauthorized" {
 		t.Errorf("code = %q, want unauthorized", env.Error.Code)
+	}
+}
+
+func TestDashboardToolsGetListEmpty(t *testing.T) {
+	// GET_LIST_EMPTY (Story 4-3b): 200 `[]` (never null) — the SPA keeps the
+	// "Keine Werkzeuge vorhanden" EmptyState.
+	surface := dashboardToolGateway([]string{toolscore.DashboardViewPermission}, activeAdmin(), &fakeToolService{})
+	rec := doRequest(surface, http.MethodGet, "/", "tok", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if strings.TrimSpace(rec.Body.String()) != "[]" {
+		t.Errorf("body = %s, want JSON empty array", rec.Body.String())
+	}
+}
+
+func TestDashboardToolsGetList(t *testing.T) {
+	// GET_LIST (Story 4-3b): 200 with the MINIMAL dashboard DTO — id, name,
+	// tool_type_id, tool_type_name only. No schedule_id, no attributes, no
+	// audit timestamps, no status derivation on this surface.
+	svc := &fakeToolService{tools: []*toolscore.Tool{
+		toolFixture("id-a", "Bohrmaschine-01"),
+		toolFixture("id-b", "Bohrmaschine-02"),
+	}}
+	surface := dashboardToolGateway([]string{toolscore.DashboardViewPermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodGet, "/", "tok", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var body []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding err = %v", err)
+	}
+	if len(body) != 2 {
+		t.Fatalf("rows = %d, want 2", len(body))
+	}
+	if body[0]["id"] != "id-a" || body[0]["name"] != "Bohrmaschine-01" {
+		t.Errorf("row 0 = %+v", body[0])
+	}
+	if body[0]["tool_type_id"] != "id-t1" || body[0]["tool_type_name"] != "Bohrmaschine" {
+		t.Errorf("row 0 type = %+v", body[0])
+	}
+	for _, row := range body {
+		for _, leak := range []string{"schedule_id", "attributes", "archived_at", "created_at", "updated_at"} {
+			if _, present := row[leak]; present {
+				t.Errorf("dashboard DTO leaks %q: %+v (minimal surface, Story 4-3b)", leak, row)
+			}
+		}
+	}
+}
+
+func TestDashboardToolsGetUnauthenticated(t *testing.T) {
+	// GET_UNAUTHENTICATED (Story 4-3b): no session → 401 uniform envelope, no
+	// tool data.
+	surface := dashboardToolGateway([]string{toolscore.DashboardViewPermission}, nil, &fakeToolService{})
+	rec := doRequest(surface, http.MethodGet, "/", "", "")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 401 err = %v", err)
+	}
+	if env.Error.Code != "unauthorized" {
+		t.Errorf("code = %q, want unauthorized", env.Error.Code)
+	}
+}
+
+func TestDashboardToolsGetForbidden(t *testing.T) {
+	// GET_FORBIDDEN (Story 4-3b, AD-6): an authenticated caller WITHOUT
+	// dashboard.view — even a tools.manage holder — answers the uniform 403
+	// with no tool data exposed.
+	svc := &fakeToolService{tools: []*toolscore.Tool{toolFixture("id-a", "Bohrmaschine-01")}}
+	surface := dashboardToolGateway([]string{toolscore.ToolsManagePermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodGet, "/", "tok", "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(strings.ToLower(rec.Body.String()), "bohrmaschine") || strings.Contains(rec.Body.String(), "id-a") {
+		t.Errorf("403 body leaks tool data: %s", rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 403 err = %v", err)
+	}
+	if env.Error.Code != "forbidden" {
+		t.Errorf("code = %q, want forbidden", env.Error.Code)
+	}
+}
+
+func TestDashboardToolsNoWrites(t *testing.T) {
+	// Story 4-3b: the dashboard surface is read-only — the write verbs answer
+	// the uniform 405 (no route is registered for them), never a write through
+	// to the core. A path outside the single GET / route (no /{id} here) answers
+	// the uniform 404.
+	surface := dashboardToolGateway([]string{toolscore.DashboardViewPermission}, activeAdmin(), &fakeToolService{})
+	for _, m := range []string{http.MethodPost, http.MethodPut, http.MethodDelete} {
+		if rec := doRequest(surface, m, "/", "tok", writeToolBody()); rec.Code != http.StatusMethodNotAllowed {
+			t.Errorf("%s status = %d, want 405", m, rec.Code)
+		}
+	}
+	if rec := doRequest(surface, http.MethodPost, "/id-a/archive", "tok", ""); rec.Code != http.StatusNotFound {
+		t.Errorf("archive status = %d, want 404 (no /{id} routes on the dashboard surface)", rec.Code)
+	}
+}
+
+func TestDashboardToolsNotFoundEnvelope(t *testing.T) {
+	surface := dashboardToolGateway([]string{toolscore.DashboardViewPermission}, activeAdmin(), &fakeToolService{})
+	rec := doRequest(surface, http.MethodGet, "/a/b/c", "tok", "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404", rec.Code)
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 404 err = %v", err)
+	}
+	if env.Error.Code != "not_found" {
+		t.Errorf("code = %q, want not_found", env.Error.Code)
 	}
 }
 

@@ -28,6 +28,13 @@ import (
 // the SPA-facing documentation never drift.
 const ToolsManagePermission = "tools.manage"
 
+// DashboardViewPermission is the server-authoritative gate code for the
+// GEAR-module (non-admin) dashboard tool-list surface (Story 4-3b): the
+// `/api/v1/tools` mount carries it (all base roles hold it), so the core read
+// stays UNGATED by design — see ListToolsForDashboard. One Go const so the
+// route mount, the tests and the SPA-facing documentation never drift.
+const DashboardViewPermission = "dashboard.view"
+
 // Audit-operation tags for the tool surface (NFR-O1/NFR-O2): creates, updates
 // and archives are audited with actor, timestamp and operation.
 const (
@@ -178,6 +185,23 @@ func (s *Service) ListTools(ctx context.Context, actorID string) ([]*Tool, error
 	if err := s.requireToolsPermission(ctx, actorID); err != nil {
 		return nil, err
 	}
+	tools, err := s.store.ListTools(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tools core: failed to list tools: %w", err)
+	}
+	return tools, nil
+}
+
+// ListToolsForDashboard returns every ACTIVE tool, oldest first, each with its
+// type display name — the dashboard.view-gated GEAR-module read (Story 4-3b).
+// Unlike ListTools it deliberately does NOT re-check `tools.manage`: the HTTP
+// surface (`/api/v1/tools`, mounted behind `dashboard.view`) carries the gate
+// instead, so a tools.manage-less dashboard.view holder (e.g. Helfer*in) can
+// render the Werkzeugliste — mirroring how SchedulesPort/QualificationCatalogPort
+// expose ungated reads for cross-module consumption. Archived rows are filtered
+// by the store and never reach the surface. No status/due-date derivation
+// (Story 6.1) — the SPA marks every listed tool "verfügbar" statically.
+func (s *Service) ListToolsForDashboard(ctx context.Context) ([]*Tool, error) {
 	tools, err := s.store.ListTools(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("tools core: failed to list tools: %w", err)

@@ -605,6 +605,63 @@ func TestToolsForbidden(t *testing.T) {
 	}
 }
 
+func TestListToolsForDashboardUngated(t *testing.T) {
+	// Story 4-3b: the dashboard read must be reachable by ANY dashboard.view
+	// holder — even one WITHOUT tools.manage (e.g. Helfer*in). The core method
+	// deliberately does NOT re-check tools.manage (the HTTP surface carries the
+	// dashboard.view gate instead), while the admin ListTools still 403s for
+	// the same caller — defense-in-depth for the admin surface is unchanged.
+	svc, store, _ := newToolService("dashboard.view")
+	store.tools = []*Tool{
+		toolFixture("id-a", "Bohrmaschine-01"),
+		toolFixture("id-b", "Bohrmaschine-02"),
+	}
+	archived := toolFixture("id-arch", "Alt")
+	now := time.Now()
+	archived.ArchivedAt = &now
+	store.tools = append(store.tools, archived)
+
+	got, err := svc.ListToolsForDashboard(context.Background())
+	if err != nil {
+		t.Fatalf("ListToolsForDashboard err = %v (dashboard.view holder without tools.manage), want success", err)
+	}
+	if len(got) != 2 || got[0].ID != "id-a" || got[1].ID != "id-b" {
+		t.Fatalf("tools = %+v, want both ACTIVE rows (archived filtered by the store)", got)
+	}
+	if got[0].ToolTypeName != "Bohrmaschine" {
+		t.Errorf("tool_type_name = %q, want the JOINed type name", got[0].ToolTypeName)
+	}
+
+	// The admin surface stays gated for the same caller: tools.manage-less
+	// dashboard.view holders cannot use ListTools.
+	if _, err := svc.ListTools(context.Background(), actorID); !errors.Is(err, ErrForbidden) {
+		t.Errorf("ListTools err = %v, want ErrForbidden for the tools.manage-less caller", err)
+	}
+}
+
+func TestListToolsForDashboardEmpty(t *testing.T) {
+	// GET_LIST_EMPTY: no tools → empty list, no error — the SPA keeps the
+	// "Keine Werkzeuge vorhanden" EmptyState.
+	svc, _, _ := newToolService()
+	got, err := svc.ListToolsForDashboard(context.Background())
+	if err != nil {
+		t.Fatalf("ListToolsForDashboard err = %v", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("tools = %d, want 0", len(got))
+	}
+}
+
+func TestListToolsForDashboardStoreError(t *testing.T) {
+	// The store failure surfaces as an internal error (500-style), never a
+	// permission sentinel.
+	svc, store, _ := newToolService()
+	store.listErr = errors.New("boom")
+	if _, err := svc.ListToolsForDashboard(context.Background()); err == nil {
+		t.Fatal("ListToolsForDashboard err = nil, want store error propagated")
+	}
+}
+
 func TestToolsEmptyActorNeverPasses(t *testing.T) {
 	// Defense-in-depth: an empty actor ID never passes even when the resolver
 	// would grant the permission.

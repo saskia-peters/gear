@@ -506,10 +506,13 @@ describe('App & Dashboard Foundation', () => {
 
   it('REQUIRE_AUTH_PAGESHOW: re-validates on bfcache restore (pageshow persisted) so logout is enforced after back navigation', async () => {
     // RequireAuth now makes two server calls per validation (profile +
-    // permissions), so the mock sequence provides both for the first validation
-    // and a 401 for the re-validation's profile call (which aborts early).
+    // permissions), and the DashboardPage Werkzeugliste adds its /api/v1/tools
+    // fetch (Story 4-3b) on mount — so the mock sequence provides a valid
+    // response for the tools fetch AND the first validation's two calls, and a
+    // 401 for the re-validation's profile call (which aborts early).
     const mock = vi
       .fn()
+      .mockResolvedValueOnce(validProfile())
       .mockResolvedValueOnce(validProfile())
       .mockResolvedValueOnce(validProfile())
       .mockResolvedValueOnce(

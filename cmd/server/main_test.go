@@ -528,6 +528,10 @@ func (s *compToolTypeService) ListTools(_ context.Context, _ string) ([]*toolsco
 	return []*toolscore.Tool{}, nil
 }
 
+func (s *compToolTypeService) ListToolsForDashboard(_ context.Context) ([]*toolscore.Tool, error) {
+	return []*toolscore.Tool{}, nil
+}
+
 func (s *compToolTypeService) CreateTool(_ context.Context, _ string, input toolscore.ToolInput) (*toolscore.Tool, error) {
 	return &toolscore.Tool{ID: "id", Name: input.Name, ToolTypeID: input.ToolTypeID, ScheduleID: input.ScheduleID}, nil
 }
@@ -853,5 +857,91 @@ func TestCompositionToolsWriteVerbs(t *testing.T) {
 	}
 	if rec := doComposedJSONRequest(nonHolder, "tok", http.MethodPost, "/api/v1/admin/tools/id-a/archive", ""); rec.Code != http.StatusForbidden {
 		t.Errorf("tool_types-only POST archive: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// newCompositionDashboardToolsRouter mirrors the main() mounts exactly for the
+// Story 4-3b dashboard tool-list surface: /api/v1/tools is mounted with its OWN
+// `dashboard.view` gate (RequirePermission — the single-code gateway, NOT the
+// admin RequireAnyPermission), alongside the admin mounts. This pins that the
+// dashboard surface is a separate, read-only, GEAR-module mount reachable by
+// ANY dashboard.view holder regardless of tools.manage.
+func newCompositionDashboardToolsRouter(perms []string, session *usercore.Session) http.Handler {
+	log := discardLogger()
+	validator := &compValidator{session: session}
+	resolver := &compResolver{perms: perms}
+
+	settingsHandler := adminhttp.NewHandler(&compSettingsService{}, log)
+	settingsSurface := auth.RequireAnyPermission(validator, resolver, []string{admcore.SmtpSettingsPermission}, "admin.settings.email access denied", log)(settingsHandler.Routes())
+	backupSurface := auth.RequireAnyPermission(validator, resolver, []string{admcore.BackupSettingsPermission}, "admin.settings.backup access denied", log)(settingsHandler.BackupRoutes())
+	schedulesSurface := auth.RequireAnyPermission(validator, resolver, []string{admcore.SchedulesPermission}, "schedules.manage access denied", log)(settingsHandler.ScheduleRoutes())
+
+	toolHandler := toolhttp.NewHandler(&compToolTypeService{}, log)
+	toolTypesSurface := auth.RequireAnyPermission(validator, resolver, []string{toolscore.ToolTypesManagePermission}, "tool_types.manage access denied", log)(toolHandler.ToolTypeRoutes())
+	toolToolsSurface := auth.RequireAnyPermission(validator, resolver, []string{toolscore.ToolsManagePermission}, "tools.manage access denied", log)(toolHandler.ToolRoutes())
+	dashboardToolsSurface := auth.RequirePermission(validator, resolver, toolscore.DashboardViewPermission)(toolHandler.DashboardToolsRoutes())
+
+	outer := chi.NewRouter()
+	outer.Get("/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"module":"admin","status":"ok"}`))
+	})
+	outerSurface := auth.RequireAnyPermission(validator, resolver, usercore.AdminModuleAccessCodes(), "admin access denied", log)(outer)
+
+	return router.New(stubPinger{}, log,
+		router.WithMount("/api/v1/admin", outerSurface),
+		router.WithMount("/api/v1/admin/settings", settingsSurface),
+		router.WithMount("/api/v1/admin/settings/backup", backupSurface),
+		router.WithMount("/api/v1/admin/settings/schedules", schedulesSurface),
+		router.WithMount("/api/v1/admin/tool-types", toolTypesSurface),
+		router.WithMount("/api/v1/admin/tools", toolToolsSurface),
+		router.WithMount("/api/v1/tools", dashboardToolsSurface),
+	)
+}
+
+// TestCompositionDashboardToolsMountGating verifies the Story 4-3b
+// composition-root wiring: /api/v1/tools is gated by ITS OWN dashboard.view
+// permission (one permission per surface, AD-6) — a dashboard.view holder (all
+// base roles) reaches the minimal tool list EVEN without tools.manage, while a
+// tools.manage-but-not-dashboard.view caller answers the uniform 403 (the
+// dashboard gate is NOT widened by the admin tools code). Unauthenticated
+// callers answer 401.
+func TestCompositionDashboardToolsMountGating(t *testing.T) {
+	// 401: no token.
+	if rec := doComposedJSONRequest(newCompositionDashboardToolsRouter([]string{}, nil), "", http.MethodGet, "/api/v1/tools", ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no token: status = %d, want 401", rec.Code)
+	}
+
+	// 403: a caller holding ONLY tools.manage (no dashboard.view) is denied the
+	// dashboard surface with no tool data exposed (AD-6).
+	rec := doComposedJSONRequest(newCompositionDashboardToolsRouter([]string{toolscore.ToolsManagePermission}, activeUser("u-tools", "tools@gear.local")), "tok", http.MethodGet, "/api/v1/tools", "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("tools.manage-only holder: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(strings.ToLower(rec.Body.String()), "werkzeug") {
+		t.Errorf("403 body leaks tool data: %s", rec.Body.String())
+	}
+
+	// 200: a dashboard.view holder WITHOUT tools.manage reaches the dashboard
+	// surface (empty list from the in-memory service) — proves the ungated core
+	// read + the dashboard.view HTTP gate work together.
+	dashRouter := newCompositionDashboardToolsRouter([]string{toolscore.DashboardViewPermission}, activeUser("u-vol", "vol@gear.local"))
+	rec = doComposedJSONRequest(dashRouter, "tok", http.MethodGet, "/api/v1/tools", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dashboard.view holder: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if strings.TrimSpace(rec.Body.String()) != "[]" {
+		t.Errorf("dashboard tool response = %s, want empty JSON array", rec.Body.String())
+	}
+
+	// 200: a caller holding BOTH codes also reaches it.
+	rec = doComposedJSONRequest(newCompositionDashboardToolsRouter([]string{toolscore.DashboardViewPermission, toolscore.ToolsManagePermission}, activeUser("u-admin", "admin@gear.local")), "tok", http.MethodGet, "/api/v1/tools", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dashboard.view + tools.manage holder: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// REVERSE: the dashboard-only holder must NOT reach the admin tools surface
+	// (its code opens only the dashboard mount, not the tools.manage gate).
+	if rec := doComposedJSONRequest(dashRouter, "tok", http.MethodGet, "/api/v1/admin/tools", ""); rec.Code != http.StatusForbidden {
+		t.Errorf("dashboard-only holder on admin tools: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
 	}
 }

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -11,6 +12,19 @@ import (
 
 	"github.com/saskia-peters/gear/internal/tools/core"
 )
+
+// activeTestToolTypes filters a ListToolTypes result to the test-% rows (case-
+// insensitive) that this suite owns, so the count/order assertions stay
+// correct even when real user-created tool types exist in the shared dev DB.
+func activeTestToolTypes(types []*core.ToolType) []*core.ToolType {
+	out := types[:0]
+	for _, t := range types {
+		if strings.HasPrefix(strings.ToLower(t.Name), "test-") {
+			out = append(out, t)
+		}
+	}
+	return out
+}
 
 // toolTestPool connects to the local dev database (migration 000021 applied)
 // or skips when no database is reachable, mirroring the admin/user-module
@@ -88,13 +102,15 @@ func TestPostgresToolTypesStore(t *testing.T) {
 	repo := NewRepository(New(pool))
 	scheduleID, qualificationID := seedToolTypeRefs(t, ctx, pool)
 
-	// GET_LIST_EMPTY: after cleanup, the active catalog is empty.
+	// GET_LIST_EMPTY: after cleanup, there are no TEST- rows (real user-created
+	// tool types may exist in the shared dev DB — the assertions below count
+	// only the test-% rows, the documented isolation convention).
 	initial, err := repo.ListToolTypes(ctx)
 	if err != nil {
 		t.Fatalf("ListToolTypes(initial) err = %v", err)
 	}
-	if len(initial) != 0 {
-		t.Fatalf("initial = %d, want 0", len(initial))
+	if len(activeTestToolTypes(initial)) != 0 {
+		t.Fatalf("initial = %d test rows, want 0", len(activeTestToolTypes(initial)))
 	}
 
 	// CREATE_VALID: a checklist-mode type is persisted with its ordered items
@@ -140,11 +156,12 @@ func TestPostgresToolTypesStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListToolTypes err = %v", err)
 	}
-	if len(list) != 1 || list[0].ID != created.ID {
-		t.Fatalf("list = %d, want the created type", len(list))
+	testRows := activeTestToolTypes(list)
+	if len(testRows) != 1 || testRows[0].ID != created.ID {
+		t.Fatalf("test rows = %d, want the created type", len(testRows))
 	}
-	if len(list[0].Items) != 2 || list[0].Items[0].Label != "Bohrfutter" {
-		t.Errorf("list items = %+v, want ordered checklist items", list[0].Items)
+	if len(testRows[0].Items) != 2 || testRows[0].Items[0].Label != "Bohrfutter" {
+		t.Errorf("list items = %+v, want ordered checklist items", testRows[0].Items)
 	}
 
 	// UPDATE_REPLACE_ITEMS: name/mode replaced and the item list FULLY replaced
@@ -211,8 +228,8 @@ func TestPostgresToolTypesStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListToolTypes(after archive) err = %v", err)
 	}
-	if len(list) != 0 {
-		t.Fatalf("list = %d, want 0 (archived row filtered out)", len(list))
+	if len(activeTestToolTypes(list)) != 0 {
+		t.Fatalf("test rows = %d, want 0 (archived row filtered out)", len(activeTestToolTypes(list)))
 	}
 
 	// ARCHIVE_ARCHIVED: archiving the already-archived row → 404 sentinel.
@@ -369,9 +386,10 @@ func TestPostgresToolTypesListOrder(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListToolTypes err = %v", err)
 	}
-	if len(list) != 2 || list[0].ID != first.ID || list[1].ID != second.ID {
-		t.Fatalf("list = [%s, %s], want oldest-first [%s, %s]",
-			list[0].ID, list[1].ID, first.ID, second.ID)
+	testRows := activeTestToolTypes(list)
+	if len(testRows) != 2 || testRows[0].ID != first.ID || testRows[1].ID != second.ID {
+		t.Fatalf("test rows = [%s, %s], want oldest-first [%s, %s]",
+			testRows[0].ID, testRows[1].ID, first.ID, second.ID)
 	}
 
 	// Two types sharing ONE created_at → name ASC tiebreaker. Insert directly

@@ -38,6 +38,18 @@ type toolWriteDTO struct {
 	Message string `json:"message"`
 }
 
+// dashboardToolDTO is the minimal GET /api/v1/tools payload (Story 4-3b): the
+// id, name and the tool type's display name (JOIN). Deliberately small — no
+// schedule/attributes/audit data on this surface (the admin surface exposes
+// the full DTO) and no status/due-date derivation (Story 6.1 owns it — the SPA
+// marks every tool "verfügbar" statically).
+type dashboardToolDTO struct {
+	ID           string `json:"id"`
+	Name         string `json:"name"`
+	ToolTypeID   string `json:"tool_type_id"`
+	ToolTypeName string `json:"tool_type_name"`
+}
+
 // ToolRoutes returns the Tool tool router (Story 4.3, FR-9/FR-10): GET/POST /
 // and PUT /{id}, POST /{id}/archive — soft archive only, NO DELETE endpoint
 // (archived rows keep FK history intact). The whole group is gated by
@@ -53,6 +65,21 @@ func (h *Handler) ToolRoutes() http.Handler {
 	r.Post("/", h.CreateTool)
 	r.Put("/{id}", h.UpdateTool)
 	r.Post("/{id}/archive", h.ArchiveTool)
+	return r
+}
+
+// DashboardToolsRoutes returns the GEAR-module (non-admin) tool router (Story
+// 4-3b): GET / only, answering the minimal dashboard DTO (id, name, type
+// name). The whole group is gated by `dashboard.view` at the composition-root
+// mount point — its OWN gate, one permission per surface (AD-6) — so this
+// router carries no gateway itself; 404/405 answer with the uniform JSON
+// envelope so no sub-path can emit a plain-text body. No writes live here
+// (admin-only, Story 4.3).
+func (h *Handler) DashboardToolsRoutes() http.Handler {
+	r := chi.NewRouter()
+	r.NotFound(httpapi.NotFoundHandler())
+	r.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
+	r.Get("/", h.ListDashboardTools)
 	return r
 }
 
@@ -80,6 +107,40 @@ func (h *Handler) ListTools(w http.ResponseWriter, r *http.Request) {
 	out := make([]toolDTO, 0, len(tools))
 	for _, tool := range tools {
 		out = append(out, toToolDTO(tool))
+	}
+	httpapi.WriteJSON(w, http.StatusOK, out)
+}
+
+// ListDashboardTools handles GET /api/v1/tools (GET_LIST_EMPTY / GET_LIST,
+// Story 4-3b): it returns the ACTIVE tool catalog, oldest first, each with its
+// type display name, as the minimal dashboard DTO. The `dashboard.view` gate
+// lives at the composition-root mount (all base roles hold it) — the core read
+// is ungated by design, so this handler never re-checks `tools.manage`.
+// Archived tools never appear.
+//
+// Error mapping (uniform envelope):
+//   - 401 unauthorized when the caller is not authenticated
+//   - 500 internal_error on an unexpected failure
+func (h *Handler) ListDashboardTools(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFrom(r.Context())
+	if user == nil {
+		httpapi.WriteError(w, http.StatusUnauthorized, "unauthorized", "Authentifizierung erforderlich.")
+		return
+	}
+
+	tools, err := h.service.ListToolsForDashboard(r.Context())
+	if err != nil {
+		h.mapToolError(w, r, err, user)
+		return
+	}
+	out := make([]dashboardToolDTO, 0, len(tools))
+	for _, tool := range tools {
+		out = append(out, dashboardToolDTO{
+			ID:           tool.ID,
+			Name:         tool.Name,
+			ToolTypeID:   tool.ToolTypeID,
+			ToolTypeName: tool.ToolTypeName,
+		})
 	}
 	httpapi.WriteJSON(w, http.StatusOK, out)
 }

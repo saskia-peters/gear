@@ -3,12 +3,26 @@ package postgres
 import (
 	"context"
 	"errors"
+	"strings"
 	"testing"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/saskia-peters/gear/internal/tools/core"
 )
+
+// activeTestTools filters a ListTools result to the test-% rows (case-
+// insensitive) that this suite owns, so the count/order assertions stay
+// correct even when real user-created tools exist in the shared dev DB.
+func activeTestTools(tools []*core.Tool) []*core.Tool {
+	out := tools[:0]
+	for _, t := range tools {
+		if strings.HasPrefix(strings.ToLower(t.Name), "test-") {
+			out = append(out, t)
+		}
+	}
+	return out
+}
 
 // seedToolRefs inserts one Test- schedule (Admin-owned catalog) and one Test-
 // tool type (Tool-owned, referencing the schedule) and returns their ids. The
@@ -67,13 +81,15 @@ func TestPostgresToolsStore(t *testing.T) {
 	repo := NewRepository(New(pool))
 	toolTypeID, scheduleID := seedToolRefs(t, ctx, pool)
 
-	// GET_LIST_EMPTY: after cleanup, the active tool catalog is empty.
+	// GET_LIST_EMPTY: after cleanup, there are no TEST- rows (real user-created
+	// tools may exist in the shared dev DB — the assertions below count only
+	// the test-% rows, the documented isolation convention).
 	initial, err := repo.ListTools(ctx)
 	if err != nil {
 		t.Fatalf("ListTools(initial) err = %v", err)
 	}
-	if len(initial) != 0 {
-		t.Fatalf("initial = %d, want 0", len(initial))
+	if len(activeTestTools(initial)) != 0 {
+		t.Fatalf("initial = %d test rows, want 0", len(activeTestTools(initial)))
 	}
 
 	// CREATE_VALID: a tool WITHOUT a schedule override is persisted with SQL
@@ -125,11 +141,12 @@ func TestPostgresToolsStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools err = %v", err)
 	}
-	if len(list) != 1 || list[0].ID != created.ID {
-		t.Fatalf("list = %d, want the created tool", len(list))
+	testRows := activeTestTools(list)
+	if len(testRows) != 1 || testRows[0].ID != created.ID {
+		t.Fatalf("test rows = %d, want the created tool", len(testRows))
 	}
-	if list[0].ToolTypeName != "Test-Geraetetyp" {
-		t.Errorf("listed tool_type_name = %q, want the JOINed type name", list[0].ToolTypeName)
+	if testRows[0].ToolTypeName != "Test-Geraetetyp" {
+		t.Errorf("listed tool_type_name = %q, want the JOINed type name", testRows[0].ToolTypeName)
 	}
 
 	// CREATE_OVERRIDE: a second tool with a valid ACTIVE schedule override is
@@ -188,8 +205,9 @@ func TestPostgresToolsStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools(after archive) err = %v", err)
 	}
-	if len(list) != 1 || list[0].ID != withOverride.ID {
-		t.Fatalf("list = %d, want only the non-archived tool", len(list))
+	testRows = activeTestTools(list)
+	if len(testRows) != 1 || testRows[0].ID != withOverride.ID {
+		t.Fatalf("test rows = %d, want only the non-archived tool", len(testRows))
 	}
 
 	// ARCHIVE_ARCHIVED: archiving the already-archived row → 404 sentinel.
@@ -269,11 +287,12 @@ func TestPostgresToolsStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("ListTools(after conflict) err = %v", err)
 	}
-	if len(list) != 2 {
-		t.Fatalf("list = %d, want 2 active tools (the rejected update persisted nothing)", len(list))
+	testRows = activeTestTools(list)
+	if len(testRows) != 2 {
+		t.Fatalf("test rows = %d, want 2 active tools (the rejected update persisted nothing)", len(testRows))
 	}
 	foundConflict := false
-	for _, tool := range list {
+	for _, tool := range testRows {
 		if tool.ID == conflictTool.ID {
 			foundConflict = true
 		}
