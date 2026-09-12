@@ -29,15 +29,17 @@ export interface ToolTypeChecklistItem {
   label: string
 }
 
-// ToolType is the GET payload — the typed core fields plus the ordered
-// checklist items. The attributes jsonb extension surface is NOT exposed in V1
-// (Story 4.4 owns it); archived types never reach the active list.
+// ToolType is the GET payload — the typed core fields, the ordered checklist
+// items and the attributes jsonb extension surface (Story 4.4, FR-10/AD-3:
+// attributes read back as a JSON object, always present, `{}` when empty).
+// Archived types never reach the active list.
 export interface ToolType {
   id: string
   name: string
   default_schedule_id: string
   required_qualification_id: string
   inspection_mode: InspectionMode
+  attributes: Record<string, unknown>
   checklist_items: ToolTypeChecklistItem[]
   created_at: string
   updated_at: string
@@ -57,13 +59,17 @@ export interface ToolTypeChecklistItemInput {
 
 // ToolTypeInput is the POST/PUT body (FR-8/FR-10). items is the WHOLE ordered
 // checklist-item list — full replacement on update (the editor always submits
-// the complete list).
+// the complete list). attributes is the no-migration JSONB extension surface
+// (Story 4.4): an ABSENT (undefined) field leaves the stored JSONB unchanged,
+// an EXPLICIT `{}` clears it, a non-empty object replaces it wholesale. The
+// buildToolTypeBody helper omits the field when it is undefined.
 export interface ToolTypeInput {
   name: string
   default_schedule_id: string
   required_qualification_id: string
   inspection_mode: InspectionMode
   items: ToolTypeChecklistItemInput[]
+  attributes?: Record<string, unknown>
 }
 
 const TOOL_TYPES_URL = '/api/v1/admin/tool-types'
@@ -106,13 +112,20 @@ export async function archiveToolType(id: string): Promise<ToolTypeWriteResult> 
 }
 
 function buildToolTypeBody(input: ToolTypeInput): Record<string, unknown> {
-  return {
+  const body: Record<string, unknown> = {
     name: input.name,
     default_schedule_id: input.default_schedule_id,
     required_qualification_id: input.required_qualification_id,
     inspection_mode: input.inspection_mode,
     items: input.items.map((item) => ({ label: item.label })),
   }
+  // Attributes follow the shared contract (Story 4.4): the field is OMITTED
+  // when undefined (absent = unchanged), an explicit {} clears, an object
+  // replaces.
+  if (input.attributes !== undefined) {
+    body.attributes = input.attributes
+  }
+  return body
 }
 
 // ============================================================================
@@ -147,13 +160,17 @@ export interface ToolWriteResult extends Tool {
 // per-tool override: an empty value CLEARS it (the tool inherits its type's
 // default schedule, AD-5). inventory_number is OPTIONAL and travels ONLY on
 // PUT (Story 4-3b): on create the server AUTO-ASSIGNS it (a client value is
-// ignored), on edit a non-empty value updates the stored number.
+// ignored), on edit a non-empty value updates the stored number. attributes is
+// the no-migration JSONB extension surface (Story 4.4): an ABSENT (undefined)
+// field leaves the stored JSONB unchanged, an EXPLICIT `{}` clears it, a
+// non-empty object replaces it wholesale. The buildToolBody helper omits the
+// field when it is undefined.
 export interface ToolInput {
   name: string
   tool_type_id: string
   schedule_id: string
   inventory_number?: string
-  attributes: Record<string, unknown>
+  attributes?: Record<string, unknown>
 }
 
 const TOOLS_URL = '/api/v1/admin/tools'
@@ -196,19 +213,21 @@ export async function archiveTool(id: string): Promise<ToolWriteResult> {
   })) as ToolWriteResult
 }
 
-// buildToolBody always sends attributes (even an empty {}) — it is the JSONB
-// passthrough surface for Story 4.4: the server stores exactly what is sent
-// and returns it on read. The V1 editor has no attributes UI, so it submits
-// {}; a future Story 4.4 editor fills it in without a client contract change.
-// inventory_number is sent ONLY when the input carries one (the PUT edit path,
-// Story 4-3b): on create the server auto-assigns it, so the create body NEVER
-// includes it (CREATE_IGNORE_CLIENT).
+// buildToolBody sends attributes ONLY when the input carries one (Story 4.4):
+// an ABSENT field is omitted so the server's leave-unchanged semantics apply —
+// an attributes-untouched save never wipes the stored JSONB. An EXPLICIT `{}`
+// clears, a non-empty object replaces wholesale. The V1-era hardcoded
+// `attributes: {}` on every save is gone. inventory_number is sent ONLY when
+// the input carries one (the PUT edit path, Story 4-3b): on create the server
+// auto-assigns it, so the create body NEVER includes it (CREATE_IGNORE_CLIENT).
 function buildToolBody(input: ToolInput): Record<string, unknown> {
   const body: Record<string, unknown> = {
     name: input.name,
     tool_type_id: input.tool_type_id,
     schedule_id: input.schedule_id,
-    attributes: input.attributes ?? {},
+  }
+  if (input.attributes !== undefined) {
+    body.attributes = input.attributes
   }
   if (input.inventory_number) {
     body.inventory_number = input.inventory_number

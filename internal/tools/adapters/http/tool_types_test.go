@@ -49,7 +49,8 @@ func (f *fakeService) CreateToolType(_ context.Context, _ string, input toolscor
 	return &toolscore.ToolType{
 		ID: "id-new", Name: input.Name, DefaultScheduleID: input.DefaultScheduleID,
 		RequiredQualificationID: input.RequiredQualificationID, InspectionMode: input.InspectionMode,
-		Items: []toolscore.ToolTypeChecklistItem{{ID: "item-1", Position: 0, Label: "Kabel"}},
+		Attributes: input.Attributes,
+		Items:      []toolscore.ToolTypeChecklistItem{{ID: "item-1", Position: 0, Label: "Kabel"}},
 	}, nil
 }
 
@@ -62,7 +63,8 @@ func (f *fakeService) UpdateToolType(_ context.Context, _, id string, input tool
 	return &toolscore.ToolType{
 		ID: id, Name: input.Name, DefaultScheduleID: input.DefaultScheduleID,
 		RequiredQualificationID: input.RequiredQualificationID, InspectionMode: input.InspectionMode,
-		Items: []toolscore.ToolTypeChecklistItem{{ID: "item-1", Position: 0, Label: "Kabel"}},
+		Attributes: input.Attributes,
+		Items:      []toolscore.ToolTypeChecklistItem{{ID: "item-1", Position: 0, Label: "Kabel"}},
 	}, nil
 }
 
@@ -173,12 +175,14 @@ func TestToolTypesGetListEmpty(t *testing.T) {
 }
 
 func TestToolTypesGetList(t *testing.T) {
-	// GET_LIST: 200 active list with typed FKs, ordered checklist items; no
-	// archived rows and no attributes jsonb in the payload (Story 4.4 owns it).
+	// GET_LIST: 200 active list with typed FKs, ordered checklist items AND the
+	// attributes jsonb extension surface (Story 4.4 — attributes read back as a
+	// JSON object); no archived rows.
 	svc := &fakeService{types: []*toolscore.ToolType{
 		toolTypeFixture("id-a", "Bohrmaschine"),
 		toolTypeFixture("id-b", "Schleifmaschine"),
 	}}
+	svc.types[0].Attributes = map[string]any{"standort": "Werkstatt"}
 	surface := toolTypeGateway([]string{toolscore.ToolTypesManagePermission}, activeAdmin(), svc)
 	rec := doRequest(surface, http.MethodGet, "/", "tok", "")
 	if rec.Code != http.StatusOK {
@@ -208,10 +212,18 @@ func TestToolTypesGetList(t *testing.T) {
 	if first["label"] != "Kabel" || first["position"] != float64(0) {
 		t.Errorf("item 0 = %+v, want label Kabel at position 0", first)
 	}
-	for _, row := range body {
-		if _, present := row["attributes"]; present {
-			t.Error("response leaks the attributes jsonb extension surface (Story 4.4 owns it)")
-		}
+	// The attributes surface is present on EVERY row and always a JSON object
+	// ({} when empty, the stored set otherwise).
+	attrs, ok := body[0]["attributes"].(map[string]any)
+	if !ok || attrs["standort"] != "Werkstatt" {
+		t.Errorf("row 0 attributes = %+v, want the stored set", body[0]["attributes"])
+	}
+	if _, present := body[1]["attributes"]; !present {
+		t.Error("row 1 attributes missing, want the extension surface on every row")
+	}
+	attrs1, ok := body[1]["attributes"].(map[string]any)
+	if !ok || len(attrs1) != 0 {
+		t.Errorf("row 1 attributes = %+v, want an empty object", body[1]["attributes"])
 	}
 }
 
@@ -453,6 +465,31 @@ func TestToolTypesWriteForbidden(t *testing.T) {
 	}
 }
 
+func TestToolTypesExplicitEmptyAttributesReachesCore(t *testing.T) {
+	// UPDATE_TYPE clear-signal (Story 4.4): an EXPLICIT `attributes: {}` must
+	// reach the core as a NON-NIL empty map — distinct from an ABSENT field
+	// (nil = unchanged) — on BOTH POST and PUT.
+	body := `{"name":"Bohrmaschine","default_schedule_id":"id-s1","required_qualification_id":"id-q1","inspection_mode":"pass_fail","attributes":{}}`
+	svc := &fakeService{}
+	surface := toolTypeGateway([]string{toolscore.ToolTypesManagePermission}, activeAdmin(), svc)
+
+	rec := doRequest(surface, http.MethodPost, "/", "tok", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST status = %d, want 201 (body %s)", rec.Code, rec.Body.String())
+	}
+	if svc.lastInput.Attributes == nil || len(svc.lastInput.Attributes) != 0 {
+		t.Errorf("POST core input attributes = %+v, want a NON-NIL empty map (the clear signal)", svc.lastInput.Attributes)
+	}
+
+	rec = doRequest(surface, http.MethodPut, "/id-a", "tok", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if svc.lastInput.Attributes == nil || len(svc.lastInput.Attributes) != 0 {
+		t.Errorf("PUT core input attributes = %+v, want a NON-NIL empty map (the clear signal)", svc.lastInput.Attributes)
+	}
+}
+
 func TestToolTypesNotFoundEnvelope(t *testing.T) {
 	surface := toolTypeGateway([]string{toolscore.ToolTypesManagePermission}, activeAdmin(), &fakeService{})
 	rec := doRequest(surface, http.MethodGet, "/a/b/c", "tok", "")
@@ -481,5 +518,116 @@ func TestToolTypesMethodNotAllowedEnvelope(t *testing.T) {
 	}
 	if env.Error.Code != "method_not_allowed" {
 		t.Errorf("code = %q, want method_not_allowed", env.Error.Code)
+	}
+}
+
+// writeToolTypeBodyAttrs is the POST/PUT body WITH the attributes JSONB
+// surface (Story 4.4).
+func writeToolTypeBodyAttrs() string {
+	return `{"name":"Bohrmaschine","default_schedule_id":"id-s1","required_qualification_id":"id-q1","inspection_mode":"checklist","items":[{"label":"Kabel"}],"attributes":{"standort":"Werkstatt","leistung":1200}}`
+}
+
+func TestToolTypesCreateWithAttributes(t *testing.T) {
+	// CREATE_TYPE_ATTRS: a POST carrying `attributes` travels to the core and
+	// the write response (write+read) reflects the stored set.
+	svc := &fakeService{}
+	surface := toolTypeGateway([]string{toolscore.ToolTypesManagePermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPost, "/", "tok", writeToolTypeBodyAttrs())
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (body %s)", rec.Code, rec.Body.String())
+	}
+	if svc.lastInput.Attributes == nil || svc.lastInput.Attributes["standort"] != "Werkstatt" {
+		t.Errorf("core input attributes = %+v, want the submitted set", svc.lastInput.Attributes)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding err = %v", err)
+	}
+	attrs, ok := body["attributes"].(map[string]any)
+	if !ok || attrs["standort"] != "Werkstatt" {
+		t.Errorf("response attributes = %+v, want the stored set", body["attributes"])
+	}
+}
+
+func TestToolTypesUpdateWithAttributes(t *testing.T) {
+	// UPDATE_TYPE_ATTRS: a PUT carrying `attributes` travels to the core and the
+	// response reflects the set.
+	svc := &fakeService{}
+	surface := toolTypeGateway([]string{toolscore.ToolTypesManagePermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPut, "/id-a", "tok", writeToolTypeBodyAttrs())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if svc.lastInput.Attributes == nil || svc.lastInput.Attributes["standort"] != "Werkstatt" {
+		t.Errorf("core input attributes = %+v, want the submitted set", svc.lastInput.Attributes)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding err = %v", err)
+	}
+	attrs, ok := body["attributes"].(map[string]any)
+	if !ok || attrs["standort"] != "Werkstatt" {
+		t.Errorf("response attributes = %+v, want the stored set", body["attributes"])
+	}
+}
+
+func TestToolTypesUpdateAbsentAttributes(t *testing.T) {
+	// UPDATE_TYPE_ABSENT: a PUT WITHOUT the attributes field leaves the core
+	// input nil — the server-side leave-unchanged contract applies.
+	svc := &fakeService{}
+	surface := toolTypeGateway([]string{toolscore.ToolTypesManagePermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPut, "/id-a", "tok", writeToolTypeBody())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if svc.lastInput.Attributes != nil {
+		t.Errorf("core input attributes = %+v, want nil (absent = unchanged)", svc.lastInput.Attributes)
+	}
+}
+
+func TestToolTypesInvalidAttributes(t *testing.T) {
+	// VALID_INVALID_KEY: a bad key surfaces the uniform 400 invalid_request
+	// with the German MsgInvalidAttributes message + machine-readable details
+	// (mirroring the user-module profile precedent).
+	svc := &fakeService{writeErr: &toolscore.AttributeError{Key: "   ", Reason: "empty key"}}
+	surface := toolTypeGateway([]string{toolscore.ToolTypesManagePermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPost, "/", "tok", writeToolTypeBodyAttrs())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding err = %v", err)
+	}
+	if env.Error.Code != "invalid_request" {
+		t.Errorf("code = %q, want invalid_request", env.Error.Code)
+	}
+	if env.Error.Message != toolscore.MsgInvalidAttributes {
+		t.Errorf("message = %q, want %q", env.Error.Message, toolscore.MsgInvalidAttributes)
+	}
+	details, ok := env.Error.Details.(map[string]any)
+	if !ok || details["reason"] != "empty key" {
+		t.Errorf("details = %+v, want reason=empty key", env.Error.Details)
+	}
+}
+
+func TestToolTypesCreateNonObjectAttributes(t *testing.T) {
+	// VALID_NON_OBJECT: `attributes` as an array/string/primitive is rejected at
+	// the HTTP decode boundary (the typed map[string]any input rejects a
+	// non-object shape) → 400 German, never a write.
+	for _, bad := range []string{`[1,2]`, `"string"`, `42`} {
+		svc := &fakeService{}
+		surface := toolTypeGateway([]string{toolscore.ToolTypesManagePermission}, activeAdmin(), svc)
+		body := `{"name":"x","default_schedule_id":"id-s1","required_qualification_id":"id-q1","inspection_mode":"pass_fail","attributes":` + bad + `}`
+		rec := doRequest(surface, http.MethodPost, "/", "tok", body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("attributes=%s status = %d, want 400 (body %s)", bad, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "Ungültiges JSON-Format.") {
+			t.Errorf("attributes=%s body = %s, want the German invalid-JSON message", bad, rec.Body.String())
+		}
+		if svc.lastInput.Name != "" {
+			t.Errorf("attributes=%s: core must not receive the write (decoded as %+v)", bad, svc.lastInput)
+		}
 	}
 }

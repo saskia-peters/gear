@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -636,5 +637,122 @@ func TestPostgresToolInventoryBackfill(t *testing.T) {
 	}
 	if !toolInventoryNumberFormat.MatchString(inv) {
 		t.Errorf("backfilled inventory_number = %q, want 'GEAR' + 6 zero-padded digits", inv)
+	}
+}
+
+// TestPostgresToolsAttributes pins the Story 4.4 attributes surface on the
+// `tools.attributes` JSONB column: a NON-EMPTY set round-trips (semantic
+// equality — JSONB normalizes key order), the DB default '{}' applies to an
+// absent create, and the update path honors absent=unchanged / {} = clear /
+// object=replace through the repository's COALESCE keep. Archiving preserves
+// the stored attributes.
+func TestPostgresToolsAttributes(t *testing.T) {
+	pool := toolTestPool(t)
+	ctx := context.Background()
+	t.Cleanup(func() { pool.Close() })
+
+	repo := NewRepository(New(pool))
+	toolTypeID, _ := seedToolRefs(t, ctx, pool)
+
+	// CREATE_TOOL_ATTRS: a tool created WITH a non-empty attributes set stores
+	// it in tools.attributes.
+	created, err := repo.CreateTool(ctx, &core.Tool{
+		Name:       "Test-Attr-Werkzeug",
+		ToolTypeID: toolTypeID,
+		Attributes: map[string]any{"standort": "Werkstatt", "leistung": float64(1200)},
+	})
+	if err != nil {
+		t.Fatalf("CreateTool(attributes) err = %v", err)
+	}
+	if created.Attributes == nil || created.Attributes["standort"] != "Werkstatt" {
+		t.Fatalf("created attributes = %+v, want the stored set", created.Attributes)
+	}
+	if created.Attributes["leistung"] != float64(1200) {
+		t.Errorf("created attributes leistung = %v, want 1200", created.Attributes["leistung"])
+	}
+
+	// ROUND_TRIP: the raw DB row holds the valid JSON; the list read-back
+	// returns the same values.
+	var raw []byte
+	if err := pool.QueryRow(ctx, "SELECT attributes FROM tools WHERE id = $1", created.ID).Scan(&raw); err != nil {
+		t.Fatalf("scan raw attributes err = %v", err)
+	}
+	var rawAttrs map[string]any
+	if err := json.Unmarshal(raw, &rawAttrs); err != nil {
+		t.Fatalf("raw attributes not JSON: %v", err)
+	}
+	if rawAttrs["standort"] != "Werkstatt" || rawAttrs["leistung"] != float64(1200) {
+		t.Errorf("raw DB attributes = %v, want the stored set", rawAttrs)
+	}
+
+	// UPDATE_TOOL_ABSENT: an update with a NIL attributes map leaves the stored
+	// JSONB unchanged (COALESCE keep).
+	updated, err := repo.UpdateTool(ctx, &core.Tool{
+		ID: created.ID, Name: "Test-Attr-Werkzeug-Neu", ToolTypeID: toolTypeID,
+		Attributes: nil,
+	})
+	if err != nil {
+		t.Fatalf("UpdateTool(absent attributes) err = %v", err)
+	}
+	if updated.Attributes["standort"] != "Werkstatt" {
+		t.Errorf("attributes after absent update = %+v, want stored set preserved", updated.Attributes)
+	}
+
+	// UPDATE_TOOL_OBJECT: a non-empty object REPLACES the stored set wholesale.
+	replaced, err := repo.UpdateTool(ctx, &core.Tool{
+		ID: created.ID, Name: "Test-Attr-Werkzeug-Neu", ToolTypeID: toolTypeID,
+		Attributes: map[string]any{"standort": "Lager"},
+	})
+	if err != nil {
+		t.Fatalf("UpdateTool(replace attributes) err = %v", err)
+	}
+	if replaced.Attributes["standort"] != "Lager" {
+		t.Errorf("attributes after replace = %+v, want the replaced set", replaced.Attributes)
+	}
+	if _, stale := replaced.Attributes["leistung"]; stale {
+		t.Errorf("attributes after replace = %+v, want the old key gone", replaced.Attributes)
+	}
+
+	// UPDATE_TOOL_CLEAR: an EXPLICIT `{}` clears the stored set.
+	cleared, err := repo.UpdateTool(ctx, &core.Tool{
+		ID: created.ID, Name: "Test-Attr-Werkzeug-Neu", ToolTypeID: toolTypeID,
+		Attributes: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("UpdateTool(clear attributes) err = %v", err)
+	}
+	if cleared.Attributes == nil || len(cleared.Attributes) != 0 {
+		t.Errorf("attributes after clear = %+v, want empty map", cleared.Attributes)
+	}
+
+	// ARCHIVED: soft-archiving the tool preserves its (re-set) attributes on the
+	// archived row, and the raw DB row still carries them.
+	withAttrs, err := repo.UpdateTool(ctx, &core.Tool{
+		ID: created.ID, Name: "Test-Attr-Werkzeug-Neu", ToolTypeID: toolTypeID,
+		Attributes: map[string]any{"hinweis": "archiviert"},
+	})
+	if err != nil {
+		t.Fatalf("UpdateTool(set attrs before archive) err = %v", err)
+	}
+	archived, err := repo.ArchiveTool(ctx, withAttrs.ID)
+	if err != nil {
+		t.Fatalf("ArchiveTool err = %v", err)
+	}
+	if archived.ArchivedAt == nil {
+		t.Fatal("archived_at = nil, want set")
+	}
+	if archived.Attributes["hinweis"] != "archiviert" {
+		t.Errorf("archived attributes = %+v, want preserved", archived.Attributes)
+	}
+	var archivedRaw []byte
+	if err := pool.QueryRow(ctx, "SELECT attributes FROM tools WHERE id = $1", created.ID).Scan(&archivedRaw); err != nil {
+		t.Fatalf("scan archived attributes err = %v", err)
+	}
+	var archivedAttrs map[string]any
+	if err := json.Unmarshal(archivedRaw, &archivedAttrs); err != nil {
+		t.Fatalf("archived attributes not JSON: %v", err)
+	}
+	if archivedAttrs["hinweis"] != "archiviert" {
+		t.Errorf("archived DB attributes = %v, want preserved", archivedAttrs)
 	}
 }

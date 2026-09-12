@@ -70,6 +70,7 @@ func (f *fakeToolService) CreateTool(_ context.Context, _ string, input toolscor
 		ID: "id-new", Name: input.Name, ToolTypeID: input.ToolTypeID,
 		ToolTypeName: "Bohrmaschine", ScheduleID: input.ScheduleID,
 		InventoryNumber: "GEAR000001",
+		Attributes:      input.Attributes,
 	}, nil
 }
 
@@ -83,6 +84,7 @@ func (f *fakeToolService) UpdateTool(_ context.Context, _, id string, input tool
 		ID: id, Name: input.Name, ToolTypeID: input.ToolTypeID,
 		ToolTypeName: "Bohrmaschine", ScheduleID: input.ScheduleID,
 		InventoryNumber: input.InventoryNumber,
+		Attributes:      input.Attributes,
 	}, nil
 }
 
@@ -189,6 +191,12 @@ func TestToolsGetList(t *testing.T) {
 	attrs, ok := body[0]["attributes"].(map[string]any)
 	if !ok || attrs["standort"] != "Werkstatt" {
 		t.Errorf("row 0 attributes = %+v, want the passthrough", body[0]["attributes"])
+	}
+	// The nil-attributes row serializes as a JSON OBJECT too — never null (the
+	// DTO defaults a nil map to `{}`), mirroring TestToolTypesGetList.
+	attrs1, ok := body[1]["attributes"].(map[string]any)
+	if !ok || len(attrs1) != 0 {
+		t.Errorf("row 1 attributes = %+v, want an empty JSON object (never null)", body[1]["attributes"])
 	}
 	// Active rows carry a NULL archived_at (never archived — the active surface
 	// filters archived rows server-side).
@@ -714,5 +722,155 @@ func TestToolsMethodNotAllowedEnvelope(t *testing.T) {
 	}
 	if env.Error.Code != "method_not_allowed" {
 		t.Errorf("code = %q, want method_not_allowed", env.Error.Code)
+	}
+}
+
+// writeToolBodyAttrs is the POST/PUT body WITH the attributes JSONB surface
+// (Story 4.4).
+func writeToolBodyAttrs() string {
+	return `{"name":"Bohrmaschine-01","tool_type_id":"id-t1","schedule_id":"","attributes":{"standort":"Werkstatt","leistung":1200}}`
+}
+
+func TestToolsCreateWithAttributes(t *testing.T) {
+	// CREATE_TOOL_ATTRS: a POST carrying `attributes` travels to the core and
+	// the write response (write+read) reflects the stored set.
+	svc := &fakeToolService{}
+	surface := toolGateway([]string{toolscore.ToolsManagePermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPost, "/", "tok", writeToolBodyAttrs())
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("status = %d, want 201 (body %s)", rec.Code, rec.Body.String())
+	}
+	if svc.lastInput.Attributes == nil || svc.lastInput.Attributes["standort"] != "Werkstatt" {
+		t.Errorf("core input attributes = %+v, want the submitted set", svc.lastInput.Attributes)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding err = %v", err)
+	}
+	attrs, ok := body["attributes"].(map[string]any)
+	if !ok || attrs["standort"] != "Werkstatt" {
+		t.Errorf("response attributes = %+v, want the stored set", body["attributes"])
+	}
+}
+
+func TestToolsUpdateWithAttributes(t *testing.T) {
+	// UPDATE_TOOL_ATTRS: a PUT carrying `attributes` travels to the core and the
+	// response reflects the set.
+	svc := &fakeToolService{}
+	surface := toolGateway([]string{toolscore.ToolsManagePermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPut, "/id-a", "tok", writeToolBodyAttrs())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if svc.lastInput.Attributes == nil || svc.lastInput.Attributes["standort"] != "Werkstatt" {
+		t.Errorf("core input attributes = %+v, want the submitted set", svc.lastInput.Attributes)
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding err = %v", err)
+	}
+	attrs, ok := body["attributes"].(map[string]any)
+	if !ok || attrs["standort"] != "Werkstatt" {
+		t.Errorf("response attributes = %+v, want the stored set", body["attributes"])
+	}
+}
+
+func TestToolsUpdateAbsentAttributes(t *testing.T) {
+	// UPDATE_TOOL_ABSENT: a PUT WITHOUT the attributes field leaves the core
+	// input nil — the server-side leave-unchanged contract applies.
+	svc := &fakeToolService{}
+	surface := toolGateway([]string{toolscore.ToolsManagePermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPut, "/id-a", "tok", writeToolBody())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if svc.lastInput.Attributes != nil {
+		t.Errorf("core input attributes = %+v, want nil (absent = unchanged)", svc.lastInput.Attributes)
+	}
+}
+
+func TestToolsInvalidAttributes(t *testing.T) {
+	// VALID_INVALID_KEY: a bad key surfaces the uniform 400 invalid_request
+	// with the German MsgInvalidAttributes message + machine-readable details.
+	svc := &fakeToolService{writeErr: &toolscore.AttributeError{Key: "   ", Reason: "empty key"}}
+	surface := toolGateway([]string{toolscore.ToolsManagePermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPost, "/", "tok", writeToolBodyAttrs())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding err = %v", err)
+	}
+	if env.Error.Code != "invalid_request" {
+		t.Errorf("code = %q, want invalid_request", env.Error.Code)
+	}
+	if env.Error.Message != toolscore.MsgInvalidAttributes {
+		t.Errorf("message = %q, want %q", env.Error.Message, toolscore.MsgInvalidAttributes)
+	}
+	details, ok := env.Error.Details.(map[string]any)
+	if !ok || details["reason"] != "empty key" {
+		t.Errorf("details = %+v, want reason=empty key", env.Error.Details)
+	}
+}
+
+func TestToolsCreateNonObjectAttributes(t *testing.T) {
+	// VALID_NON_OBJECT: `attributes` as an array/string/primitive is rejected at
+	// the HTTP decode boundary (the typed map[string]any input rejects a
+	// non-object shape) → 400 German, never a write.
+	for _, bad := range []string{`[1,2]`, `"string"`, `42`} {
+		svc := &fakeToolService{}
+		surface := toolGateway([]string{toolscore.ToolsManagePermission}, activeAdmin(), svc)
+		body := `{"name":"x","tool_type_id":"id-t1","schedule_id":"","attributes":` + bad + `}`
+		rec := doRequest(surface, http.MethodPost, "/", "tok", body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("attributes=%s status = %d, want 400 (body %s)", bad, rec.Code, rec.Body.String())
+		}
+		if !strings.Contains(rec.Body.String(), "Ungültiges JSON-Format.") {
+			t.Errorf("attributes=%s body = %s, want the German invalid-JSON message", bad, rec.Body.String())
+		}
+		if svc.lastInput.Name != "" {
+			t.Errorf("attributes=%s: core must not receive the write (decoded as %+v)", bad, svc.lastInput)
+		}
+	}
+}
+
+func TestToolsExplicitEmptyAttributesReachesCore(t *testing.T) {
+	// UPDATE_TOOL_CLEAR / CREATE clear-signal (Story 4.4): an EXPLICIT
+	// `attributes: {}` must reach the core as a NON-NIL empty map — distinct
+	// from an ABSENT field (nil = unchanged) — on BOTH POST and PUT.
+	body := `{"name":"Bohrmaschine-01","tool_type_id":"id-t1","schedule_id":"","attributes":{}}`
+	svc := &fakeToolService{}
+	surface := toolGateway([]string{toolscore.ToolsManagePermission}, activeAdmin(), svc)
+
+	rec := doRequest(surface, http.MethodPost, "/", "tok", body)
+	if rec.Code != http.StatusCreated {
+		t.Fatalf("POST status = %d, want 201 (body %s)", rec.Code, rec.Body.String())
+	}
+	if svc.lastInput.Attributes == nil || len(svc.lastInput.Attributes) != 0 {
+		t.Errorf("POST core input attributes = %+v, want a NON-NIL empty map (the clear signal)", svc.lastInput.Attributes)
+	}
+
+	rec = doRequest(surface, http.MethodPut, "/id-a", "tok", body)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if svc.lastInput.Attributes == nil || len(svc.lastInput.Attributes) != 0 {
+		t.Errorf("PUT core input attributes = %+v, want a NON-NIL empty map (the clear signal)", svc.lastInput.Attributes)
+	}
+}
+
+func TestToolsEditOnlyCanEditAttributes(t *testing.T) {
+	// GATE_UPDATE (Story 4-3b + 4.4): a tool.edit-ONLY holder (no tools.manage)
+	// edits tool ATTRIBUTES via the existing PUT any-of gate — no separate
+	// attribute endpoint exists.
+	svc := &fakeToolService{}
+	surface := toolGateway([]string{toolscore.ToolEditPermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPut, "/id-a", "tok", writeToolBodyAttrs())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("PUT status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if svc.lastInput.Attributes == nil || svc.lastInput.Attributes["standort"] != "Werkstatt" {
+		t.Errorf("core input attributes = %+v, want the submitted set", svc.lastInput.Attributes)
 	}
 }

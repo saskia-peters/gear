@@ -36,3 +36,32 @@ Naming: `NNNNNN_snake_case.up.sql` / `NNNNNN_snake_case.down.sql`.
 Apply from the root `justfile`: `just migrate-up` / `just migrate-down`.
 sqlc generates the per-module stores from these forward migrations
 (`just sqlc-generate`).
+
+## Eigene Felder zu einer echten Spalte machen (AD-3)
+
+Tools and tool types carry a no-migration extension surface: the
+`attributes JSONB` column (`tool_types` 000021, `tools` 000024, both
+`jsonb NOT NULL DEFAULT '{}'`). Custom metadata lives there with NO schema
+change per attribute (Story 4.4, FR-10/AD-3) — validation is app-level,
+mirroring the User-module profile precedent (Story 1.9).
+
+When an attribute later becomes **core/queryable** (needs a real column, an
+index, or a CHECK), promote it through a normal golang-migrate pair — the
+`000025` inventory-number migration is the concrete precedent:
+
+1. **Add the column** with a golang-migrate pair
+   (`NNNNNN_promote_<attr>.up/down.sql`), e.g.
+   `ALTER TABLE tools ADD COLUMN <attr> text;`.
+2. **Backfill existing rows** from the JSONB BEFORE adding NOT NULL — the
+   `000025` backfill (`UPDATE tools SET inventory_number = ... ;` before
+   `SET NOT NULL`) is the pattern: read the attribute out of `attributes->>'<attr>'`
+   with a sensible default for rows that never set it.
+3. **Then** apply `NOT NULL`/`CHECK`/`UNIQUE`/index constraints, so the
+   constraints are satisfiable against the backfilled data.
+4. **Retain the `attributes JSONB` column** — it stays the no-migration
+   surface for the remaining custom metadata; the promoted attribute becomes a
+   typed, queryable column while everything else keeps living in JSONB. Do NOT
+   drop the column as part of the promotion.
+5. **Append the new forward migration to its owning module's `sqlc.yaml`
+   schema list** (in numeric order) and `just sqlc-generate`, so the generated
+   store matches the shipped schema.

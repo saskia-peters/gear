@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"errors"
+	"math"
 	"strings"
 	"testing"
 	"time"
@@ -101,6 +102,11 @@ func (f *fakeToolTypeStore) UpdateToolType(_ context.Context, tt *ToolType) (*To
 				return nil, ErrToolTypeNotFound
 			}
 			persisted := *tt
+			// Emulate the repository's COALESCE keep (Story 4.4): a NIL
+			// attributes map (absent field) leaves the stored JSONB unchanged.
+			if tt.Attributes == nil {
+				persisted.Attributes = existing.Attributes
+			}
 			f.types[i] = &persisted
 			f.updated = append(f.updated, &persisted)
 			return &persisted, nil
@@ -619,5 +625,238 @@ func TestToolTypesNilPortsFailLoudly(t *testing.T) {
 	}
 	if len(store.created) != 0 || len(store.updated) != 0 {
 		t.Error("nil-port write must not persist")
+	}
+}
+
+func TestCreateToolTypeWithAttributes(t *testing.T) {
+	// CREATE_TYPE_ATTRS (Story 4.4): creating a tool type WITH attributes stores
+	// them in tool_types.attributes — this was IMPOSSIBLE before this story
+	// (CreateToolType hardcoded '{}').
+	svc, store, audit := newToolTypeService()
+	input := toolTypeInput()
+	input.Attributes = map[string]any{"standort": "Werkstatt", "leistung": float64(1200)}
+	got, err := svc.CreateToolType(context.Background(), actorID, input)
+	if err != nil {
+		t.Fatalf("CreateToolType(attributes) err = %v", err)
+	}
+	if got.Attributes == nil || got.Attributes["standort"] != "Werkstatt" || got.Attributes["leistung"] != float64(1200) {
+		t.Errorf("attributes = %+v, want the stored set", got.Attributes)
+	}
+	if len(store.created) != 1 || store.created[0].Attributes["standort"] != "Werkstatt" {
+		t.Errorf("persisted = %+v, want the attributes stored", store.created)
+	}
+	if len(audit.events) != 1 || audit.events[0].operation != AuditOperationToolTypeCreate {
+		t.Fatalf("audit events = %+v, want one create audit", audit.events)
+	}
+}
+
+func TestCreateToolTypeAbsentAttributesDefaultsEmpty(t *testing.T) {
+	// CREATE with an ABSENT attributes field stores the DB default '{}' — the
+	// create-path absent semantics (nothing exists yet to keep).
+	svc, store, _ := newToolTypeService()
+	got, err := svc.CreateToolType(context.Background(), actorID, toolTypeInput())
+	if err != nil {
+		t.Fatalf("CreateToolType err = %v", err)
+	}
+	if got.Attributes == nil || len(got.Attributes) != 0 {
+		t.Errorf("attributes = %v, want empty map default", got.Attributes)
+	}
+	if len(store.created) != 1 || len(store.created[0].Attributes) != 0 {
+		t.Errorf("persisted = %+v, want empty attributes", store.created)
+	}
+}
+
+func TestCreateToolTypeNormalizesAttributeKeys(t *testing.T) {
+	// Keys are trimmed and validated on the type surface too.
+	svc, store, _ := newToolTypeService()
+	input := toolTypeInput()
+	input.Attributes = map[string]any{" standort ": "Werkstatt"}
+	got, err := svc.CreateToolType(context.Background(), actorID, input)
+	if err != nil {
+		t.Fatalf("CreateToolType(normalize) err = %v", err)
+	}
+	if got.Attributes["standort"] != "Werkstatt" {
+		t.Errorf("attributes = %+v, want trimmed key standort=Werkstatt", got.Attributes)
+	}
+	if _, padded := store.created[0].Attributes[" standort "]; padded {
+		t.Errorf("persisted must not keep the padded key, got %+v", store.created[0].Attributes)
+	}
+}
+
+func TestUpdateToolTypeReplacesAttributes(t *testing.T) {
+	// UPDATE_TYPE_ATTRS (Story 4.4): a PUT with an attributes object REPLACES
+	// the stored set (tool-type attributes are writable for the first time).
+	svc, store, audit := newToolTypeService()
+	store.types = []*ToolType{toolTypeFixture("id-a")}
+	store.types[0].Attributes = map[string]any{"standort": "Alt"}
+
+	input := toolTypeInput()
+	input.Attributes = map[string]any{"standort": "Neu", "leistung": float64(1200)}
+	got, err := svc.UpdateToolType(context.Background(), actorID, "id-a", input)
+	if err != nil {
+		t.Fatalf("UpdateToolType(attributes) err = %v", err)
+	}
+	if got.Attributes == nil || got.Attributes["standort"] != "Neu" || got.Attributes["leistung"] != float64(1200) {
+		t.Errorf("attributes = %+v, want the replaced set", got.Attributes)
+	}
+	if _, stale := got.Attributes["alt"]; stale {
+		t.Errorf("attributes = %+v, want the old key gone (wholesale replacement)", got.Attributes)
+	}
+	if len(store.updated) != 1 || store.updated[0].Attributes["standort"] != "Neu" {
+		t.Errorf("persisted = %+v, want the replaced set stored", store.updated)
+	}
+	if len(audit.events) != 1 || audit.events[0].operation != AuditOperationToolTypeUpdate {
+		t.Fatalf("audit events = %+v, want one update audit", audit.events)
+	}
+}
+
+func TestUpdateToolTypeAbsentAttributesLeavesUnchanged(t *testing.T) {
+	// UPDATE_TYPE_ABSENT (Story 4.4): a PUT WITHOUT the attributes field leaves
+	// the stored JSONB unchanged — previously UpdateToolType NEVER wrote
+	// attributes, and an absent field must keep that safe default.
+	svc, store, audit := newToolTypeService()
+	store.types = []*ToolType{toolTypeFixture("id-a")}
+	store.types[0].Attributes = map[string]any{"standort": "Werkstatt"}
+
+	input := toolTypeInput()
+	input.Name = "Schlagbohrmaschine"
+	input.Attributes = nil // absent
+	got, err := svc.UpdateToolType(context.Background(), actorID, "id-a", input)
+	if err != nil {
+		t.Fatalf("UpdateToolType(absent attributes) err = %v", err)
+	}
+	if got.Attributes == nil || got.Attributes["standort"] != "Werkstatt" {
+		t.Errorf("attributes = %+v, want the stored set preserved", got.Attributes)
+	}
+	if len(store.updated) != 1 || store.updated[0].Attributes["standort"] != "Werkstatt" {
+		t.Errorf("persisted = %+v, want stored attributes kept (COALESCE)", store.updated)
+	}
+	if len(audit.events) != 1 {
+		t.Fatalf("audit events = %+v, want one update audit", audit.events)
+	}
+}
+
+func TestUpdateToolTypeClearsAttributes(t *testing.T) {
+	// UPDATE_TYPE_CLEAR (Story 4.4): a PUT with an EXPLICIT `attributes: {}`
+	// clears the stored set.
+	svc, store, _ := newToolTypeService()
+	store.types = []*ToolType{toolTypeFixture("id-a")}
+	store.types[0].Attributes = map[string]any{"standort": "Werkstatt"}
+
+	input := toolTypeInput()
+	input.Attributes = map[string]any{}
+	got, err := svc.UpdateToolType(context.Background(), actorID, "id-a", input)
+	if err != nil {
+		t.Fatalf("UpdateToolType(clear attributes) err = %v", err)
+	}
+	if got.Attributes == nil || len(got.Attributes) != 0 {
+		t.Errorf("attributes = %v, want cleared empty map", got.Attributes)
+	}
+	if len(store.updated) != 1 || len(store.updated[0].Attributes) != 0 {
+		t.Errorf("persisted = %+v, want attributes cleared", store.updated)
+	}
+}
+
+func TestUpdateToolTypeRoundTripsAttributes(t *testing.T) {
+	// ROUND_TRIP (Story 4.4): set → read back unchanged through the port.
+	svc, store, _ := newToolTypeService()
+	input := toolTypeInput()
+	input.Attributes = map[string]any{"standort": "Werkstatt", "konfig": map[string]any{"modus": "auto"}}
+	created, err := svc.CreateToolType(context.Background(), actorID, input)
+	if err != nil {
+		t.Fatalf("CreateToolType err = %v", err)
+	}
+
+	updateInput := toolTypeInput()
+	updateInput.Name = "Schlagbohrmaschine"
+	updateInput.Attributes = nil // absent
+	updated, err := svc.UpdateToolType(context.Background(), actorID, created.ID, updateInput)
+	if err != nil {
+		t.Fatalf("UpdateToolType err = %v", err)
+	}
+	if updated.Attributes["standort"] != "Werkstatt" {
+		t.Errorf("attributes after absent update = %+v, want standort preserved", updated.Attributes)
+	}
+	if len(store.updated[0].Attributes) != 2 {
+		t.Errorf("persisted attributes = %+v, want both entries preserved", store.updated[0].Attributes)
+	}
+}
+
+func TestCreateToolTypeInvalidAttributes(t *testing.T) {
+	// VALID_INVALID_KEY / VALID_TOO_LARGE / VALID_BAD_VALUE (Story 4.4): bad
+	// attribute payloads on the type surface are rejected with
+	// ErrInvalidAttributes (mapped to a German 400 by the handler) and nothing
+	// is persisted.
+	cases := []struct {
+		name       string
+		attrs      map[string]any
+		wantReason string
+	}{
+		{"empty key", map[string]any{"": "wert"}, "empty key"},
+		{"whitespace-only key", map[string]any{"   ": "wert"}, "empty key"},
+		{"over-long key", map[string]any{strings.Repeat("k", MaxAttributeKeyRunes+1): "wert"}, "key too long"},
+		{"trimmed duplicate key", map[string]any{"a": 1, " a ": 2}, "duplicate key"},
+		{"too large", map[string]any{"note": strings.Repeat("x", MaxAttributesSize)}, "attributes too large"},
+		{"bad value", map[string]any{"wert": math.NaN()}, "value not JSON-serializable"},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			svc, store, _ := newToolTypeService()
+			input := toolTypeInput()
+			input.Attributes = tc.attrs
+			_, err := svc.CreateToolType(context.Background(), actorID, input)
+			if !errors.Is(err, ErrInvalidAttributes) {
+				t.Fatalf("err = %v, want ErrInvalidAttributes", err)
+			}
+			var attrErr *AttributeError
+			if !errors.As(err, &attrErr) || attrErr.Reason != tc.wantReason {
+				t.Fatalf("err = %v, want *AttributeError reason %q", err, tc.wantReason)
+			}
+			if len(store.created) != 0 {
+				t.Error("tool type must not be persisted with invalid attributes")
+			}
+		})
+	}
+}
+
+func TestUpdateToolTypeInvalidAttributes(t *testing.T) {
+	// The attributes validation runs on UPDATE too — an invalid payload is
+	// rejected, nothing persisted, not audited.
+	svc, store, audit := newToolTypeService()
+	store.types = []*ToolType{toolTypeFixture("id-a")}
+
+	input := toolTypeInput()
+	input.Attributes = map[string]any{"": "wert"}
+	_, err := svc.UpdateToolType(context.Background(), actorID, "id-a", input)
+	if !errors.Is(err, ErrInvalidAttributes) {
+		t.Fatalf("err = %v, want ErrInvalidAttributes", err)
+	}
+	if len(store.updated) != 0 || len(audit.events) != 0 {
+		t.Error("invalid-attributes update must not persist nor audit")
+	}
+}
+
+func TestUpdateToolTypeArchivedSentinelWinsOverInvalidAttributes(t *testing.T) {
+	// The archived-sentinel-wins-over-400 contract extends to attributes: an
+	// update against an already-archived (or unknown) id answers the 404
+	// sentinel EVEN when the body carries invalid attributes — the existence
+	// check runs before the attribute validation.
+	svc, store, _ := newToolTypeService()
+	archived := toolTypeFixture("id-arch")
+	now := time.Now()
+	archived.ArchivedAt = &now
+	store.types = []*ToolType{archived}
+
+	input := toolTypeInput()
+	input.Attributes = map[string]any{"": "wert"}
+	if _, err := svc.UpdateToolType(context.Background(), actorID, "id-arch", input); !errors.Is(err, ErrToolTypeNotFound) {
+		var attrErr *AttributeError
+		if errors.As(err, &attrErr) {
+			t.Fatalf("err = %v (AttributeError %q), want ErrToolTypeNotFound (404 sentinel wins over 400)", err, attrErr.Reason)
+		}
+		t.Fatalf("err = %v, want ErrToolTypeNotFound", err)
+	}
+	if _, err := svc.UpdateToolType(context.Background(), actorID, "id-missing", input); !errors.Is(err, ErrToolTypeNotFound) {
+		t.Fatalf("unknown id with invalid attributes: err = %v, want ErrToolTypeNotFound", err)
 	}
 }

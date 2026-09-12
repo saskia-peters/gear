@@ -18,6 +18,7 @@ function toolTypeFixture() {
     default_schedule_id: 'id-s1',
     required_qualification_id: 'id-q1',
     inspection_mode: 'checklist',
+    attributes: {},
     checklist_items: [
       { id: 'ci-1', position: 0, label: 'Bohrfutter' },
       { id: 'ci-2', position: 1, label: 'Kabel' },
@@ -852,5 +853,310 @@ describe('AdminWerkzeugePage', () => {
     expect(postCall).toBeDefined()
     const body = JSON.parse(String(postCall![1].body))
     expect(body.required_qualification_id).toBe('')
+  })
+
+  it('TOOLS_ATTRS_EDIT_LOAD: editing a tool shows the stored attributes in the "Eigene Felder" section and saves them', async () => {
+    // Story 4.4: the editor reads stored attributes on edit; a save submits
+    // them (the loaded set round-trips through the section).
+    localStorage.setItem('gear.permissions', JSON.stringify(['tools.manage']))
+    const withAttrs = { ...toolItemFixture(), attributes: { standort: 'Werkstatt' } }
+    const fetchMock = stubFetchRoutes([
+      stubTools([withAttrs]),
+      stubToolTypes([toolTypeFixture()]),
+      stubSchedules([scheduleFixture()]),
+      {
+        matcher: (url: string, init?: RequestInit) => url === `${TOOLS_URL}/id-w1` && init?.method === 'PUT',
+        response: { ok: true, status: 200, body: { ...withAttrs, message: 'Werkzeug gespeichert.' } },
+      },
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByText('Bohrmaschine-01')
+    await user.click(screen.getByRole('button', { name: 'Bearbeiten' }))
+
+    // The stored attribute pair is loaded into the editor (value is JSON).
+    expect(screen.getByText('Eigene Felder')).toBeInTheDocument()
+    expect(screen.getByLabelText('Schlüssel 1')).toHaveValue('standort')
+    expect(screen.getByLabelText('Wert 1')).toHaveValue('"Werkstatt"')
+
+    await user.click(screen.getByRole('button', { name: 'Änderungen speichern' }))
+    await screen.findByText('Werkzeug gespeichert.')
+    const putCall = fetchMock.mock.calls.find(
+      ([url, init]) => url === `${TOOLS_URL}/id-w1` && init?.method === 'PUT',
+    )
+    expect(putCall).toBeDefined()
+    const body = JSON.parse(String(putCall![1].body))
+    expect(body.attributes).toEqual({ standort: 'Werkstatt' })
+  })
+
+  it('TOOLS_ATTRS_SAVE: adding a key/value pair submits it on create', async () => {
+    // Story 4.4: the "Eigene Felder" section adds a pair; the create body
+    // carries the object.
+    localStorage.setItem('gear.permissions', JSON.stringify(['tools.manage']))
+    const fetchMock = stubFetchRoutes([
+      stubTools([]),
+      stubToolTypes([toolTypeFixture()]),
+      stubSchedules([scheduleFixture()]),
+      {
+        matcher: (url: string, init?: RequestInit) => url === TOOLS_URL && init?.method === 'POST',
+        response: { ok: true, status: 201, body: { ...toolItemFixture(), id: 'id-w2', message: 'Werkzeug gespeichert.' } },
+      },
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByLabelText('Name')
+    await user.type(screen.getByLabelText('Name'), 'Bohrmaschine-02')
+    await user.click(screen.getByRole('button', { name: 'Feld hinzufügen' }))
+    await user.type(screen.getByLabelText('Schlüssel 1'), 'standort')
+    await user.type(screen.getByLabelText('Wert 1'), 'Werkstatt')
+    await user.click(screen.getByRole('button', { name: 'Speichern' }))
+
+    expect(await screen.findByText('Werkzeug gespeichert.')).toBeInTheDocument()
+    const postCall = fetchMock.mock.calls.find(
+      ([url, init]) => url === TOOLS_URL && init?.method === 'POST',
+    )
+    expect(postCall).toBeDefined()
+    const body = JSON.parse(String(postCall![1].body))
+    expect(body.attributes).toEqual({ standort: 'Werkstatt' })
+  })
+
+  it('TOOLS_ATTRS_ABSENT: a create that never touches the section omits attributes (absent = unchanged)', async () => {
+    // Story 4.4: an untouched "Eigene Felder" section must NOT be submitted —
+    // the field is omitted so the server's absent = unchanged contract applies
+    // (the V1 hardcoded {} is gone).
+    localStorage.setItem('gear.permissions', JSON.stringify(['tools.manage']))
+    const fetchMock = stubFetchRoutes([
+      stubTools([]),
+      stubToolTypes([toolTypeFixture()]),
+      stubSchedules([scheduleFixture()]),
+      {
+        matcher: (url: string, init?: RequestInit) => url === TOOLS_URL && init?.method === 'POST',
+        response: { ok: true, status: 201, body: { ...toolItemFixture(), id: 'id-w2', message: 'Werkzeug gespeichert.' } },
+      },
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByLabelText('Name')
+    await user.type(screen.getByLabelText('Name'), 'Bohrmaschine-02')
+    await user.click(screen.getByRole('button', { name: 'Speichern' }))
+
+    expect(await screen.findByText('Werkzeug gespeichert.')).toBeInTheDocument()
+    const postCall = fetchMock.mock.calls.find(
+      ([url, init]) => url === TOOLS_URL && init?.method === 'POST',
+    )
+    const body = JSON.parse(String(postCall![1].body))
+    expect(body).not.toHaveProperty('attributes')
+  })
+
+  it('TOOLS_ATTRS_CLEAR: removing every pair submits an explicit {} (clear)', async () => {
+    // Story 4.4: clearing the "Eigene Felder" section (removing all pairs)
+    // submits an explicit `attributes: {}` so the server clears the stored set.
+    localStorage.setItem('gear.permissions', JSON.stringify(['tools.manage']))
+    const withAttrs = { ...toolItemFixture(), attributes: { standort: 'Werkstatt' } }
+    const fetchMock = stubFetchRoutes([
+      stubTools([withAttrs]),
+      stubToolTypes([toolTypeFixture()]),
+      stubSchedules([scheduleFixture()]),
+      {
+        matcher: (url: string, init?: RequestInit) => url === `${TOOLS_URL}/id-w1` && init?.method === 'PUT',
+        response: { ok: true, status: 200, body: { ...withAttrs, attributes: {}, message: 'Werkzeug gespeichert.' } },
+      },
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByText('Bohrmaschine-01')
+    await user.click(screen.getByRole('button', { name: 'Bearbeiten' }))
+    expect(screen.getByLabelText('Schlüssel 1')).toHaveValue('standort')
+    await user.click(screen.getByRole('button', { name: 'Feld entfernen: standort' }))
+    expect(screen.queryByLabelText('Schlüssel 1')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Änderungen speichern' }))
+    await screen.findByText('Werkzeug gespeichert.')
+    const putCall = fetchMock.mock.calls.find(
+      ([url, init]) => url === `${TOOLS_URL}/id-w1` && init?.method === 'PUT',
+    )
+    expect(putCall).toBeDefined()
+    const body = JSON.parse(String(putCall![1].body))
+    expect(body.attributes).toEqual({})
+  })
+
+  it('TYPES_ATTRS_EDIT_LOAD: editing a type shows stored attributes and saves them', async () => {
+    // Story 4.4: the "Eigene Felder" section is wired into the Typen tab too —
+    // the editor reads stored attributes and a save submits them.
+    localStorage.setItem('gear.permissions', JSON.stringify(['tool_types.manage']))
+    const withAttrs = { ...toolTypeFixture(), attributes: { standort: 'Werkstatt' } }
+    const fetchMock = stubFetchRoutes([
+      stubToolTypes([withAttrs]),
+      stubSchedules([scheduleFixture()]),
+      stubQualifications(qualificationsFixture()),
+      {
+        matcher: (url: string, init?: RequestInit) => url === `${TOOL_TYPES_URL}/id-t1` && init?.method === 'PUT',
+        response: { ok: true, status: 200, body: { ...withAttrs, message: 'Gerätetyp gespeichert.' } },
+      },
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByText('Bohrmaschine')
+    await user.click(screen.getByRole('button', { name: 'Bearbeiten' }))
+
+    expect(screen.getByText('Eigene Felder')).toBeInTheDocument()
+    expect(screen.getByLabelText('Schlüssel 1')).toHaveValue('standort')
+    expect(screen.getByLabelText('Wert 1')).toHaveValue('"Werkstatt"')
+
+    await user.click(screen.getByRole('button', { name: 'Änderungen speichern' }))
+    await screen.findByText('Gerätetyp gespeichert.')
+    const putCall = fetchMock.mock.calls.find(
+      ([url, init]) => url === `${TOOL_TYPES_URL}/id-t1` && init?.method === 'PUT',
+    )
+    expect(putCall).toBeDefined()
+    const body = JSON.parse(String(putCall![1].body))
+    expect(body.attributes).toEqual({ standort: 'Werkstatt' })
+  })
+
+  it('TYPES_ATTRS_SAVE: adding a key/value pair submits it on type create', async () => {
+    // Story 4.4: the "Eigene Felder" section adds a pair on the Typen tab; the
+    // create body carries the object.
+    localStorage.setItem('gear.permissions', JSON.stringify(['tool_types.manage']))
+    const fetchMock = stubFetchRoutes([
+      ...baseRoutes(),
+      {
+        matcher: (url: string, init?: RequestInit) => url === TOOL_TYPES_URL && init?.method === 'POST',
+        response: { ok: true, status: 201, body: { ...toolTypeFixture(), id: 'id-new', name: 'Schleifmaschine', message: 'Gerätetyp gespeichert.' } },
+      },
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByText('Bohrmaschine')
+    await user.type(screen.getByLabelText('Name'), 'Schleifmaschine')
+    await user.click(screen.getByRole('button', { name: 'Feld hinzufügen' }))
+    await user.type(screen.getByLabelText('Schlüssel 1'), 'standort')
+    await user.type(screen.getByLabelText('Wert 1'), 'Werkstatt')
+    await user.click(screen.getByRole('button', { name: 'Speichern' }))
+
+    expect(await screen.findByText('Gerätetyp gespeichert.')).toBeInTheDocument()
+    const postCall = fetchMock.mock.calls.find(
+      ([url, init]) => url === TOOL_TYPES_URL && init?.method === 'POST',
+    )
+    expect(postCall).toBeDefined()
+    const body = JSON.parse(String(postCall![1].body))
+    expect(body.attributes).toEqual({ standort: 'Werkstatt' })
+  })
+
+  it('TYPES_ATTRS_ABSENT: a type create that never touches the section omits attributes', async () => {
+    // Story 4.4: an untouched "Eigene Felder" section on the Typen tab is NOT
+    // submitted — the field is omitted (absent = unchanged).
+    localStorage.setItem('gear.permissions', JSON.stringify(['tool_types.manage']))
+    const fetchMock = stubFetchRoutes([
+      ...baseRoutes(),
+      {
+        matcher: (url: string, init?: RequestInit) => url === TOOL_TYPES_URL && init?.method === 'POST',
+        response: { ok: true, status: 201, body: { ...toolTypeFixture(), id: 'id-new', name: 'Säge', message: 'Gerätetyp gespeichert.' } },
+      },
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByText('Bohrmaschine')
+    await user.type(screen.getByLabelText('Name'), 'Säge')
+    await user.click(screen.getByRole('button', { name: 'Speichern' }))
+
+    expect(await screen.findByText('Gerätetyp gespeichert.')).toBeInTheDocument()
+    const postCall = fetchMock.mock.calls.find(([url, init]) => url === TOOL_TYPES_URL && init?.method === 'POST')
+    const body = JSON.parse(String(postCall![1].body))
+    expect(body).not.toHaveProperty('attributes')
+  })
+
+  it('TOOLS_ATTRS_RESET_CLEARS_EDITOR: after creating a tool, the next create form starts with EMPTY rows (stale pairs gone)', async () => {
+    // Story 4.4 review: resetForm() in create mode must REMOUNT the editor —
+    // the previous tool's typed pairs must not linger for the next create.
+    localStorage.setItem('gear.permissions', JSON.stringify(['tools.manage']))
+    stubFetchRoutes([
+      stubTools([]),
+      stubToolTypes([toolTypeFixture()]),
+      stubSchedules([scheduleFixture()]),
+      {
+        matcher: (url: string, init?: RequestInit) => url === TOOLS_URL && init?.method === 'POST',
+        response: { ok: true, status: 201, body: { ...toolItemFixture(), id: 'id-w2', message: 'Werkzeug gespeichert.' } },
+      },
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByLabelText('Name')
+    // Type a pair into the create form.
+    await user.click(screen.getByRole('button', { name: 'Feld hinzufügen' }))
+    await user.type(screen.getByLabelText('Schlüssel 1'), 'standort')
+    await user.type(screen.getByLabelText('Wert 1'), 'Werkstatt')
+    // Create → resetForm → back to a fresh create form.
+    await user.click(screen.getByRole('button', { name: 'Speichern' }))
+    await screen.findByText('Werkzeug gespeichert.')
+
+    // The editor must be EMPTY for the next create (the stale pair is gone).
+    expect(screen.queryByLabelText('Schlüssel 1')).not.toBeInTheDocument()
+    expect(screen.getByText('Noch keine eigenen Felder.')).toBeInTheDocument()
+  })
+
+  it('TOOLS_ATTRS_INVALID_BLOCKS_SAVE: a bad-key attribute disables Save with the inline error', async () => {
+    // Story 4.4 review: while the "Eigene Felder" section is invalid, Save is
+    // disabled (a typed-but-invalid set must never be silently dropped).
+    localStorage.setItem('gear.permissions', JSON.stringify(['tools.manage']))
+    stubFetchRoutes([
+      stubTools([]),
+      stubToolTypes([toolTypeFixture()]),
+      stubSchedules([scheduleFixture()]),
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByLabelText('Name')
+    await user.click(screen.getByRole('button', { name: 'Feld hinzufügen' }))
+    // A value with an EMPTY key → inline error + Save disabled.
+    await user.type(screen.getByLabelText('Wert 1'), 'x')
+    expect(screen.getByRole('alert')).toHaveTextContent('Bitte gib einen Schlüssel ein.')
+    expect(screen.getByRole('button', { name: 'Speichern' })).toBeDisabled()
+
+    // Fixing the key re-enables Save.
+    await user.type(screen.getByLabelText('Schlüssel 1'), 'standort')
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Speichern' })).toBeEnabled()
+  })
+
+  it('TYPES_ATTRS_CLEAR: removing every pair on the Typen tab submits an explicit {} (clear)', async () => {
+    // Story 4.4 review: the Typen tab mirrors the ToolsTab clear path — an
+    // emptied "Eigene Felder" section submits `attributes: {}` on PUT.
+    localStorage.setItem('gear.permissions', JSON.stringify(['tool_types.manage']))
+    const withAttrs = { ...toolTypeFixture(), attributes: { standort: 'Werkstatt' } }
+    const fetchMock = stubFetchRoutes([
+      stubToolTypes([withAttrs]),
+      stubSchedules([scheduleFixture()]),
+      stubQualifications(qualificationsFixture()),
+      {
+        matcher: (url: string, init?: RequestInit) => url === `${TOOL_TYPES_URL}/id-t1` && init?.method === 'PUT',
+        response: { ok: true, status: 200, body: { ...withAttrs, attributes: {}, message: 'Gerätetyp gespeichert.' } },
+      },
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByText('Bohrmaschine')
+    await user.click(screen.getByRole('button', { name: 'Bearbeiten' }))
+    expect(screen.getByLabelText('Schlüssel 1')).toHaveValue('standort')
+    await user.click(screen.getByRole('button', { name: 'Feld entfernen: standort' }))
+    expect(screen.queryByLabelText('Schlüssel 1')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Änderungen speichern' }))
+    await screen.findByText('Gerätetyp gespeichert.')
+    const putCall = fetchMock.mock.calls.find(
+      ([url, init]) => url === `${TOOL_TYPES_URL}/id-t1` && init?.method === 'PUT',
+    )
+    expect(putCall).toBeDefined()
+    const body = JSON.parse(String(putCall![1].body))
+    expect(body.attributes).toEqual({})
   })
 })

@@ -2,6 +2,7 @@ package postgres
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"os"
 	"strings"
@@ -471,5 +472,135 @@ func TestPostgresToolTypesFKConstraints(t *testing.T) {
 		 VALUES ('Test-Fk-Raw', $1, $2, 'pass_fail')`, missing, qualificationID)
 	if !isForeignKeyViolation(err) {
 		t.Fatalf("raw insert with missing schedule err = %v, want FK violation 23503", err)
+	}
+}
+
+// TestPostgresToolTypesAttributes pins the Story 4.4 attributes surface on the
+// `tool_types.attributes` JSONB column: a NON-EMPTY set round-trips byte-for-
+// byte (single-key canonical JSON), the DB default '{}' applies to an absent
+// create, and the update path honors absent=unchanged / {} = clear /
+// object=replace through the repository's COALESCE keep. Archiving preserves
+// the stored attributes.
+func TestPostgresToolTypesAttributes(t *testing.T) {
+	pool := toolTestPool(t)
+	ctx := context.Background()
+	t.Cleanup(func() { pool.Close() })
+
+	repo := NewRepository(New(pool))
+	scheduleID, qualificationID := seedToolTypeRefs(t, ctx, pool)
+
+	// CREATE_TYPE_ATTRS: a type created WITH a non-empty attributes set stores
+	// it in tool_types.attributes (impossible before Story 4.4).
+	created, err := repo.CreateToolType(ctx, &core.ToolType{
+		Name:                    "Test-Attr-Typ",
+		DefaultScheduleID:       scheduleID,
+		RequiredQualificationID: qualificationID,
+		InspectionMode:          core.InspectionModePassFail,
+		Attributes:              map[string]any{"standort": "Werkstatt", "leistung": float64(1200)},
+	})
+	if err != nil {
+		t.Fatalf("CreateToolType(attributes) err = %v", err)
+	}
+	if created.Attributes == nil || created.Attributes["standort"] != "Werkstatt" {
+		t.Fatalf("created attributes = %+v, want the stored set", created.Attributes)
+	}
+	if created.Attributes["leistung"] != float64(1200) {
+		t.Errorf("created attributes leistung = %v, want 1200", created.Attributes["leistung"])
+	}
+
+	// ROUND_TRIP: the raw DB row holds the valid JSON; a read-back via the list
+	// returns the same values (JSONB normalizes key order, so the semantic
+	// equality is asserted on the decoded map).
+	var raw []byte
+	if err := pool.QueryRow(ctx, "SELECT attributes FROM tool_types WHERE id = $1", created.ID).Scan(&raw); err != nil {
+		t.Fatalf("scan raw attributes err = %v", err)
+	}
+	var rawAttrs map[string]any
+	if err := json.Unmarshal(raw, &rawAttrs); err != nil {
+		t.Fatalf("raw attributes not JSON: %v", err)
+	}
+	if rawAttrs["standort"] != "Werkstatt" || rawAttrs["leistung"] != float64(1200) {
+		t.Errorf("raw DB attributes = %v, want the stored set", rawAttrs)
+	}
+
+	// UPDATE_TYPE_ABSENT: an update with a NIL attributes map leaves the stored
+	// JSONB unchanged (COALESCE keep).
+	updated, err := repo.UpdateToolType(ctx, &core.ToolType{
+		ID: created.ID, Name: "Test-Attr-Typ-Neu",
+		DefaultScheduleID: scheduleID, RequiredQualificationID: qualificationID,
+		InspectionMode: core.InspectionModePassFail,
+		Attributes:     nil,
+	})
+	if err != nil {
+		t.Fatalf("UpdateToolType(absent attributes) err = %v", err)
+	}
+	if updated.Attributes["standort"] != "Werkstatt" {
+		t.Errorf("attributes after absent update = %+v, want stored set preserved", updated.Attributes)
+	}
+
+	// UPDATE_TYPE_OBJECT: a non-empty object REPLACES the stored set wholesale.
+	replaced, err := repo.UpdateToolType(ctx, &core.ToolType{
+		ID: created.ID, Name: "Test-Attr-Typ-Neu",
+		DefaultScheduleID: scheduleID, RequiredQualificationID: qualificationID,
+		InspectionMode: core.InspectionModePassFail,
+		Attributes:     map[string]any{"standort": "Lager"},
+	})
+	if err != nil {
+		t.Fatalf("UpdateToolType(replace attributes) err = %v", err)
+	}
+	if replaced.Attributes["standort"] != "Lager" {
+		t.Errorf("attributes after replace = %+v, want the replaced set", replaced.Attributes)
+	}
+	if _, stale := replaced.Attributes["leistung"]; stale {
+		t.Errorf("attributes after replace = %+v, want the old key gone", replaced.Attributes)
+	}
+
+	// UPDATE_TYPE_CLEAR: an EXPLICIT `{}` clears the stored set.
+	cleared, err := repo.UpdateToolType(ctx, &core.ToolType{
+		ID: created.ID, Name: "Test-Attr-Typ-Neu",
+		DefaultScheduleID: scheduleID, RequiredQualificationID: qualificationID,
+		InspectionMode: core.InspectionModePassFail,
+		Attributes:     map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("UpdateToolType(clear attributes) err = %v", err)
+	}
+	if cleared.Attributes == nil || len(cleared.Attributes) != 0 {
+		t.Errorf("attributes after clear = %+v, want empty map", cleared.Attributes)
+	}
+
+	// ARCHIVED: soft-archiving the type preserves its (re-set) attributes on the
+	// archived row.
+	withAttrs, err := repo.UpdateToolType(ctx, &core.ToolType{
+		ID: created.ID, Name: "Test-Attr-Typ-Neu",
+		DefaultScheduleID: scheduleID, RequiredQualificationID: qualificationID,
+		InspectionMode: core.InspectionModePassFail,
+		Attributes:     map[string]any{"hinweis": "archiviert"},
+	})
+	if err != nil {
+		t.Fatalf("UpdateToolType(set attrs before archive) err = %v", err)
+	}
+	archived, err := repo.ArchiveToolType(ctx, withAttrs.ID)
+	if err != nil {
+		t.Fatalf("ArchiveToolType err = %v", err)
+	}
+	if archived.ArchivedAt == nil {
+		t.Fatal("archived_at = nil, want set")
+	}
+	if archived.Attributes["hinweis"] != "archiviert" {
+		t.Errorf("archived attributes = %+v, want preserved", archived.Attributes)
+	}
+
+	// The archived row's attributes stay in the DB (read out-of-band).
+	var archivedRaw []byte
+	if err := pool.QueryRow(ctx, "SELECT attributes FROM tool_types WHERE id = $1", created.ID).Scan(&archivedRaw); err != nil {
+		t.Fatalf("scan archived attributes err = %v", err)
+	}
+	var archivedAttrs map[string]any
+	if err := json.Unmarshal(archivedRaw, &archivedAttrs); err != nil {
+		t.Fatalf("archived attributes not JSON: %v", err)
+	}
+	if archivedAttrs["hinweis"] != "archiviert" {
+		t.Errorf("archived DB attributes = %v, want preserved", archivedAttrs)
 	}
 }

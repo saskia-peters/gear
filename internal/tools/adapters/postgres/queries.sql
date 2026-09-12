@@ -43,11 +43,12 @@ ORDER BY position ASC;
 
 -- name: CreateToolType :one
 -- Insert a tool type and return the resulting row. The attributes jsonb column
--- is intentionally omitted — the DB default '{}' applies (FR-10/AD-3). A name
--- already held by ANY row (active or archived) trips the UNIQUE constraint and
--- is mapped by the repository to the German duplicate-name 400.
-INSERT INTO tool_types (name, default_schedule_id, required_qualification_id, inspection_mode)
-VALUES ($1, $2, $3, $4)
+-- is written explicitly (Story 4.4, FR-10/AD-3): the core passes '{}' for an
+-- absent field and a validated object otherwise. A name already held by ANY row
+-- (active or archived) trips the UNIQUE constraint and is mapped by the
+-- repository to the German duplicate-name 400.
+INSERT INTO tool_types (name, default_schedule_id, required_qualification_id, inspection_mode, attributes)
+VALUES ($1, $2, $3, $4, $5)
 RETURNING id, name, default_schedule_id, required_qualification_id, inspection_mode, attributes, archived_at, created_at, updated_at;
 
 -- name: InsertToolTypeChecklistItem :exec
@@ -62,12 +63,16 @@ VALUES ($1, $2, $3);
 -- `AND archived_at IS NULL` guard makes an update against an already-archived
 -- row affect zero rows → ErrToolTypeNotFound (soft archive is irreversible in
 -- V1; the archived row is non-existent to the surface). The attributes jsonb
--- column is left untouched (Story 4.4 owns its surface).
+-- column follows the shared contract (Story 4.4): COALESCE($6, attributes)
+-- keeps the stored value when the core passes a NIL map ("absent = unchanged"),
+-- while an explicit '{}' (a non-NIL value) clears it and a non-empty object
+-- replaces it.
 UPDATE tool_types
 SET name = $2,
     default_schedule_id = $3,
     required_qualification_id = $4,
     inspection_mode = $5,
+    attributes = COALESCE($6, attributes),
     updated_at = now()
 WHERE id = $1 AND archived_at IS NULL
 RETURNING id, name, default_schedule_id, required_qualification_id, inspection_mode, attributes, archived_at, created_at, updated_at;
@@ -157,14 +162,17 @@ JOIN tool_types tt ON tt.id = nt.tool_type_id;
 -- + bounded + unique case-insensitively among active tools; a reuse of a number
 -- held by ANOTHER row (active or archived — incl. case-variants, via the
 -- lower() functional UNIQUE index) is mapped by the repository to the German
--- duplicate-inventory 400.
+-- duplicate-inventory 400. The attributes jsonb column follows the shared
+-- contract (Story 4.4): COALESCE($6, attributes) keeps the stored value when
+-- the core passes a NIL map ("absent = unchanged"), while an explicit '{}' (a
+-- non-NIL value) clears it and a non-empty object replaces it.
 WITH updated AS (
     UPDATE tools
     SET name = $2,
         tool_type_id = $3,
         schedule_id = $4,
         inventory_number = $5,
-        attributes = $6,
+        attributes = COALESCE($6, attributes),
         updated_at = now()
     WHERE tools.id = $1 AND tools.archived_at IS NULL
     RETURNING tools.id, tools.name, tools.tool_type_id, tools.schedule_id, tools.inventory_number, tools.attributes, tools.archived_at, tools.created_at, tools.updated_at

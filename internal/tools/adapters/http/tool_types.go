@@ -30,15 +30,17 @@ type toolTypeChecklistItemDTO struct {
 	Label    string `json:"label"`
 }
 
-// toolTypeDTO is the GET payload — the core typed fields plus the ordered
-// checklist items. The attributes jsonb extension surface is NOT exposed in V1
-// (Story 4.4 owns it); archived types never reach the active surface.
+// toolTypeDTO is the GET payload — the core typed fields, the ordered checklist
+// items and the attributes jsonb extension surface (Story 4.4, FR-10/AD-3):
+// attributes read back as a JSON object (always present, `{}` when empty).
+// Archived types never reach the active surface.
 type toolTypeDTO struct {
 	ID                      string                     `json:"id"`
 	Name                    string                     `json:"name"`
 	DefaultScheduleID       string                     `json:"default_schedule_id"`
 	RequiredQualificationID string                     `json:"required_qualification_id"`
 	InspectionMode          string                     `json:"inspection_mode"`
+	Attributes              map[string]any             `json:"attributes"`
 	ChecklistItems          []toolTypeChecklistItemDTO `json:"checklist_items"`
 	CreatedAt               string                     `json:"created_at"`
 	UpdatedAt               string                     `json:"updated_at"`
@@ -212,8 +214,8 @@ func (h *Handler) ArchiveToolType(w http.ResponseWriter, r *http.Request) {
 }
 
 // toToolTypeDTO maps the domain tool type to the wire payload. The attributes
-// jsonb extension surface is never exposed in V1 (Story 4.4 owns it), and the
-// active surface never carries an archived row.
+// jsonb extension surface is exposed (Story 4.4) and always serializes as a
+// JSON object; the active surface never carries an archived row.
 func toToolTypeDTO(tt *toolscore.ToolType) toolTypeDTO {
 	items := make([]toolTypeChecklistItemDTO, 0, len(tt.Items))
 	for _, item := range tt.Items {
@@ -229,10 +231,21 @@ func toToolTypeDTO(tt *toolscore.ToolType) toolTypeDTO {
 		DefaultScheduleID:       tt.DefaultScheduleID,
 		RequiredQualificationID: tt.RequiredQualificationID,
 		InspectionMode:          tt.InspectionMode,
+		Attributes:              attributesOrEmpty(tt.Attributes),
 		ChecklistItems:          items,
 		CreatedAt:               tt.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt:               tt.UpdatedAt.UTC().Format(time.RFC3339),
 	}
+}
+
+// attributesOrEmpty returns a non-nil attributes map, defaulting a nil map to
+// the empty object `{}` so reads always serialize as a JSON object (mirrors the
+// user-module profile read).
+func attributesOrEmpty(attrs map[string]any) map[string]any {
+	if attrs == nil {
+		return map[string]any{}
+	}
+	return attrs
 }
 
 // mapToolTypeError writes the uniform envelope for the tool-type service's
@@ -245,6 +258,8 @@ func (h *Handler) mapToolTypeError(w http.ResponseWriter, r *http.Request, err e
 		httpapi.WriteError(w, http.StatusForbidden, "forbidden", "Keine Berechtigung.")
 	case errors.Is(err, toolscore.ErrToolTypeNotFound):
 		httpapi.WriteError(w, http.StatusNotFound, "not_found", toolscore.MsgToolTypeNotFound)
+	case errors.Is(err, toolscore.ErrInvalidAttributes):
+		mapInvalidAttributesError(w, err)
 	case errors.As(err, &inv):
 		httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", inv.Message)
 	default:
@@ -255,4 +270,21 @@ func (h *Handler) mapToolTypeError(w http.ResponseWriter, r *http.Request, err e
 		h.log().Error("tool type request failed unexpectedly", "error", err)
 		httpapi.WriteError(w, http.StatusInternalServerError, "internal_error", "Ein interner Fehler ist aufgetreten.")
 	}
+}
+
+// mapInvalidAttributesError writes the uniform 400 invalid_request for the
+// shared attributes validation (Story 4.4, mirroring the user-module profile
+// precedent): the envelope carries the German MsgInvalidAttributes message plus
+// machine-readable `details` (the offending key + reason) so the client can act
+// on the specific failure.
+func mapInvalidAttributesError(w http.ResponseWriter, err error) {
+	details := map[string]any{"reason": "invalid attributes"}
+	var attrErr *toolscore.AttributeError
+	if errors.As(err, &attrErr) {
+		details = map[string]any{"reason": attrErr.Reason}
+		if attrErr.Key != "" {
+			details["key"] = attrErr.Key
+		}
+	}
+	httpapi.WriteErrorDetail(w, http.StatusBadRequest, "invalid_request", toolscore.MsgInvalidAttributes, details)
 }

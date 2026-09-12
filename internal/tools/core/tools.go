@@ -135,7 +135,11 @@ type Tool struct {
 
 // ToolInput is the shared POST/PUT body (FR-9/FR-10). ScheduleID is the
 // OPTIONAL per-tool override: empty → the tool inherits its type's default
-// (AD-5). Attributes passes the JSONB extension surface through unchanged.
+// (AD-5). Attributes is the no-migration JSONB extension surface (Story 4.4,
+// FR-10/AD-3): it follows the shared update contract — an ABSENT field (nil)
+// leaves the stored JSONB unchanged, an EXPLICIT `{}` clears it, a non-empty
+// object replaces it wholesale. On CREATE a nil field simply stores the DB
+// default `{}`.
 // InventoryNumber is IGNORED on create (the server auto-assigns 'GEAR%06d'
 // in-SQL, CREATE_IGNORE_CLIENT) and OPTIONAL on update: a non-empty value edits
 // the stored number (bounded, unique); an empty value is REJECTED — a tool
@@ -253,8 +257,9 @@ func (s *Service) ListToolsForDashboard(ctx context.Context) ([]*Tool, error) {
 // type must EXIST and be ACTIVE (intra-module store check); an EMPTY schedule
 // override is allowed (stores NULL → inherits the type default, AD-5) while a
 // NON-EMPTY one must be an ACTIVE schedule in the Admin catalog (port lookup).
-// The write goes through the Tool module's configuration port (AD-10). Audited
-// (tool.create).
+// Attributes (Story 4.4) are validated and stored in the `attributes` JSONB
+// column (an absent field stores the DB default '{}'). The write goes through
+// the Tool module's configuration port (AD-10). Audited (tool.create).
 func (s *Service) CreateTool(ctx context.Context, actorID string, input ToolInput) (*Tool, error) {
 	if err := s.requireToolsPermission(ctx, actorID, []string{ToolsManagePermission}); err != nil {
 		return nil, err
@@ -266,14 +271,23 @@ func (s *Service) CreateTool(ctx context.Context, actorID string, input ToolInpu
 		return nil, err
 	}
 
+	// Attributes follow the shared JSONB contract (Story 4.4), expressed through
+	// the shared helpers: an ABSENT field (attributesUnchanged) on create stores
+	// the DB default '{}' — nothing exists yet to keep — while an explicit {}
+	// (attributesCleared) or a non-empty object is stored as-is.
+	attrs, err := validateAttributes(input.Attributes)
+	if err != nil {
+		return nil, err
+	}
+	if attributesUnchanged(attrs) {
+		attrs = map[string]any{}
+	}
+
 	tool := &Tool{
 		Name:       strings.TrimSpace(input.Name),
 		ToolTypeID: strings.TrimSpace(input.ToolTypeID),
 		ScheduleID: strings.TrimSpace(input.ScheduleID),
-		Attributes: input.Attributes,
-	}
-	if tool.Attributes == nil {
-		tool.Attributes = map[string]any{}
+		Attributes: attrs,
 	}
 
 	if err := s.ensureUniqueToolName(ctx, tool.Name, ""); err != nil {
@@ -290,8 +304,11 @@ func (s *Service) CreateTool(ctx context.Context, actorID string, input ToolInpu
 }
 
 // UpdateTool persists a tool (UPDATE_CLEAR_OVERRIDE / UPDATE_ARCHIVED): name,
-// type, override and attributes are replaced; an EMPTY schedule override is
-// stored as SQL NULL so the tool inherits its type's default again (AD-5).
+// type, override, inventory number and attributes are handled; an EMPTY
+// schedule override is stored as SQL NULL so the tool inherits its type's
+// default again (AD-5). Attributes follow the shared JSONB contract (Story
+// 4.4): an ABSENT field leaves the stored JSONB unchanged, an EXPLICIT `{}`
+// clears it, a non-empty object replaces it wholesale.
 // The target's existence/active state is resolved BEFORE the FK validation so
 // an update of an unknown/archived id answers the 404 sentinel even when the
 // submitted body carries a currently-invalid type/schedule (the archived
@@ -338,16 +355,29 @@ func (s *Service) UpdateTool(ctx context.Context, actorID, id string, input Tool
 		return nil, err
 	}
 
+	// Attributes follow the shared JSONB contract (Story 4.4), expressed through
+	// the shared helpers: an ABSENT field (attributesUnchanged) passes nil so
+	// the store's COALESCE keeps the stored JSONB, an EXPLICIT {}
+	// (attributesCleared) passes the empty map so it clears, a non-empty object
+	// replaces wholesale.
+	attrs, err := validateAttributes(input.Attributes)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case attributesUnchanged(input.Attributes):
+		attrs = nil
+	case attributesCleared(input.Attributes):
+		attrs = map[string]any{}
+	}
+
 	tool := &Tool{
 		ID:              id,
 		Name:            strings.TrimSpace(input.Name),
 		ToolTypeID:      strings.TrimSpace(input.ToolTypeID),
 		ScheduleID:      strings.TrimSpace(input.ScheduleID),
 		InventoryNumber: inventoryNumber,
-		Attributes:      input.Attributes,
-	}
-	if tool.Attributes == nil {
-		tool.Attributes = map[string]any{}
+		Attributes:      attrs,
 	}
 
 	persisted, err := s.store.UpdateTool(ctx, tool)

@@ -23,6 +23,7 @@ import type { Schedule } from '../../auth/settings.ts'
 import { listQualifications } from '../../auth/qualifications.ts'
 import type { Qualification } from '../../auth/qualifications.ts'
 import { EmptyState } from '../../components/EmptyState.tsx'
+import { AttributesEditor } from '../../components/AttributesEditor.tsx'
 import styles from './AdminWerkzeugePage.module.css'
 
 type Feedback = { kind: 'success' | 'error'; message: string } | null
@@ -156,6 +157,22 @@ function ToolTypesTab({ onApiError }: { onApiError: (err: unknown) => boolean })
   const [requiredQualificationId, setRequiredQualificationId] = useState('')
   const [inspectionMode, setInspectionMode] = useState<InspectionMode>('pass_fail')
   const [checklistItems, setChecklistItems] = useState<Array<{ label: string }>>([])
+  // attributes holds the "Eigene Felder" set (Story 4.4): the loaded/edited
+  // object. attributesKnown tracks whether the server reported attributes on
+  // load (edit) or the section was touched (create): only then is the field
+  // included in the save body — an untouched section omits it so the server's
+  // absent = unchanged contract applies (a fresh create never wipes anything,
+  // an edit without touching the section keeps the stored JSONB).
+  const [attributes, setAttributes] = useState<Record<string, unknown>>({})
+  const [attributesKnown, setAttributesKnown] = useState(false)
+  // attributesValid mirrors the editor's inline validation (Story 4.4 review):
+  // while the "Eigene Felder" section has a bad key / over-size set, Save is
+  // disabled so a typed-but-invalid set is never silently dropped.
+  const [attributesValid, setAttributesValid] = useState(true)
+  // formVersion is bumped on EVERY reset/edit so the AttributesEditor (keyed by
+  // it) REMOUNTS fresh — including a create-form reset, which the fragile
+  // `editingId ?? 'create'` key could not distinguish from a first create.
+  const [formVersion, setFormVersion] = useState(0)
 
   useEffect(() => {
     let cancelled = false
@@ -213,6 +230,10 @@ function ToolTypesTab({ onApiError }: { onApiError: (err: unknown) => boolean })
     setRequiredQualificationId('')
     setInspectionMode('pass_fail')
     setChecklistItems([])
+    setAttributes({})
+    setAttributesKnown(false)
+    setAttributesValid(true)
+    setFormVersion((v) => v + 1)
   }
 
   function startEdit(tt: ToolType) {
@@ -224,6 +245,12 @@ function ToolTypesTab({ onApiError }: { onApiError: (err: unknown) => boolean })
     setChecklistItems(
       tt.checklist_items.map((item) => ({ label: item.label })),
     )
+    // Load the stored attributes into the editor; once loaded they are ALWAYS
+    // submitted (round-tripped, or {} after the user cleared the section).
+    setAttributes(tt.attributes ?? {})
+    setAttributesKnown(true)
+    setAttributesValid(true)
+    setFormVersion((v) => v + 1)
     setFeedback(null)
   }
 
@@ -237,6 +264,10 @@ function ToolTypesTab({ onApiError }: { onApiError: (err: unknown) => boolean })
       inspection_mode: inspectionMode,
       // In pass_fail mode the checklist is always empty (the editor hides it).
       items: inspectionMode === 'checklist' ? checklistItems : [],
+      // attributes follows the shared contract (Story 4.4): OMITTED when the
+      // section was never touched (absent = unchanged), {} to clear, the
+      // edited object otherwise.
+      attributes: attributesKnown ? attributes : undefined,
     }
     try {
       if (editingId) {
@@ -289,7 +320,9 @@ function ToolTypesTab({ onApiError }: { onApiError: (err: unknown) => boolean })
   // specific qualification — any Helfer*in may inspect them. When the schedule
   // catalog is empty (degraded fetch or genuinely unpopulated) the save is
   // disabled with an inline hint instead of submitting a 400-ing placeholder.
-  const canSave = defaultScheduleId !== ''
+  // attributesValid blocks Save while the "Eigene Felder" section is invalid
+  // (Story 4.4 review) — an invalid set must never be silently dropped.
+  const canSave = defaultScheduleId !== '' && attributesValid
 
   return (
     <>
@@ -442,6 +475,17 @@ function ToolTypesTab({ onApiError }: { onApiError: (err: unknown) => boolean })
                 onDirty={() => setFeedback(null)}
               />
             )}
+
+            <AttributesEditor
+              key={formVersion}
+              attributes={attributes}
+              onChange={(next) => {
+                setAttributes(next)
+                setAttributesKnown(true)
+              }}
+              onDirty={() => setFeedback(null)}
+              onValidityChange={setAttributesValid}
+            />
           </form>
 
           {toolTypes.length === 0 && (
@@ -518,6 +562,16 @@ function ToolsTab({ onApiError, canManageTools }: { onApiError: (err: unknown) =
   const [toolTypeId, setToolTypeId] = useState('')
   const [scheduleId, setScheduleId] = useState('')
   const [inventoryNumber, setInventoryNumber] = useState('')
+  // attributes / attributesKnown mirror the ToolTypesTab ("Eigene Felder",
+  // Story 4.4): loaded on edit, tracked as touched on create, and only then
+  // included in the save body (absent = unchanged server-side).
+  const [attributes, setAttributes] = useState<Record<string, unknown>>({})
+  const [attributesKnown, setAttributesKnown] = useState(false)
+  // attributesValid / formVersion mirror the ToolTypesTab (Story 4.4 review):
+  // the editor's inline validation gates Save, and the keyed formVersion
+  // remounts the editor fresh on EVERY reset (incl. a create-form reset).
+  const [attributesValid, setAttributesValid] = useState(true)
+  const [formVersion, setFormVersion] = useState(0)
 
   useEffect(() => {
     let cancelled = false
@@ -573,6 +627,10 @@ function ToolsTab({ onApiError, canManageTools }: { onApiError: (err: unknown) =
     setToolTypeId(toolTypes[0]?.id ?? '')
     setScheduleId('')
     setInventoryNumber('')
+    setAttributes({})
+    setAttributesKnown(false)
+    setAttributesValid(true)
+    setFormVersion((v) => v + 1)
   }
 
   function startEdit(tool: Tool) {
@@ -594,6 +652,12 @@ function ToolsTab({ onApiError, canManageTools }: { onApiError: (err: unknown) =
     // The inventory number is editable on edit (Story 4-3b); it starts from
     // the stored value so an inventory-preserving edit submits it unchanged.
     setInventoryNumber(tool.inventory_number)
+    // Load the stored attributes into the editor (Story 4.4); once loaded they
+    // are always submitted (round-tripped, or {} after clearing the section).
+    setAttributes(tool.attributes ?? {})
+    setAttributesKnown(true)
+    setAttributesValid(true)
+    setFormVersion((v) => v + 1)
     setFeedback(null)
   }
 
@@ -604,7 +668,10 @@ function ToolsTab({ onApiError, canManageTools }: { onApiError: (err: unknown) =
       name: name.trim(),
       tool_type_id: toolTypeId,
       schedule_id: scheduleId,
-      attributes: {},
+      // attributes follows the shared contract (Story 4.4): OMITTED when the
+      // section was never touched (absent = unchanged — the V1 hardcoded {} is
+      // gone), {} to clear, the edited object otherwise.
+      attributes: attributesKnown ? attributes : undefined,
       // The inventory number travels ONLY on the edit path (Story 4-3b): on
       // create the server auto-assigns it — the create body never carries one.
       inventory_number: editingId ? inventoryNumber : undefined,
@@ -659,7 +726,9 @@ function ToolsTab({ onApiError, canManageTools }: { onApiError: (err: unknown) =
   // catalog is empty (degraded fetch or genuinely unpopulated) the save is
   // disabled with an inline hint instead of submitting a 400-ing placeholder.
   // The schedule override is OPTIONAL (AD-5) and never blocks the save.
-  const canSave = toolTypeId !== ''
+  // attributesValid blocks Save while the "Eigene Felder" section is invalid
+  // (Story 4.4 review) — an invalid set must never be silently dropped.
+  const canSave = toolTypeId !== '' && attributesValid
 
   return (
     <>
@@ -818,6 +887,17 @@ function ToolsTab({ onApiError, canManageTools }: { onApiError: (err: unknown) =
                 </>
               )}
             </div>
+
+            <AttributesEditor
+              key={formVersion}
+              attributes={attributes}
+              onChange={(next) => {
+                setAttributes(next)
+                setAttributesKnown(true)
+              }}
+              onDirty={() => setFeedback(null)}
+              onValidityChange={setAttributesValid}
+            />
           </form>
           )}
 

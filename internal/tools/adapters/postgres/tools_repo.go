@@ -41,7 +41,9 @@ const maxInventoryNumberRetries = 3
 // consumed the generated sequence value, the INSERT trips the
 // tools_inventory_number_key UNIQUE index and the insert is RETRIED with a
 // FRESH nextval (bounded to maxInventoryNumberRetries, then the German
-// collision 400). A nil attributes map is stored as '{}'. Duplicate-name
+// collision 400). Attributes (Story 4.4) are stored in the `attributes` JSONB
+// column — the core already defaulted an absent field to the empty map, so a
+// nil map never reaches this path. Duplicate-name
 // semantics (coherent with the core's active-only case-insensitive guard): an
 // EXACT name reuse of an archived row (invisible to the core guard) trips the
 // DB UNIQUE constraint and is mapped to the German duplicate-name 400. A DB-level FK
@@ -100,14 +102,17 @@ func (r *Repository) CreateTool(ctx context.Context, tool *core.Tool) (*core.Too
 // the stored override (schedule_id NULL → the tool inherits its type's default
 // again, AD-5). The inventory number REPLACES the stored value (the core
 // guarantees it is non-empty + bounded + unique case-insensitively among active
-// tools). Returns core.ErrToolNotFound when the id does not exist OR the row is
-// already archived (the SQL's `archived_at IS NULL` guard affects zero rows
-// then). An EXACT new name already held by an ARCHIVED row trips the DB UNIQUE
-// constraint and is mapped to the German duplicate-name 400; an EXACT inventory
-// number already held by ANY row (active or archived — the Story 4.5 import
-// backstop) trips the tools_inventory_number_key UNIQUE index and is mapped to
-// the German duplicate-inventory 400; a DB-level FK violation is mapped to the
-// German 400 — never a raw 500.
+// tools). Attributes follow the shared JSONB contract (Story 4.4): a NIL map
+// (absent field) leaves the stored JSONB UNCHANGED (the SQL
+// `attributes = COALESCE($6, attributes)` keep), an explicit `{}` clears it and
+// a non-empty object replaces it. Returns core.ErrToolNotFound when the id does
+// not exist OR the row is already archived (the SQL's `archived_at IS NULL`
+// guard affects zero rows then). An EXACT new name already held by an ARCHIVED
+// row trips the DB UNIQUE constraint and is mapped to the German duplicate-name
+// 400; an EXACT inventory number already held by ANY row (active or archived —
+// the Story 4.5 import backstop) trips the tools_inventory_number_key UNIQUE
+// index and is mapped to the German duplicate-inventory 400; a DB-level FK
+// violation is mapped to the German 400 — never a raw 500.
 func (r *Repository) UpdateTool(ctx context.Context, tool *core.Tool) (*core.Tool, error) {
 	uid, err := parseOptionalUUID(tool.ID)
 	if err != nil {
@@ -121,7 +126,7 @@ func (r *Repository) UpdateTool(ctx context.Context, tool *core.Tool) (*core.Too
 	if err != nil {
 		return nil, err
 	}
-	attrs, err := marshalToolAttributes(tool.Attributes)
+	attrs, err := marshalUpdateAttributes(tool.Attributes)
 	if err != nil {
 		return nil, err
 	}
@@ -288,9 +293,12 @@ func toolFromToolRow(
 	return tool
 }
 
-// marshalToolAttributes encodes the attributes map for the jsonb column. A nil
-// map (or an empty one) encodes as '{}' so the stored value is always a JSON
-// object (the DB default when the column is omitted).
+// marshalToolAttributes encodes the attributes map for the jsonb column on the
+// CREATE paths (Story 4.4, FR-10/AD-3): a nil map (or an empty one) encodes as
+// '{}' so the stored value is always a JSON object (the DB default when the
+// column is omitted — an absent create field). Update paths use
+// marshalUpdateAttributes, which encodes a nil map as SQL NULL so the SQL
+// COALESCE keeps the stored value ("absent = unchanged").
 func marshalToolAttributes(attrs map[string]any) ([]byte, error) {
 	if attrs == nil {
 		return []byte("{}"), nil
@@ -303,6 +311,18 @@ func marshalToolAttributes(attrs map[string]any) ([]byte, error) {
 		return []byte("{}"), nil
 	}
 	return raw, nil
+}
+
+// marshalUpdateAttributes encodes the attributes map for the jsonb column on
+// the UPDATE paths (Story 4.4, FR-10/AD-3): a NIL map encodes as SQL NULL so
+// the update's `attributes = COALESCE($6, attributes)` KEEPS the stored value
+// ("absent = unchanged"). An empty map encodes as '{}' (the explicit clear)
+// and a non-empty object as-is.
+func marshalUpdateAttributes(attrs map[string]any) ([]byte, error) {
+	if attrs == nil {
+		return nil, nil
+	}
+	return marshalToolAttributes(attrs)
 }
 
 // parseOptionalUUID parses a uuid FK that may be EMPTY (→ pgtype.UUID{} →

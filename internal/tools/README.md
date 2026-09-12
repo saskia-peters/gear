@@ -27,7 +27,10 @@ inherits its type's default schedule at resolution time (AD-5). Since Story
 4-3b every tool also carries a unique human-readable `inventory_number`
 (auto-assigned `GEAR` + zero-padded sequence value on manual create, editable
 afterward; UNIQUE over ALL rows incl. archived — the Story 4.5 import
-backstop).
+backstop). Since Story 4.4 both tools and tool types expose their `attributes
+JSONB` column as a validated, editable "Eigene Felder" extension surface
+(absent = unchanged, `{}` = clear; promoting an attribute to a real column
+follows the AD-3 path in `migrations/README.md`).
 
 No other module writes its tables; configuration goes through its exported
 configuration port (AD-10).

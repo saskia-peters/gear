@@ -142,14 +142,18 @@ type ToolTypeChecklistItemInput struct {
 }
 
 // ToolTypeInput is the shared POST/PUT body (FR-8/FR-10). Items is the whole
-// ordered checklist-item list — full replacement on update. Attributes is NOT
-// part of the input in V1 (the JSONB extension surface lands with Story 4.4).
+// ordered checklist-item list — full replacement on update. Attributes is the
+// no-migration JSONB extension surface (Story 4.4, FR-10/AD-3): it follows the
+// shared update contract — an ABSENT field (nil) leaves the stored JSONB
+// unchanged, an EXPLICIT `{}` clears it, a non-empty object replaces it
+// wholesale. On CREATE a nil field simply stores the DB default `{}`.
 type ToolTypeInput struct {
 	Name                   string                       `json:"name"`
 	DefaultScheduleID      string                       `json:"default_schedule_id"`
 	RequiredQualificationID string                      `json:"required_qualification_id"`
 	InspectionMode         string                       `json:"inspection_mode"`
 	Items                  []ToolTypeChecklistItemInput `json:"items"`
+	Attributes             map[string]any               `json:"attributes"`
 }
 
 // ToolTypeStore is the outbound persistence port over the Tool-owned
@@ -158,13 +162,15 @@ type ToolTypeInput struct {
 // ordered checklist items. ToolTypeExistsActive is the lean update-path check:
 // it reports whether the id exists AND is active, without fetching the
 // checklist items (the core uses it to resolve the archived sentinel before the
-// duplicate-name guard). Create persists the type with its checklist items
-// atomically (the DB defaults attributes to '{}'). Update persists the type
-// AND replaces the checklist items fully (delete-then-insert in one
-// transaction), refreshing updated_at; it refuses an already-archived row (and
-// a missing id) with ErrToolTypeNotFound. ArchiveToolType soft-archives one
-// type (guarded archived_at IS NULL) — a missing or already-archived id answers
-// ErrToolTypeNotFound.
+// duplicate-name guard). Create persists the type with its checklist items and
+// attributes atomically (an absent attributes map stores the DB default '{}').
+// Update persists the type AND replaces the checklist items fully (delete-then-
+// insert in one transaction), refreshing updated_at; attributes follow the
+// shared contract — a NIL map leaves the stored JSONB unchanged (the SQL
+// COALESCE keep), `{}` clears it, a non-empty object replaces it. Update
+// refuses an already-archived row (and a missing id) with ErrToolTypeNotFound.
+// ArchiveToolType soft-archives one type (guarded archived_at IS NULL) — a
+// missing or already-archived id answers ErrToolTypeNotFound.
 type ToolTypeStore interface {
 	ListToolTypes(ctx context.Context) ([]*ToolType, error)
 	ToolTypeExistsActive(ctx context.Context, id string) (bool, error)
@@ -239,9 +245,10 @@ func (s *Service) ListToolTypes(ctx context.Context, actorID string) ([]*ToolTyp
 // must be non-empty and unique (case-insensitive), the inspection mode must be
 // pass_fail|checklist, the default schedule id must be an ACTIVE schedule
 // (port lookup), the required qualification id must exist (port lookup), and
-// the checklist items (checklist mode) must be non-empty bounded labels. The
-// write goes through the Tool module's configuration port (AD-10). Audited
-// (tool_type.create).
+// the checklist items (checklist mode) must be non-empty bounded labels.
+// Attributes (Story 4.4) are validated and stored in the `attributes` JSONB
+// column (an absent field stores the DB default '{}'). The write goes through
+// the Tool module's configuration port (AD-10). Audited (tool_type.create).
 func (s *Service) CreateToolType(ctx context.Context, actorID string, input ToolTypeInput) (*ToolType, error) {
 	if err := s.requireToolTypesPermission(ctx, actorID); err != nil {
 		return nil, err
@@ -253,12 +260,24 @@ func (s *Service) CreateToolType(ctx context.Context, actorID string, input Tool
 		return nil, err
 	}
 
+	// Attributes follow the shared JSONB contract (Story 4.4), expressed through
+	// the shared helpers: an ABSENT field (attributesUnchanged) on create stores
+	// the DB default '{}' — nothing exists yet to keep — while an explicit {}
+	// (attributesCleared) or a non-empty object is stored as-is.
+	attrs, err := validateAttributes(input.Attributes)
+	if err != nil {
+		return nil, err
+	}
+	if attributesUnchanged(attrs) {
+		attrs = map[string]any{}
+	}
+
 	toolType := &ToolType{
 		Name:                    strings.TrimSpace(input.Name),
 		DefaultScheduleID:       strings.TrimSpace(input.DefaultScheduleID),
 		RequiredQualificationID: strings.TrimSpace(input.RequiredQualificationID),
 		InspectionMode:          input.InspectionMode,
-		Attributes:              map[string]any{},
+		Attributes:              attrs,
 		Items:                   buildItems(input.InspectionMode, input.Items),
 	}
 
@@ -278,9 +297,11 @@ func (s *Service) CreateToolType(ctx context.Context, actorID string, input Tool
 // UpdateToolType persists a tool type (UPDATE_REPLACE_ITEMS): name, schedule,
 // qualification, inspection mode are replaced and the checklist items are
 // REPLACED fully (the SPA always submits the whole ordered list) in one
-// transaction, updated_at refreshed. Updating an already-archived type answers
-// the 404 sentinel (UPDATE_ARCHIVED). Cross-module FKs are re-validated.
-// Audited (tool_type.update).
+// transaction, updated_at refreshed. Attributes follow the shared JSONB
+// contract (Story 4.4): an ABSENT field leaves the stored JSONB unchanged, an
+// EXPLICIT `{}` clears it, a non-empty object replaces it wholesale. Updating
+// an already-archived type answers the 404 sentinel (UPDATE_ARCHIVED).
+// Cross-module FKs are re-validated. Audited (tool_type.update).
 func (s *Service) UpdateToolType(ctx context.Context, actorID, id string, input ToolTypeInput) (*ToolType, error) {
 	if err := s.requireToolTypesPermission(ctx, actorID); err != nil {
 		return nil, err
@@ -307,12 +328,29 @@ func (s *Service) UpdateToolType(ctx context.Context, actorID, id string, input 
 		return nil, err
 	}
 
+	// Attributes follow the shared JSONB contract (Story 4.4), expressed through
+	// the shared helpers: an ABSENT field (attributesUnchanged) passes nil so
+	// the store's COALESCE keeps the stored JSONB, an EXPLICIT {}
+	// (attributesCleared) passes the empty map so it clears, a non-empty object
+	// replaces wholesale.
+	attrs, err := validateAttributes(input.Attributes)
+	if err != nil {
+		return nil, err
+	}
+	switch {
+	case attributesUnchanged(input.Attributes):
+		attrs = nil
+	case attributesCleared(input.Attributes):
+		attrs = map[string]any{}
+	}
+
 	toolType := &ToolType{
 		ID:                      id,
 		Name:                    strings.TrimSpace(input.Name),
 		DefaultScheduleID:       strings.TrimSpace(input.DefaultScheduleID),
 		RequiredQualificationID: strings.TrimSpace(input.RequiredQualificationID),
 		InspectionMode:          input.InspectionMode,
+		Attributes:              attrs,
 		Items:                   buildItems(input.InspectionMode, input.Items),
 	}
 

@@ -267,7 +267,7 @@ func toToolDTO(tool *toolscore.Tool) toolDTO {
 		ToolTypeName:    tool.ToolTypeName,
 		ScheduleID:      tool.ScheduleID,
 		InventoryNumber: tool.InventoryNumber,
-		Attributes:      tool.Attributes,
+		Attributes:      attributesOrEmpty(tool.Attributes),
 		ArchivedAt:      archivedAt,
 		CreatedAt:       tool.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt:       tool.UpdatedAt.UTC().Format(time.RFC3339),
@@ -283,6 +283,8 @@ func (h *Handler) mapToolError(w http.ResponseWriter, r *http.Request, err error
 		httpapi.WriteError(w, http.StatusForbidden, "forbidden", "Keine Berechtigung.")
 	case errors.Is(err, toolscore.ErrToolNotFound):
 		httpapi.WriteError(w, http.StatusNotFound, "not_found", toolscore.MsgToolNotFound)
+	case errors.Is(err, toolscore.ErrInvalidAttributes):
+		mapInvalidAttributesError(w, err)
 	case errors.As(err, &inv):
 		httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", inv.Message)
 	default:
