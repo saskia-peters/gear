@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-04-2026 19:40
-last_updated: 09-09-2026
+last_updated: 09-13-2026 01:54
 project: gear
 project_key: NOKEY
 tracking_system: file-system
@@ -77,8 +77,8 @@ development_status:
   4-3-tool-management: done
   4-3b-inventory-number-tool-edit: done
   4-4-flexible-attributes-on-tools-tool-types: done
-  4-5-bulk-csv-import: backlog
-  epic-4-retrospective: optional
+  4-5-bulk-csv-import: deferred
+  epic-4-retrospective: done
 
   epic-5: backlog
   5-1-qualification-gated-inspection-start: backlog
@@ -166,3 +166,77 @@ action_items:
     owner: "dev loop"
     status: done
     ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-2-retro-2026-09-09.md"
+  - id: "epic-4-retro-item-11-pin-document-update-of-tool-after-type-a"
+    epic: 4
+    action: "Pin + document update-of-tool-after-type-archived semantics (B1)"
+    owner: "dev loop"
+    status: open
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-4-retro-2026-09-12.md"
+  - id: "epic-4-retro-item-12-pin-document-update-of-tool-type-after-s"
+    epic: 4
+    action: "Pin + document update-of-tool/type-after-schedule-archived semantics
+      (B2)"
+    owner: "dev loop"
+    status: open
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-4-retro-2026-09-12.md"
+  - id: "epic-4-retro-item-13-reconcile-the-gear-module-dto-spec-to-th"
+    epic: 4
+    action: "Reconcile the gear-module DTO spec to the inventory addition (S4)"
+    owner: "human"
+    status: open
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-4-retro-2026-09-12.md"
+  - id: "epic-4-retro-item-14-record-the-qualification-optional-deviat"
+    epic: 4
+    action: "Record the qualification-optional deviation in spec-4-2 change log (S3)"
+    owner: "human"
+    status: open
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-4-retro-2026-09-12.md"
+  - id: "epic-4-retro-item-15-add-the-4-3b-dashboard-story-to-sprint-t"
+    epic: 4
+    action: "Add the 4-3b dashboard story to sprint tracking (S1)"
+    owner: "dev loop"
+    status: open
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-4-retro-2026-09-12.md"
+  - id: "epic-4-retro-item-16-consolidate-the-duplicated-uuid-parse-he"
+    epic: 4
+    action: "Consolidate the duplicated UUID-parse helpers (D1)"
+    owner: "dev loop"
+    status: open
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-4-retro-2026-09-12.md"
+  - id: "epic-4-retro-item-17-pin-document-update-of-tool-after-type-a"
+    epic: 4
+    action: "Pin + document update-of-tool-after-type-archived semantics (B1)"
+    owner: "dev loop"
+    status: open
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-4-retro-2026-09-12.md"
+  - id: "epic-4-retro-item-18-pin-document-update-of-tool-type-after-s"
+    epic: 4
+    action: "Pin + document update-of-tool/type-after-schedule-archived semantics
+      (B2)"
+    owner: "dev loop"
+    status: open
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-4-retro-2026-09-12.md"
+  - id: "epic-4-retro-item-19-reconcile-the-gear-module-dto-spec-to-th"
+    epic: 4
+    action: "Reconcile the gear-module DTO spec to the inventory addition (S4)"
+    owner: "human"
+    status: open
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-4-retro-2026-09-12.md"
+  - id: "epic-4-retro-item-20-record-the-qualification-optional-deviat"
+    epic: 4
+    action: "Record the qualification-optional deviation in spec-4-2 change log (S3)"
+    owner: "human"
+    status: open
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-4-retro-2026-09-12.md"
+  - id: "epic-4-retro-item-21-add-the-4-3b-dashboard-story-to-sprint-t"
+    epic: 4
+    action: "Add the 4-3b dashboard story to sprint tracking (S1)"
+    owner: "dev loop"
+    status: open
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-4-retro-2026-09-12.md"
+  - id: "epic-4-retro-item-22-consolidate-the-duplicated-uuid-parse-he"
+    epic: 4
+    action: "Consolidate the duplicated UUID-parse helpers (D1)"
+    owner: "dev loop"
+    status: open
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-4-retro-2026-09-12.md"

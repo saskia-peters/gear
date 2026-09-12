@@ -90,3 +90,10 @@ Triage output of review loops — real, non-story-blocking findings that are not
   summary: Inventory-number system for tools — a unique `inventory_number` column (text, char not number-only), auto-assigned `GEAR` + incrementing number (sequence) on manual creation, editable afterward by `tool.edit`/`tools.manage` holders, and a UNIQUE backstop so a CSV/Excel import row whose inventory number already exists is rejected.
   evidence: The spec exceeded the 1600-token scope standard; the tool CRUD surface (create/edit/archive, type + optional schedule override) is independently shippable, while the inventory-number system is a cohesive secondary goal (new scoped `tool.edit` permission seed + role grants, `tools_inventory_number_seq`, auto-assignment, edit-gating, and the Story 4.5 import-interplay). The user chose [S] Split.
   recommended: implement as a follow-up story right after 4.3 (a migration adding the column + sequence, the `tool.edit` permission seed, and the editor field); the import duplicate-rejection reuses the UNIQUE constraint as the backstop in Story 4.5.
+
+## Deferred from: user decision (2026-09-12)
+
+- source_spec: `_bmad-output/planning-artifacts/epics/epic-04-equipment-catalogue-scheduling.md`
+  summary: Bulk CSV Import (Story 4.5) is postponed so the Epic 4 retrospective and Epic 5 (Inspection Execution) can begin.
+  evidence: The user explicitly requested postponing 4.5 and moving to the retro + Story 5.1. The CSV import surface (FR-9/FR-23) is independently shippable later; its inventory-number duplicate-rejection backstop (UNIQUE on `tools.inventory_number`, case-insensitive over all rows) is already in place from Story 4-3b, so nothing about the deferred work degrades while pending.
+  recommended: schedule 4.5 after Epic 5 (or whenever bulk onboarding is needed); the error-report + per-row-atomic-import requirements stay as specified in the epic. Revisit in the Epic 4 retrospective.
