@@ -410,9 +410,9 @@ func TestCompleteAdminRecoveryExpired(t *testing.T) {
 
 func TestAdminForgotSelfResetBlocked(t *testing.T) {
 	// ADMIN_FORGOT_SELF_RESET: an admin using the FR-26 forgot flow gets the
-	// uniform confirmation but NO actionable self-reset token and, with no SMTP
-	// configured, is NOT flagged must_change_password (FR-27 overrides FR-26 for
-	// admins — admins recover only via the dual-admin path).
+	// deployment-wide confirmation but NO actionable self-reset token and, with
+	// no SMTP configured, is NOT flagged must_change_password (FR-27 overrides
+	// FR-26 for admins — admins recover only via the dual-admin path).
 	repo := recoveryRepo()
 	svc, _ := recoveryService(t, repo)
 
@@ -420,8 +420,8 @@ func TestAdminForgotSelfResetBlocked(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RequestPasswordReset failed: %v", err)
 	}
-	if res.Message != MsgPasswordResetRequested {
-		t.Errorf("message = %q, want uniform %q", res.Message, MsgPasswordResetRequested)
+	if res.Message != MsgPasswordResetContactAdmin {
+		t.Errorf("message = %q, want %q (no SMTP configured)", res.Message, MsgPasswordResetContactAdmin)
 	}
 	if len(repo.resetTokens) != 0 {
 		t.Errorf("an admin must not get a FR-26 self-reset token, got %d", len(repo.resetTokens))

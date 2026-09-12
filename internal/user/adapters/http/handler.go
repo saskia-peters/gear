@@ -205,16 +205,17 @@ type forgotPasswordRequest struct {
 }
 
 // ForgotPassword handles POST /api/v1/auth/password/forgot (FR-26). It ALWAYS
-// returns the uniform 200 anti-enumeration confirmation
-// "Wenn deine E-Mail registriert ist, erhältst du einen Link." (UX-DR7) — the
-// body is identical whether the account exists, its state, and whether SMTP is
-// configured — so account existence cannot be probed. The per-email rate gate
-// (review finding 1.8-2) answers repeat requests for the same email with a
-// uniform 429 that never depends on account existence. Only unparseable JSON is
-// rejected with 400 invalid_request. Server-side: an active account gets a
-// single-use hashed 30-min token (mailed via the sender port when configured)
-// or is flagged must_change_password (SMTP not configured); every request is
-// audited and logged (NFR-O1).
+// returns a 200 with a deployment-wide anti-enumeration confirmation (UX-DR7):
+// "Wenn deine E-Mail registriert ist, erhältst du einen Link." when SMTP is
+// configured, or "Bitte kontaktiere deinen Administrator." when it is not. The
+// message depends ONLY on SMTP config — never on the account — so account
+// existence/state cannot be probed. The per-email rate gate (review finding
+// 1.8-2) answers repeat requests for the same email with a uniform 429 that
+// never depends on account existence. Only unparseable JSON is rejected with
+// 400 invalid_request. Server-side: an active account gets a single-use hashed
+// 30-min token (mailed via the sender port when configured) or is flagged
+// must_change_password (SMTP not configured); every request is audited and
+// logged (NFR-O1).
 func (h *Handler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	var input forgotPasswordRequest

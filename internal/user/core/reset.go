@@ -79,6 +79,13 @@ var ErrForgotThrottled = errors.New("password reset requested too frequently")
 // constant so no flow can accidentally pick up the other's text).
 const MsgPasswordResetRequested = "Wenn deine E-Mail registriert ist, erhältst du einen Link."
 
+// MsgPasswordResetContactAdmin is the deployment-wide confirmation shown when
+// SMTP is NOT configured: no reset email can be delivered, so the user is told
+// to contact an administrator instead of being promised a link that will never
+// arrive. It is returned for EVERY request in that deployment (anti-enumeration
+// preserved — the message depends on SMTP config, never on the account).
+const MsgPasswordResetContactAdmin = "Bitte kontaktiere deinen Administrator."
+
 // MsgPasswordResetComplete is the German confirmation returned after a
 // successful reset (FR-26).
 const MsgPasswordResetComplete = "Passwort geändert. Du kannst dich jetzt mit dem neuen Passwort anmelden."
@@ -284,7 +291,15 @@ func (s *Service) RequestPasswordReset(ctx context.Context, email string) (*Rese
 		}
 	}
 
-	return &ResetRequestResult{Message: MsgPasswordResetRequested}, nil
+	// Deployment-wide confirmation (anti-enumeration, UX-DR7): the message
+	// depends ONLY on whether SMTP delivery is configured — never on the
+	// account. When no sender is configured no email can arrive, so the user is
+	// directed to an administrator instead of being promised a link.
+	message := MsgPasswordResetRequested
+	if s.resetSender == nil || !s.resetSender.Configured() {
+		message = MsgPasswordResetContactAdmin
+	}
+	return &ResetRequestResult{Message: message}, nil
 }
 
 // CompletePasswordReset executes the reset-complete use-case (FR-26): the raw

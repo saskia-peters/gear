@@ -9,13 +9,26 @@ interface ForgotErrors {
   general?: string
 }
 
+// FORGOT_MESSAGES is the allowlist of server messages the client may render
+// verbatim. Both are deployment-wide (never account-specific), so showing them
+// cannot leak account existence/state (UX-DR7). Any OTHER server string is
+// ignored — the client falls back to the frozen anti-enumeration text, so even
+// a buggy/leaky server body can never surface account details.
+const FORGOT_MESSAGES = [
+  'Wenn deine E-Mail registriert ist, erhältst du einen Link.',
+  'Bitte kontaktiere deinen Administrator.',
+]
+
+const FORGOT_MESSAGE_FALLBACK = 'Wenn deine E-Mail registriert ist, erhältst du einen Link.'
+
 export function ForgotPasswordPage() {
   const [email, setEmail] = useState('')
   const [errors, setErrors] = useState<ForgotErrors>({})
   const [isSubmitting, setIsSubmitting] = useState(false)
   // submitted holds the address that was submitted (used only to keep the form
-  // stable); the shown confirmation is ALWAYS the uniform text.
+  // stable); the shown confirmation is ALWAYS a deployment-wide message.
   const [submitted, setSubmitted] = useState(false)
+  const [confirmation, setConfirmation] = useState(FORGOT_MESSAGE_FALLBACK)
   const formRef = useRef<HTMLFormElement>(null)
 
   useEffect(() => {
@@ -51,11 +64,19 @@ export function ForgotPasswordPage() {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: trimmedEmail }),
       })
-      // FR-26/UX-DR7: the server ALWAYS answers 200 with the uniform
-      // anti-enumeration confirmation — the account's existence/state is never
-      // revealed. The client shows the identical text regardless of the
-      // response, so even a failed request cannot leak.
+      // FR-26/UX-DR7: the server ALWAYS answers 200 with a deployment-wide
+      // anti-enumeration confirmation (either the frozen "link" text when SMTP
+      // is configured, or the "contact your administrator" text when SMTP is
+      // not). The client shows that message ONLY when it is on the known-safe
+      // allowlist; anything else (e.g. a leaky server body) falls back to the
+      // frozen text so account existence/state is never revealed.
       if (res.ok) {
+        const body = (await res.json().catch(() => null)) as { message?: string } | null
+        setConfirmation(
+          typeof body?.message === 'string' && FORGOT_MESSAGES.includes(body.message)
+            ? body.message
+            : FORGOT_MESSAGE_FALLBACK,
+        )
         setSubmitted(true)
       } else {
         setErrors({ general: 'Ein Fehler ist aufgetreten. Bitte versuche es erneut.' })
@@ -87,7 +108,7 @@ export function ForgotPasswordPage() {
 
           {submitted ? (
             <div className={styles.successBox} role="status">
-              <p className={styles.successText}>Wenn deine E-Mail registriert ist, erhältst du einen Link.</p>
+              <p className={styles.successText}>{confirmation}</p>
               <p className={styles.successHint}>
                 Falls du keinen Link erhältst, wende dich an deinen Administrator.
               </p>

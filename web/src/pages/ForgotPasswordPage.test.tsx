@@ -7,6 +7,7 @@ import { ForgotPasswordPage } from './ForgotPasswordPage.tsx'
 import { ThemeProvider } from '../context/ThemeContext.tsx'
 
 const UNIFORM = 'Wenn deine E-Mail registriert ist, erhältst du einen Link.'
+const CONTACT_ADMIN = 'Bitte kontaktiere deinen Administrator.'
 
 function renderForgot() {
   return render(
@@ -155,6 +156,40 @@ describe('ForgotPasswordPage', () => {
       expect(screen.getByText(UNIFORM)).toBeInTheDocument()
     })
     expect(screen.queryByText('E-Mail nicht gefunden')).not.toBeInTheDocument()
+  })
+
+  it('NO_SMTP: the deployment-wide "contact your administrator" message is rendered', async () => {
+    // When SMTP is not configured the server returns the contact-admin
+    // confirmation; it is on the known-safe allowlist, so the client shows it.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ message: CONTACT_ADMIN }),
+    }))
+
+    await submitEmail('user@example.com')
+
+    await waitFor(() => {
+      expect(screen.getByText(CONTACT_ADMIN)).toBeInTheDocument()
+    })
+  })
+
+  it('ALLOWLIST_UNKNOWN_MSG: a non-allowlisted server message falls back to the frozen text', async () => {
+    // A server returning an unrecognized but harmless message (e.g. an unknown
+    // deployment variant) must still be ignored — the client renders the
+    // frozen anti-enumeration text.
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ message: 'Irgendein anderer Text' }),
+    }))
+
+    await submitEmail('user@example.com')
+
+    await waitFor(() => {
+      expect(screen.getByText(UNIFORM)).toBeInTheDocument()
+    })
+    expect(screen.queryByText('Irgendein anderer Text')).not.toBeInTheDocument()
   })
 
   it('FOCUS_FIRST_ERROR: submitting an empty email moves focus to the email input', async () => {

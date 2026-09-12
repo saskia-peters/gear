@@ -106,8 +106,8 @@ func TestRequestPasswordResetUnknownEmail(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RequestPasswordReset failed: %v", err)
 	}
-	if res.Message != MsgPasswordResetRequested {
-		t.Errorf("message = %q, want %q", res.Message, MsgPasswordResetRequested)
+	if res.Message != MsgPasswordResetContactAdmin {
+		t.Errorf("message = %q, want %q (no SMTP configured)", res.Message, MsgPasswordResetContactAdmin)
 	}
 	if len(repo.resetTokens) != 0 {
 		t.Errorf("unknown email must not mint a token, got %d", len(repo.resetTokens))
@@ -124,8 +124,9 @@ func TestRequestPasswordResetUnknownEmail(t *testing.T) {
 }
 
 func TestRequestPasswordResetActiveNoSMTP(t *testing.T) {
-	// FORGOT_ACTIVE_NO_SMTP: uniform confirmation + must_change_password=true,
-	// no email sent (the stub reports NOT configured).
+	// FORGOT_ACTIVE_NO_SMTP: deployment-wide "contact your administrator"
+	// confirmation + must_change_password=true, no email sent (the stub reports
+	// NOT configured).
 	repo := resetRepo()
 	svc, _ := resetService(t, repo, &mockResetSender{configured: false})
 
@@ -133,8 +134,8 @@ func TestRequestPasswordResetActiveNoSMTP(t *testing.T) {
 	if err != nil {
 		t.Fatalf("RequestPasswordReset failed: %v", err)
 	}
-	if res.Message != MsgPasswordResetRequested {
-		t.Errorf("message = %q, want uniform %q", res.Message, MsgPasswordResetRequested)
+	if res.Message != MsgPasswordResetContactAdmin {
+		t.Errorf("message = %q, want %q (no SMTP configured)", res.Message, MsgPasswordResetContactAdmin)
 	}
 	if !repo.mustChange["u-active"] {
 		t.Error("active account must be flagged must_change_password when SMTP is not configured")
