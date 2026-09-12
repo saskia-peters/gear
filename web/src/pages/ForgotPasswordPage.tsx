@@ -14,12 +14,12 @@ interface ForgotErrors {
 // cannot leak account existence/state (UX-DR7). Any OTHER server string is
 // ignored — the client falls back to the frozen anti-enumeration text, so even
 // a buggy/leaky server body can never surface account details.
-const FORGOT_MESSAGES = [
-  'Wenn deine E-Mail registriert ist, erhältst du einen Link.',
-  'Bitte kontaktiere deinen Administrator.',
-]
+const FORGOT_MESSAGE_LINK = 'Wenn deine E-Mail registriert ist, erhältst du einen Link.'
+const FORGOT_MESSAGE_CONTACT_ADMIN = 'Bitte kontaktiere deinen Administrator.'
 
-const FORGOT_MESSAGE_FALLBACK = 'Wenn deine E-Mail registriert ist, erhältst du einen Link.'
+const FORGOT_MESSAGES = [FORGOT_MESSAGE_LINK, FORGOT_MESSAGE_CONTACT_ADMIN]
+
+const FORGOT_MESSAGE_FALLBACK = FORGOT_MESSAGE_LINK
 
 export function ForgotPasswordPage() {
   const [email, setEmail] = useState('')
@@ -109,9 +109,11 @@ export function ForgotPasswordPage() {
           {submitted ? (
             <div className={styles.successBox} role="status">
               <p className={styles.successText}>{confirmation}</p>
-              <p className={styles.successHint}>
-                Falls du keinen Link erhältst, wende dich an deinen Administrator.
-              </p>
+              {confirmation === FORGOT_MESSAGE_LINK && (
+                <p className={styles.successHint}>
+                  Falls du keinen Link erhältst, wende dich an deinen Administrator.
+                </p>
+              )}
             </div>
           ) : (
             <form ref={formRef} className={styles.form} onSubmit={handleSubmit} noValidate>

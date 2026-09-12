@@ -160,7 +160,9 @@ describe('ForgotPasswordPage', () => {
 
   it('NO_SMTP: the deployment-wide "contact your administrator" message is rendered', async () => {
     // When SMTP is not configured the server returns the contact-admin
-    // confirmation; it is on the known-safe allowlist, so the client shows it.
+    // confirmation; it is on the known-safe allowlist, so the client shows it,
+    // and the "falls du keinen Link erhältst" hint is suppressed (no link will
+    // ever arrive — telling the user to wait for one is contradictory).
     vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
       ok: true,
       status: 200,
@@ -172,6 +174,24 @@ describe('ForgotPasswordPage', () => {
     await waitFor(() => {
       expect(screen.getByText(CONTACT_ADMIN)).toBeInTheDocument()
     })
+    expect(screen.queryByText(/Falls du keinen Link erhältst/)).not.toBeInTheDocument()
+  })
+
+  it('LINK_MSG: the "you will receive a link" message keeps its hint', async () => {
+    // With SMTP configured the server returns the link confirmation; the
+    // "falls du keinen Link erhältst" hint stays (it is the meaningful case).
+    vi.stubGlobal('fetch', vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ message: UNIFORM }),
+    }))
+
+    await submitEmail('user@example.com')
+
+    await waitFor(() => {
+      expect(screen.getByText(UNIFORM)).toBeInTheDocument()
+    })
+    expect(screen.getByText(/Falls du keinen Link erhältst/)).toBeInTheDocument()
   })
 
   it('ALLOWLIST_UNKNOWN_MSG: a non-allowlisted server message falls back to the frozen text', async () => {
