@@ -71,6 +71,23 @@ db-down: podman-check
 alias db-stop := db-down
 alias db-shutdown := db-down
 
+# Local-dev only: delete users created by TEST RUNS, keeping every real user
+# (seeded admins + any real accounts). Test-run users are identified by the
+# runtime email pattern the suites generate: a local part ending in a
+# "<stamp>.YYYYMMDDHHMMSS.<micro>" timestamp (e.g. approval.p1.20260911...@gear.local).
+# Emails WITHOUT that timestamp (admin.1@gear.local, your real account, …) are
+# NEVER touched. Run after a test suite has littered the dev DB.
+#
+#   just db-purge-test-users
+#
+# Related rows (sessions, reset tokens, role grants, qualifications,
+# memberships, audit actor refs) are removed by ON DELETE CASCADE/SET NULL.
+db-purge-test-users: db-wait
+    @before=$(podman exec {{DB_CONTAINER}} psql -U gear -d gear -tAc "SELECT count(*) FROM users"); \
+    podman exec {{DB_CONTAINER}} psql -U gear -d gear -c "DELETE FROM users WHERE email ~ '^[^@]+\.[0-9]{14}\.[0-9]+@gear\.local$'"; \
+    after=$(podman exec {{DB_CONTAINER}} psql -U gear -d gear -tAc "SELECT count(*) FROM users"); \
+    echo "Purged test-run users: $before -> $after remaining. Real users are untouched."
+
 # Apply pending forward migrations
 migrate-up: db-wait
     go run -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@{{MIGRATE_VERSION}} -path ./migrations --database "{{DATABASE_URL}}" up
