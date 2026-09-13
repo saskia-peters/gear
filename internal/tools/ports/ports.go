@@ -68,4 +68,14 @@ type Service interface {
 	// the active list. Audited. Archiving an already-archived tool answers
 	// ErrToolNotFound.
 	ArchiveTool(ctx context.Context, actorID, id string) (*core.Tool, error)
+	// StartInspection is the qualification-gated inspection start (Story 5.1,
+	// FR-11/AD-7): it resolves the tool + its type's required_qualification_id
+	// (intra-module store read) and — when the type requires a qualification —
+	// checks the caller's granted qualifications through the User module's
+	// QualificationCatalogPort (expiry-aware, AD-7/FR-22). Eligible → the start
+	// result (tool + its type's inspection_mode); missing/expired qualification
+	// → ErrToolQualificationMissing (403, German); unknown/archived tool →
+	// ErrToolNotFound (404). Re-checks `inspection.submit` defense-in-depth
+	// (AD-6). No inspection record is created (Stories 5.2/5.4/5.5).
+	StartInspection(ctx context.Context, actorID, toolID string) (*core.InspectionStartResult, error)
 }

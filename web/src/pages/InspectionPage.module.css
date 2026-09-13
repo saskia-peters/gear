@@ -1,0 +1,99 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  width: 100%;
+}
+
+.main {
+  flex: 1;
+  width: 100%;
+  max-width: 1024px;
+  margin: 0 auto;
+  padding: var(--gear-space-6) var(--gear-space-margin-mobile);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-6);
+  box-sizing: border-box;
+}
+
+.titleSection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-1);
+}
+
+.pageTitle {
+  font-size: var(--gear-font-display-size);
+  font-weight: var(--gear-font-display-weight);
+  line-height: var(--gear-font-display-line-height);
+  letter-spacing: var(--gear-font-display-letter-spacing);
+  color: var(--gear-color-ink-primary);
+  hyphens: auto;
+  word-break: normal;
+}
+
+.pageSubtitle {
+  font-size: var(--gear-font-body-size);
+  color: var(--gear-color-ink-secondary);
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-4);
+  width: 100%;
+}
+
+.loading {
+  margin: 0;
+  padding: var(--gear-space-3) var(--gear-space-4);
+  border-radius: var(--gear-radius-md);
+  background-color: var(--gear-color-surface-raised);
+  border: 1px solid var(--gear-color-border-hairline);
+  color: var(--gear-color-ink-secondary);
+  font-size: var(--gear-font-label-size);
+  line-height: var(--gear-font-label-line-height);
+}
+
+.error {
+  margin: 0;
+  padding: var(--gear-space-3) var(--gear-space-4);
+  border-radius: var(--gear-radius-md);
+  background-color: var(--gear-color-status-red-soft);
+  border: 1px solid var(--gear-color-status-red);
+  color: var(--gear-color-status-red);
+  font-size: var(--gear-font-label-size);
+  line-height: var(--gear-font-label-line-height);
+}
+
+.detail {
+  margin: 0;
+  padding: var(--gear-space-4);
+  background-color: var(--gear-color-surface-raised);
+  border: 1px solid var(--gear-color-border-hairline);
+  border-radius: var(--gear-radius-md);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-3);
+}
+
+.detailRow {
+  display: flex;
+  align-items: baseline;
+  gap: var(--gear-space-3);
+}
+
+.detailTerm {
+  min-width: 8rem;
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  color: var(--gear-color-ink-secondary);
+}
+
+.detailValue {
+  margin: 0;
+  font-size: var(--gear-font-title-size);
+  font-weight: var(--gear-font-title-weight);
+  color: var(--gear-color-ink-primary);
+}

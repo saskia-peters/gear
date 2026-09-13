@@ -5,6 +5,7 @@ import (
 	"errors"
 	"strings"
 	"testing"
+	"time"
 )
 
 // qualificationsRepo seeds the Story 2.7 I/O matrix: an active admin holding
@@ -486,5 +487,111 @@ func TestQualificationExistsCatalogPort(t *testing.T) {
 	}
 	if !exists {
 		t.Error("QualificationExists(q-ketten) = false via ungated path, want true")
+	}
+}
+
+func TestUserHoldsQualification(t *testing.T) {
+	// Story 5.1 (FR-11/AD-7): the ungated, expiry-aware eligibility read behind
+	// the inspection-start gate. A `fixed` qualification past its per-assignment
+	// expires_at counts as NOT held (mirror qualification_status.go); an
+	// `unlimited` one is always held.
+	repo := qualificationsRepo()
+	svc := usersAdminService(t, repo)
+
+	// Holds a fixed qualification (active — q-ketten is fixed and u-helfende is
+	// assigned without a per-user override; a fixed WITHOUT a date is treated as
+	// valid, mirroring qualification_status.go's defensive default).
+	held, err := svc.UserHoldsQualification(context.Background(), "u-helfende", "q-ketten")
+	if err != nil {
+		t.Fatalf("UserHoldsQualification(active fixed) err = %v", err)
+	}
+	if !held {
+		t.Error("UserHoldsQualification(active fixed) = false, want true")
+	}
+
+	// An unlimited assignment is always held.
+	repo.qualifications["q-unlim"] = &QualificationAssignment{ID: "q-unlim", Name: "Unbegrenzt", ExpiryKind: QualificationExpiryUnlimited}
+	repo.userQualifications["u-helfende"] = append(repo.userQualifications["u-helfende"], "q-unlim")
+	held, err = svc.UserHoldsQualification(context.Background(), "u-helfende", "q-unlim")
+	if err != nil {
+		t.Fatalf("UserHoldsQualification(unlimited) err = %v", err)
+	}
+	if !held {
+		t.Error("UserHoldsQualification(unlimited) = false, want true")
+	}
+
+	// A fixed assignment past its expires_at counts as NOT held (live
+	// resolution, AD-7/FR-22).
+	past := time.Now().UTC().Add(-time.Hour)
+	repo.qualifications["q-fixed"] = &QualificationAssignment{ID: "q-fixed", Name: "Befristet", ExpiryKind: QualificationExpiryFixed}
+	repo.userQualifications["u-helfende"] = append(repo.userQualifications["u-helfende"], "q-fixed")
+	repo.qualificationExpiry["u-helfende\x00q-fixed"] = &past
+	held, err = svc.UserHoldsQualification(context.Background(), "u-helfende", "q-fixed")
+	if err != nil {
+		t.Fatalf("UserHoldsQualification(expired fixed) err = %v", err)
+	}
+	if held {
+		t.Error("UserHoldsQualification(expired fixed) = true, want false (expired = not held)")
+	}
+
+	// A fixed assignment in the FUTURE is held.
+	future := time.Now().UTC().Add(30 * 24 * time.Hour)
+	repo.qualificationExpiry["u-helfende\x00q-fixed"] = &future
+	held, err = svc.UserHoldsQualification(context.Background(), "u-helfende", "q-fixed")
+	if err != nil {
+		t.Fatalf("UserHoldsQualification(future fixed) err = %v", err)
+	}
+	if !held {
+		t.Error("UserHoldsQualification(future fixed) = false, want true")
+	}
+
+	// Not assigned → false.
+	held, err = svc.UserHoldsQualification(context.Background(), "u-helfende", "q-ghost")
+	if err != nil {
+		t.Fatalf("UserHoldsQualification(not assigned) err = %v", err)
+	}
+	if held {
+		t.Error("UserHoldsQualification(not assigned) = true, want false")
+	}
+
+	// Unknown user → false.
+	held, err = svc.UserHoldsQualification(context.Background(), "u-ghost", "q-ketten")
+	if err != nil {
+		t.Fatalf("UserHoldsQualification(unknown user) err = %v", err)
+	}
+	if held {
+		t.Error("UserHoldsQualification(unknown user) = true, want false")
+	}
+
+	// Empty ids → false (defensive, never a port call).
+	held, err = svc.UserHoldsQualification(context.Background(), "", "q-ketten")
+	if err != nil {
+		t.Fatalf("UserHoldsQualification(empty user) err = %v", err)
+	}
+	if held {
+		t.Error("UserHoldsQualification(empty user) = true, want false")
+	}
+	held, err = svc.UserHoldsQualification(context.Background(), "u-helfende", "")
+	if err != nil {
+		t.Fatalf("UserHoldsQualification(empty qual) err = %v", err)
+	}
+	if held {
+		t.Error("UserHoldsQualification(empty qual) = true, want false")
+	}
+
+	// The read is ungated: a caller WITHOUT any qualification permission can
+	// resolve eligibility (the trusted internal port, no actor/permission).
+	repo.users["schirr@gear.local"] = &User{
+		ID: "u-schirr", Email: "schirr@gear.local", DisplayName: "Schirr Meister",
+		FirstName: "Schirr", LastName: "Meister", State: StateActive,
+	}
+	repo.perms["u-schirr"] = []string{"tools.manage"}
+	repo.userQualifications["u-schirr"] = []string{"q-ketten"}
+	held, err = svc.UserHoldsQualification(context.Background(), "u-schirr", "q-ketten")
+	if err != nil {
+		t.Fatalf("UserHoldsQualification (ungated caller) err = %v", err)
+	}
+	if !held {
+		t.Error("UserHoldsQualification (ungated caller) = false, want true")
 	}
 }

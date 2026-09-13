@@ -125,6 +125,19 @@ SELECT EXISTS (
     WHERE id = $1 AND archived_at IS NULL
 );
 
+-- name: GetToolWithTypeQualification :one
+-- The lean inspection-start read (Story 5.1, FR-11/AD-7): the ACTIVE tool plus
+-- its type's required_qualification_id and inspection_mode (intra-module JOIN on
+-- Tool-owned tool_types — the Tool module never joins another module's tables,
+-- AD-8/AD-11). BOTH guards (`t.archived_at IS NULL` AND `tt.archived_at IS
+-- NULL`) make a tool with an ARCHIVED type (or an archived/missing tool) answer
+-- ErrToolNotFound — an active tool must never resolve a retired type's gating
+-- data for the start (the row is non-existent to the surface).
+SELECT t.id, t.name, t.tool_type_id, tt.name AS tool_type_name, tt.required_qualification_id, tt.inspection_mode
+FROM tools t
+JOIN tool_types tt ON tt.id = t.tool_type_id
+WHERE t.id = $1 AND t.archived_at IS NULL AND tt.archived_at IS NULL;
+
 -- name: CreateTool :one
 -- Insert a tool and return the resulting row JOINed with its type name. The
 -- inventory number is AUTO-ASSIGNED in-SQL (Story 4-3b): 'GEAR' || zero-padded

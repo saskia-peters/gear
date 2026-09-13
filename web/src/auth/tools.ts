@@ -15,10 +15,13 @@ import { ApiError, request, authTokenHeaders } from './http.ts'
 // truth). Kept here so the per-tab gating cannot drift from the server code.
 // TOOL_EDIT_PERMISSION (Story 4-3b) is the scoped tool-EDIT code: a holder can
 // view + edit tools (incl. the inventory number) but NOT create/archive those
-// stays tools.manage-only.
+// stays tools.manage-only. INSPECTION_SUBMIT_PERMISSION (Story 5.1) is the
+// inspection-start/submit gate (all base roles hold it), mirroring the server
+// const InspectionSubmitPermission.
 export const TOOL_TYPES_PERMISSION = 'tool_types.manage'
 export const TOOLS_PERMISSION = 'tools.manage'
 export const TOOL_EDIT_PERMISSION = 'tool.edit'
+export const INSPECTION_SUBMIT_PERMISSION = 'inspection.submit'
 
 export type InspectionMode = 'pass_fail' | 'checklist'
 
@@ -264,6 +267,37 @@ const DASHBOARD_TOOLS_URL = '/api/v1/tools'
 export async function listDashboardTools(): Promise<DashboardTool[]> {
   const data = (await request(DASHBOARD_TOOLS_URL, { headers: authTokenHeaders() })) as DashboardTool[] | null
   return Array.isArray(data) ? data : []
+}
+
+// ============================================================================
+// Inspection start (Story 5.1, FR-11/AD-7): the qualification-gated inspection
+// start — the first Epic 5 surface. The server resolves the tool's type
+// required_qualification_id (intra-module) and checks the caller's granted
+// qualifications through the User module's port (EXPIRY-AWARE); the SPA button
+// is a UX affordance only — the 403 IS the gate (AD-6, never client-side
+// trust).
+// ============================================================================
+
+// InspectionStart is the eligible POST /api/v1/tools/{id}/inspection/start
+// payload: the tool plus its type's inspection_mode — enough for the stub
+// inspection screen (the real screen is Stories 5.2/5.4/5.5).
+export interface InspectionStart {
+  tool_id: string
+  tool_name: string
+  tool_type_id: string
+  tool_type_name: string
+  inspection_mode: InspectionMode
+}
+
+// startInspection POSTs the inspection start for a tool. 200 → eligible (the
+// SPA navigates to /inspection/:toolId); 403 → ApiError with the server's
+// German reason (missing/expired required qualification, or no
+// inspection.submit); 401 → stale/revoked session (the caller logs in again).
+export async function startInspection(toolId: string): Promise<InspectionStart> {
+  return (await request(`${DASHBOARD_TOOLS_URL}/${encodeURIComponent(toolId)}/inspection/start`, {
+    method: 'POST',
+    headers: authTokenHeaders(),
+  })) as InspectionStart
 }
 
 export { ApiError }

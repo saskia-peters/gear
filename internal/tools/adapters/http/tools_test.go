@@ -3,10 +3,13 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/go-chi/chi/v5"
 
 	"github.com/saskia-peters/gear/internal/platform/auth"
 	"github.com/saskia-peters/gear/internal/platform/httpapi"
@@ -22,6 +25,7 @@ type fakeToolService struct {
 	listErr    error
 	writeErr   error
 	archiveErr error
+	startErr   error
 	lastInput  toolscore.ToolInput
 	lastID     string
 }
@@ -97,6 +101,20 @@ func (f *fakeToolService) ArchiveTool(_ context.Context, _, id string) (*toolsco
 	return &toolscore.Tool{ID: id, Name: "archiviert", ToolTypeName: "Bohrmaschine", ArchivedAt: &now}, nil
 }
 
+func (f *fakeToolService) StartInspection(_ context.Context, _, toolID string) (*toolscore.InspectionStartResult, error) {
+	if f.startErr != nil {
+		return nil, f.startErr
+	}
+	f.lastID = toolID
+	return &toolscore.InspectionStartResult{
+		ToolID:         toolID,
+		ToolName:       "Bohrmaschine-01",
+		ToolTypeID:     "id-t1",
+		ToolTypeName:   "Bohrmaschine",
+		InspectionMode: toolscore.InspectionModeChecklist,
+	}, nil
+}
+
 var _ toolports.Service = (*fakeToolService)(nil)
 
 // toolGateway wraps the REAL ToolRoutes() behind the same ANY-of gate the
@@ -123,6 +141,42 @@ func dashboardToolGateway(perms []string, session *usercore.Session, svc toolpor
 		&gateResolver{perms: perms},
 		toolscore.DashboardViewPermission,
 	)(h.DashboardToolsRoutes())
+}
+
+// toolsInspectionGateway mimics the composition-root combined /api/v1/tools
+// router (Story 5.1): the dashboard list surface (GET /, dashboard.view) AND
+// the inspection-start surface (POST /{id}/inspection/start, inspection.submit)
+// combined via exact-match Handle + prefix Mount, EACH behind its OWN gate — so
+// the composition mount gate test is exercised here (a dashboard.view-but-not-
+// inspection.submit caller reads the list but 403s on the start). The inspection
+// surface is mounted at the full path prefix; InspectionRoutes owns the route.
+func toolsInspectionGateway(perms []string, session *usercore.Session, svc toolports.Service) http.Handler {
+	h := NewHandler(svc, &gateValidator{session: session}, &gateResolver{perms: perms}, discardLogger())
+	dashboardSurface := auth.RequirePermission(
+		&gateValidator{session: session},
+		&gateResolver{perms: perms},
+		toolscore.DashboardViewPermission,
+	)(h.DashboardToolsRoutes())
+	inspectionSurface := auth.RequirePermission(
+		&gateValidator{session: session},
+		&gateResolver{perms: perms},
+		toolscore.InspectionSubmitPermission,
+	)(h.InspectionRoutes())
+	combined := chi.NewRouter()
+	combined.NotFound(httpapi.NotFoundHandler())
+	combined.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
+	combined.Handle("/", dashboardSurface)
+	combined.Mount("/{id}/inspection/start", inspectionSurface)
+	return combined
+}
+
+// nakedInspectionRouter exposes the InspectionRoutes router WITHOUT the auth
+// gateway, so the handler's own guards (the nil-user 401) are directly testable
+// — unreachable through the gated composition but still defense-in-depth at the
+// handler layer.
+func nakedInspectionRouter(svc toolports.Service) http.Handler {
+	h := NewHandler(svc, &gateValidator{}, &gateResolver{}, discardLogger())
+	return h.InspectionRoutes()
 }
 
 func toolFixture(id, name string) *toolscore.Tool {
@@ -872,5 +926,221 @@ func TestToolsEditOnlyCanEditAttributes(t *testing.T) {
 	}
 	if svc.lastInput.Attributes == nil || svc.lastInput.Attributes["standort"] != "Werkstatt" {
 		t.Errorf("core input attributes = %+v, want the submitted set", svc.lastInput.Attributes)
+	}
+}
+
+// ============================================================================
+// Inspection start (Story 5.1, FR-11/AD-7): the qualification-gated
+// POST /api/v1/tools/{id}/inspection/start surface behind inspection.submit.
+// ============================================================================
+
+func TestInspectionStartEligible(t *testing.T) {
+	// START_ELIGIBLE: an inspection.submit holder (who also reads the dashboard)
+	// starts an inspection → 200 with the tool + its type's inspection_mode DTO.
+	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, activeAdmin(), &fakeToolService{})
+	rec := doRequest(surface, http.MethodPost, "/id-a/inspection/start", "tok", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding err = %v", err)
+	}
+	if body["tool_id"] != "id-a" || body["tool_name"] != "Bohrmaschine-01" {
+		t.Errorf("tool = %+v, want id-a / Bohrmaschine-01", body)
+	}
+	if body["tool_type_id"] != "id-t1" || body["tool_type_name"] != "Bohrmaschine" {
+		t.Errorf("type = %+v, want id-t1 / Bohrmaschine", body)
+	}
+	if body["inspection_mode"] != toolscore.InspectionModeChecklist {
+		t.Errorf("mode = %+v, want %q", body["inspection_mode"], toolscore.InspectionModeChecklist)
+	}
+}
+
+func TestInspectionStartMissingQual(t *testing.T) {
+	// START_MISSING_QUAL: the tool's type requires a qualification the caller
+	// lacks → 403 uniform envelope with the German reason.
+	svc := &fakeToolService{startErr: toolscore.ErrToolQualificationMissing}
+	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPost, "/id-a/inspection/start", "tok", "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 403 err = %v", err)
+	}
+	if env.Error.Code != "forbidden" {
+		t.Errorf("code = %q, want forbidden", env.Error.Code)
+	}
+	if env.Error.Message != toolscore.MsgToolQualificationMissing {
+		t.Errorf("message = %q, want %q", env.Error.Message, toolscore.MsgToolQualificationMissing)
+	}
+	if strings.Contains(strings.ToLower(rec.Body.String()), "bohrmaschine") {
+		t.Errorf("403 body leaks tool data: %s", rec.Body.String())
+	}
+}
+
+func TestInspectionStartToolNotFound(t *testing.T) {
+	// START_TOOL_NOT_FOUND: unknown / archived tool → 404 uniform envelope.
+	svc := &fakeToolService{startErr: toolscore.ErrToolNotFound}
+	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPost, "/id-missing/inspection/start", "tok", "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 404 err = %v", err)
+	}
+	if env.Error.Code != "not_found" {
+		t.Errorf("code = %q, want not_found", env.Error.Code)
+	}
+	if env.Error.Message != toolscore.MsgToolNotFound {
+		t.Errorf("message = %q, want %q", env.Error.Message, toolscore.MsgToolNotFound)
+	}
+}
+
+func TestInspectionStartUnauthenticated(t *testing.T) {
+	// START_UNAUTHENTICATED: no session → 401 uniform envelope.
+	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, nil, &fakeToolService{})
+	rec := doRequest(surface, http.MethodPost, "/id-a/inspection/start", "", "")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 401 err = %v", err)
+	}
+	if env.Error.Code != "unauthorized" {
+		t.Errorf("code = %q, want unauthorized", env.Error.Code)
+	}
+}
+
+func TestInspectionStartCompositionMountGate(t *testing.T) {
+	// Composition mount gate (Story 5.1): the start surface is a SIBLING to the
+	// dashboard list — a dashboard.view-but-not-inspection.submit caller (e.g. a
+	// report-only role) can still READ the Werkzeugliste but the start answers
+	// the generic 403 with NO tool data. The inspection.submit holder passes.
+	svc := &fakeToolService{tools: []*toolscore.Tool{toolFixture("id-a", "Bohrmaschine-01")}}
+
+	// dashboard.view WITHOUT inspection.submit: list 200, start 403.
+	dashboardOnly := toolsInspectionGateway([]string{toolscore.DashboardViewPermission}, activeAdmin(), svc)
+	if rec := doRequest(dashboardOnly, http.MethodGet, "/", "tok", ""); rec.Code != http.StatusOK {
+		t.Fatalf("dashboard GET status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	rec := doRequest(dashboardOnly, http.MethodPost, "/id-a/inspection/start", "tok", "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("start status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 403 err = %v", err)
+	}
+	if env.Error.Code != "forbidden" {
+		t.Errorf("code = %q, want forbidden", env.Error.Code)
+	}
+	if strings.Contains(strings.ToLower(rec.Body.String()), "bohrmaschine") || strings.Contains(rec.Body.String(), "id-a") {
+		t.Errorf("403 body leaks tool data: %s", rec.Body.String())
+	}
+
+	// inspection.submit WITHOUT dashboard.view: the start 200s (the mount gate),
+	// the dashboard list 403s (its own gate).
+	submitOnly := toolsInspectionGateway([]string{toolscore.InspectionSubmitPermission}, activeAdmin(), svc)
+	if rec := doRequest(submitOnly, http.MethodPost, "/id-a/inspection/start", "tok", ""); rec.Code != http.StatusOK {
+		t.Fatalf("start (submit-only) status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if rec := doRequest(submitOnly, http.MethodGet, "/", "tok", ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("dashboard GET (submit-only) status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestInspectionStartMethodNotAllowedEnvelope(t *testing.T) {
+	// Only POST is registered on the start surface: GET answers the uniform 405.
+	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, activeAdmin(), &fakeToolService{})
+	rec := doRequest(surface, http.MethodGet, "/id-a/inspection/start", "tok", "")
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 405 err = %v", err)
+	}
+	if env.Error.Code != "method_not_allowed" {
+		t.Errorf("code = %q, want method_not_allowed", env.Error.Code)
+	}
+}
+
+func TestInspectionStartInternalErrorEnvelope(t *testing.T) {
+	// DEFAULT branch (mapInspectionError): an UNEXPECTED service error → 500
+	// internal_error uniform envelope with the German message, and NO tool data
+	// leak — the raw error never reaches the client.
+	svc := &fakeToolService{startErr: errors.New("boom")}
+	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPost, "/id-a/inspection/start", "tok", "")
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 500 err = %v", err)
+	}
+	if env.Error.Code != "internal_error" {
+		t.Errorf("code = %q, want internal_error", env.Error.Code)
+	}
+	if env.Error.Message != "Ein interner Fehler ist aufgetreten." {
+		t.Errorf("message = %q, want the German internal-error microcopy", env.Error.Message)
+	}
+	if strings.Contains(strings.ToLower(rec.Body.String()), "bohrmaschine") || strings.Contains(rec.Body.String(), "id-a") {
+		t.Errorf("500 body leaks tool data: %s", rec.Body.String())
+	}
+}
+
+func TestInspectionStartForbiddenEnvelope(t *testing.T) {
+	// ErrForbidden branch (mapInspectionError): the core re-check can deny a
+	// caller whose live set lost inspection.submit between the gateway and the
+	// core (defense-in-depth, AD-6). The handler maps it to the generic 403 with
+	// no hint of what is missing (FR-19) and no tool data.
+	svc := &fakeToolService{startErr: toolscore.ErrForbidden}
+	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPost, "/id-a/inspection/start", "tok", "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 403 err = %v", err)
+	}
+	if env.Error.Code != "forbidden" {
+		t.Errorf("code = %q, want forbidden", env.Error.Code)
+	}
+	if env.Error.Message != "Keine Berechtigung." {
+		t.Errorf("message = %q, want the generic no-hint forbidden microcopy", env.Error.Message)
+	}
+	if strings.Contains(strings.ToLower(rec.Body.String()), "bohrmaschine") || strings.Contains(rec.Body.String(), "id-a") {
+		t.Errorf("403 body leaks tool data: %s", rec.Body.String())
+	}
+}
+
+func TestInspectionStartNilUserUnauthorized(t *testing.T) {
+	// The handler's nil-user 401 guard is unreachable through the gated
+	// composition (the gateway always sets the user), but it is still
+	// defense-in-depth at the handler layer (a direct caller must never see the
+	// start without a session). Drive it through the NAKED router (no gateway,
+	// route owned at "/") — no user in the context → uniform 401.
+	surface := nakedInspectionRouter(&fakeToolService{})
+	rec := doRequest(surface, http.MethodPost, "/", "", "")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 401 err = %v", err)
+	}
+	if env.Error.Code != "unauthorized" {
+		t.Errorf("code = %q, want unauthorized", env.Error.Code)
+	}
+	if strings.Contains(strings.ToLower(rec.Body.String()), "bohrmaschine") {
+		t.Errorf("401 body leaks tool data: %s", rec.Body.String())
 	}
 }

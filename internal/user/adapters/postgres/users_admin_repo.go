@@ -149,23 +149,51 @@ func (r *Repository) GetUserDetail(ctx context.Context, userID string) (*core.Ad
 		detail.DirectGrants = append(detail.DirectGrants, core.DirectGrantRef{PermissionID: uuidToString(row.ID.Bytes), Code: row.Code, GrantedAt: row.GrantedAt.Time})
 	}
 	for _, row := range quals {
-		a := core.QualificationAssignment{
-			ID:          uuidToString(row.ID.Bytes),
-			Name:        row.Name,
-			Description: row.Description,
-			ExpiryKind:  row.ExpiryKind,
-			AssignedAt:  row.AssignedAt.Time,
-		}
-		// Per-assignment valid-until (Spec 2.9): the per-assignment expires_at
-		// IS the only valid-until (the vocabulary has no date, 2026-09-08
-		// rework). NULL = an unlimited assignment, never expires. The core's
-		// qualificationStatus derives the display status from ExpiryKind +
-		// ExpiresAt.
-		if row.AssignedExpiresAt.Valid {
-			t := row.AssignedExpiresAt.Time
-			a.ExpiresAt = &t
-		}
-		detail.Qualifications = append(detail.Qualifications, a)
+		detail.Qualifications = append(detail.Qualifications, qualificationAssignmentFromRow(row))
 	}
 	return detail, nil
+}
+
+// ListUserQualificationAssignments returns the qualification assignments of a
+// user (Spec 2.9, Story 5.1): the vocabulary row plus the PER-ASSIGNMENT
+// expires_at (NULL for an unlimited assignment, never expires), ordered by
+// qualification name. It reuses the ListUserQualifications query (the same read
+// the user detail composes) and is the persistence seam behind the core's
+// expiry-aware UserHoldsQualification (AD-7/FR-22). An unknown or malformed
+// user id yields an empty list (eligibility is a read; the caller already holds
+// an authenticated session). No secret material is selected.
+func (r *Repository) ListUserQualificationAssignments(ctx context.Context, userID string) ([]core.QualificationAssignment, error) {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return []core.QualificationAssignment{}, nil
+	}
+	rows, err := r.queries.ListUserQualifications(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]core.QualificationAssignment, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, qualificationAssignmentFromRow(row))
+	}
+	return out, nil
+}
+
+// qualificationAssignmentFromRow maps one ListUserQualifications row to the
+// domain assignment: the per-assignment expires_at IS the only valid-until (the
+// vocabulary has no date, 2026-09-08 rework). NULL = an unlimited assignment,
+// never expires. The core derives the display status (and the expiry-aware
+// eligibility) from ExpiryKind + ExpiresAt.
+func qualificationAssignmentFromRow(row ListUserQualificationsRow) core.QualificationAssignment {
+	a := core.QualificationAssignment{
+		ID:          uuidToString(row.ID.Bytes),
+		Name:        row.Name,
+		Description: row.Description,
+		ExpiryKind:  row.ExpiryKind,
+		AssignedAt:  row.AssignedAt.Time,
+	}
+	if row.AssignedExpiresAt.Valid {
+		t := row.AssignedExpiresAt.Time
+		a.ExpiresAt = &t
+	}
+	return a
 }

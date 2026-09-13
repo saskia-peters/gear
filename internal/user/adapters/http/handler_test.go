@@ -1964,6 +1964,10 @@ func (r *changePasswordRepo) UpdateUserQualificationExpiry(_ context.Context, _,
 	return nil
 }
 
+func (r *changePasswordRepo) ListUserQualificationAssignments(_ context.Context, _ string) ([]core.QualificationAssignment, error) {
+	return []core.QualificationAssignment{}, nil
+}
+
 func (r *changePasswordRepo) InsertAuditEvent(_ context.Context, _ string, operation, _, _ string) error {
 	r.audit = append(r.audit, operation)
 	return nil

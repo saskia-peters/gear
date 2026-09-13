@@ -133,6 +133,20 @@ type Tool struct {
 	UpdatedAt       time.Time
 }
 
+// ToolWithTypeQualification is the lean inspection-start read (Story 5.1,
+// FR-11/AD-7): the ACTIVE tool plus its type's required_qualification_id and
+// inspection_mode. It is deliberately a DISTINCT shape from the list DTO so the
+// qualification gate / start response never couples the ListTools path to the
+// type's gating data (the spec's lean-method preference).
+type ToolWithTypeQualification struct {
+	ID                      string
+	Name                    string
+	ToolTypeID              string
+	ToolTypeName            string
+	RequiredQualificationID string
+	InspectionMode          string
+}
+
 // ToolInput is the shared POST/PUT body (FR-9/FR-10). ScheduleID is the
 // OPTIONAL per-tool override: empty → the tool inherits its type's default
 // (AD-5). Attributes is the no-migration JSONB extension surface (Story 4.4,
@@ -164,12 +178,17 @@ type ToolInput struct {
 // an already-archived row (and a missing id) with ErrToolNotFound.
 // ArchiveTool soft-archives one tool (guarded archived_at IS NULL) — a missing
 // or already-archived id answers ErrToolNotFound.
+// GetToolWithTypeQualification is the lean inspection-start read (Story 5.1,
+// FR-11/AD-7): given a tool id it returns the ACTIVE tool plus its type's
+// required_qualification_id and inspection_mode (intra-module JOIN on Tool-owned
+// tool_types). A missing or already-archived id answers ErrToolNotFound.
 type ToolStore interface {
 	ListTools(ctx context.Context) ([]*Tool, error)
 	ToolExistsActive(ctx context.Context, id string) (bool, error)
 	CreateTool(ctx context.Context, tool *Tool) (*Tool, error)
 	UpdateTool(ctx context.Context, tool *Tool) (*Tool, error)
 	ArchiveTool(ctx context.Context, id string) (*Tool, error)
+	GetToolWithTypeQualification(ctx context.Context, id string) (*ToolWithTypeQualification, error)
 }
 
 // toolModuleStore is the combined persistence port the Service consumes: the

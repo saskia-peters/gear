@@ -16,9 +16,12 @@ import (
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/go-chi/chi/v5"
+
 	"github.com/saskia-peters/gear/internal/platform/auth"
 	"github.com/saskia-peters/gear/internal/platform/config"
 	"github.com/saskia-peters/gear/internal/platform/crypto"
+	"github.com/saskia-peters/gear/internal/platform/httpapi"
 	"github.com/saskia-peters/gear/internal/platform/logger"
 	"github.com/saskia-peters/gear/internal/platform/router"
 	admcore "github.com/saskia-peters/gear/internal/admin/core"
@@ -162,6 +165,28 @@ func main() {
 	// (Story 6.1 owns the color-coded dashboard).
 	dashboardToolsSurface := auth.RequirePermission(sessionManager, userRepo, toolscore.DashboardViewPermission)(toolHandler.DashboardToolsRoutes())
 
+	// Story 5.1 — the qualification-gated inspection START is a NEW surface
+	// under /api/v1/tools with its OWN gate — one permission per surface
+	// (AD-6, FR-11/AD-7): only `inspection.submit` holders (all base roles) reach
+	// it. The core re-checks the exact code defense-in-depth (AD-6) and resolves
+	// the caller's granted qualifications through the User module's
+	// QualificationCatalogPort (expiry-aware). It deliberately does NOT widen the
+	// dashboard.view gate — a dashboard.view-but-not-inspection.submit caller can
+	// still read the Werkzeugliste but 403s on the start.
+	inspectionStartSurface := auth.RequirePermission(sessionManager, userRepo, toolscore.InspectionSubmitPermission)(toolHandler.InspectionRoutes())
+
+	// The two /api/v1/tools surfaces are combined into ONE router: the dashboard
+	// list (GET /, dashboard.view) and the inspection start (POST
+	// /{id}/inspection/start, inspection.submit). The inspection surface is
+	// mounted at the full path prefix (chi Mount strips it and preserves the
+	// {id} param) — InspectionRoutes owns the route pattern, never duplicated
+	// here. Each surface keeps ITS OWN gate — no shared middleware.
+	toolsSurface := chi.NewRouter()
+	toolsSurface.NotFound(httpapi.NotFoundHandler())
+	toolsSurface.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
+	toolsSurface.Handle("/", dashboardToolsSurface)
+	toolsSurface.Mount("/{id}/inspection/start", inspectionStartSurface)
+
 	// Demo route for the gateway composition tests: any active user holding
 	// `dashboard.view` (all base roles) can reach /api/v1/protected/me.
 	protectedRoute := auth.Route(sessionManager, userRepo, "dashboard.view")
@@ -177,7 +202,7 @@ func main() {
 		router.WithMount("/api/v1/admin/settings/schedules", schedulesSurface),
 		router.WithMount("/api/v1/admin/tool-types", toolTypesSurface),
 		router.WithMount("/api/v1/admin/tools", toolToolsSurface),
-		router.WithMount("/api/v1/tools", dashboardToolsSurface),
+		router.WithMount("/api/v1/tools", toolsSurface),
 	)
 
 	srv := &http.Server{

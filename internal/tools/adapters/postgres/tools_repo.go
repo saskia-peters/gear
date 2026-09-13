@@ -210,6 +210,41 @@ func (r *Repository) ToolExistsActive(ctx context.Context, id string) (bool, err
 	return r.queries.ToolExistsActive(ctx, uid)
 }
 
+// GetToolWithTypeQualification is the lean inspection-start read (Story 5.1,
+// FR-11/AD-7): it returns the ACTIVE tool plus its type's
+// required_qualification_id and inspection_mode (intra-module JOIN on
+// Tool-owned tool_types). A missing, malformed or already-archived id — OR a
+// tool whose type is itself archived — answers core.ErrToolNotFound (the
+// `archived_at IS NULL` guards affect zero rows then — the row is non-existent
+// to the surface). A type with NO required qualification maps to an EMPTY
+// string (the SQL NULL → "" semantics are made explicit here, never an
+// incidental zero-UUID).
+func (r *Repository) GetToolWithTypeQualification(ctx context.Context, id string) (*core.ToolWithTypeQualification, error) {
+	uid, err := parseOptionalUUID(id)
+	if err != nil {
+		return nil, core.ErrToolNotFound
+	}
+	row, err := r.queries.GetToolWithTypeQualification(ctx, uid)
+	if errors.Is(err, pgx.ErrNoRows) {
+		return nil, core.ErrToolNotFound
+	}
+	if err != nil {
+		return nil, err
+	}
+	requiredQualificationID := ""
+	if row.RequiredQualificationID.Valid {
+		requiredQualificationID = row.RequiredQualificationID.String()
+	}
+	return &core.ToolWithTypeQualification{
+		ID:                      row.ID.String(),
+		Name:                    row.Name,
+		ToolTypeID:              row.ToolTypeID.String(),
+		ToolTypeName:            row.ToolTypeName,
+		RequiredQualificationID: requiredQualificationID,
+		InspectionMode:          row.InspectionMode,
+	}, nil
+}
+
 // toolFromRow maps an sqlc tool row (already JOINed with its type name) to the
 // domain value. The stored attributes jsonb is unmarshalled into the map
 // (default '{}'); a malformed non-object value surfaces as a clear error rather

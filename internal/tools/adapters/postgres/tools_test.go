@@ -8,6 +8,7 @@ import (
 	"regexp"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
@@ -307,6 +308,96 @@ func TestPostgresToolsStore(t *testing.T) {
 	}
 	if !foundConflict {
 		t.Error("conflict target missing from the active list")
+	}
+}
+
+// TestPostgresToolGetWithTypeQualification pins the Story 5.1 lean
+// inspection-start read (FR-11/AD-7): GetToolWithTypeQualification returns the
+// ACTIVE tool plus its type's required_qualification_id and inspection_mode
+// (intra-module JOIN on Tool-owned tool_types). A missing / archived tool id
+// answers core.ErrToolNotFound.
+func TestPostgresToolGetWithTypeQualification(t *testing.T) {
+	pool := toolTestPool(t)
+	ctx := context.Background()
+	t.Cleanup(func() { pool.Close() })
+
+	repo := NewRepository(New(pool))
+	// seedToolRefs already cleans up test-% rows and seeds a Test- tool type
+	// (required_qualification_id NULL, pass_fail mode) + a Test- schedule.
+	toolTypeID, _ := seedToolRefs(t, ctx, pool)
+
+	// Seed a qualification so the type can REQUIRE one.
+	qualName := "Test-Quali-" + strings.ReplaceAll(time.Now().Format("20060102150405.000000"), ".", "")
+	var qualID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO qualifications (name, description, expiry_kind) VALUES ($1, '', 'unlimited') RETURNING id`, qualName,
+	).Scan(&qualID); err != nil {
+		t.Fatalf("seeding qualification err = %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, "DELETE FROM qualifications WHERE id = $1", qualID)
+	})
+
+	// Give the type a required qualification + checklist mode, then a tool.
+	if _, err := pool.Exec(ctx,
+		`UPDATE tool_types SET required_qualification_id = $1, inspection_mode = 'checklist' WHERE id = $2`,
+		qualID, toolTypeID,
+	); err != nil {
+		t.Fatalf("updating type with required qualification err = %v", err)
+	}
+	tool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Start-Lesen", ToolTypeID: toolTypeID})
+	if err != nil {
+		t.Fatalf("CreateTool err = %v", err)
+	}
+
+	// READ: the tool comes back with its type's required qualification + mode.
+	got, err := repo.GetToolWithTypeQualification(ctx, tool.ID)
+	if err != nil {
+		t.Fatalf("GetToolWithTypeQualification err = %v", err)
+	}
+	if got.ID != tool.ID || got.Name != "Test-Start-Lesen" {
+		t.Errorf("tool = %+v, want id %q / name", got, tool.ID)
+	}
+	if got.ToolTypeID != toolTypeID || got.ToolTypeName != "Test-Geraetetyp" {
+		t.Errorf("type = %+v, want the JOINed type", got)
+	}
+	if got.RequiredQualificationID != qualID {
+		t.Errorf("required_qualification_id = %q, want %q", got.RequiredQualificationID, qualID)
+	}
+	if got.InspectionMode != core.InspectionModeChecklist {
+		t.Errorf("inspection_mode = %q, want %q", got.InspectionMode, core.InspectionModeChecklist)
+	}
+
+	// MISSING: an unknown id → ErrToolNotFound (never a raw 500).
+	if _, err := repo.GetToolWithTypeQualification(ctx, "00000000-0000-0000-0000-000000000000"); !errors.Is(err, core.ErrToolNotFound) {
+		t.Fatalf("missing id err = %v, want ErrToolNotFound", err)
+	}
+
+	// ARCHIVED TOOL: an archived tool is non-existent to the surface → the 404
+	// sentinel (the tool-side guard).
+	archivedTool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Start-Archiv", ToolTypeID: toolTypeID})
+	if err != nil {
+		t.Fatalf("CreateTool(archived candidate) err = %v", err)
+	}
+	if _, err := repo.ArchiveTool(ctx, archivedTool.ID); err != nil {
+		t.Fatalf("ArchiveTool err = %v", err)
+	}
+	if _, err := repo.GetToolWithTypeQualification(ctx, archivedTool.ID); !errors.Is(err, core.ErrToolNotFound) {
+		t.Fatalf("archived tool err = %v, want ErrToolNotFound", err)
+	}
+
+	// ARCHIVED TYPE: an ACTIVE tool whose type was soft-archived must NOT
+	// resolve the retired type's required_qualification_id / inspection_mode —
+	// the type-side JOIN guard (tt.archived_at IS NULL) answers the 404 sentinel.
+	orphanedTool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Start-Waise", ToolTypeID: toolTypeID})
+	if err != nil {
+		t.Fatalf("CreateTool(orphan candidate) err = %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE tool_types SET archived_at = now(), updated_at = now() WHERE id = $1`, toolTypeID); err != nil {
+		t.Fatalf("archiving tool type err = %v", err)
+	}
+	if _, err := repo.GetToolWithTypeQualification(ctx, orphanedTool.ID); !errors.Is(err, core.ErrToolNotFound) {
+		t.Fatalf("active tool with archived type err = %v, want ErrToolNotFound (no retired-type resolution)", err)
 	}
 }
 

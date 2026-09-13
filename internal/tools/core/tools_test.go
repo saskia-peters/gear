@@ -123,6 +123,36 @@ func (f *fakeToolStore) ToolTypeExistsActive(_ context.Context, id string) (bool
 	return false, nil
 }
 
+// GetToolWithTypeQualification is the lean inspection-start read (Story 5.1):
+// the ACTIVE tool plus its type's required_qualification_id and inspection_mode
+// (intra-module JOIN on the Tool-owned types). A missing or archived tool (or a
+// tool whose type is absent from the fake — a wiring defect) answers
+// ErrToolNotFound.
+func (f *fakeToolStore) GetToolWithTypeQualification(_ context.Context, id string) (*ToolWithTypeQualification, error) {
+	for _, t := range f.tools {
+		if t.ID != id {
+			continue
+		}
+		if t.ArchivedAt != nil {
+			return nil, ErrToolNotFound
+		}
+		for _, tt := range f.types {
+			if tt.ID == t.ToolTypeID {
+				return &ToolWithTypeQualification{
+					ID:                      t.ID,
+					Name:                    t.Name,
+					ToolTypeID:              t.ToolTypeID,
+					ToolTypeName:            t.ToolTypeName,
+					RequiredQualificationID: tt.RequiredQualificationID,
+					InspectionMode:          tt.InspectionMode,
+				}, nil
+			}
+		}
+		return nil, ErrToolNotFound
+	}
+	return nil, ErrToolNotFound
+}
+
 func (f *fakeToolStore) CreateToolType(_ context.Context, tt *ToolType) (*ToolType, error) {
 	return nil, ErrToolTypeNotFound
 }

@@ -233,3 +233,150 @@ func TestPostgresQualificationManagement(t *testing.T) {
 		t.Errorf("UpdateQualification(unknown id, taken name) err = %v, want ErrQualificationNotFound (never 409)", err)
 	}
 }
+
+// TestPostgresUserQualificationEligibility covers the Story 5.1 granted-
+// qualification read (FR-11/AD-7): ListUserQualificationAssignments returns the
+// user's assignments with the PER-ASSIGNMENT expires_at, and the REAL core
+// service derives expiry-aware eligibility via UserHoldsQualification — a fixed
+// assignment past its expires_at counts as NOT held, an unlimited one is always
+// held.
+func TestPostgresUserQualificationEligibility(t *testing.T) {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Skipf("skipping db integration test: %v", err)
+	}
+	defer pool.Close()
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping db integration test (db ping failed): %v", err)
+	}
+
+	repo := NewRepository(New(pool))
+	stamp := time.Now().Format("20060102150405.000000")
+	volunteerEmail := "eligvol." + stamp + "@gear.local"
+	fixedName := "elig.fixed." + stamp
+	unlimitedName := "elig.unlimited." + stamp
+
+	cleanupPool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Fatalf("creating cleanup pool failed: %v", err)
+	}
+	t.Cleanup(func() { cleanupPool.Close() })
+	t.Cleanup(func() {
+		if _, err := cleanupPool.Exec(context.Background(), "DELETE FROM users WHERE email = $1", volunteerEmail); err != nil {
+			t.Errorf("cleaning up user %q failed: %v", volunteerEmail, err)
+		}
+		if _, err := cleanupPool.Exec(context.Background(), "DELETE FROM qualifications WHERE lower(name) = lower($1)", fixedName); err != nil {
+			t.Errorf("cleaning up fixed qualification failed: %v", err)
+		}
+		if _, err := cleanupPool.Exec(context.Background(), "DELETE FROM qualifications WHERE lower(name) = lower($1)", unlimitedName); err != nil {
+			t.Errorf("cleaning up unlimited qualification failed: %v", err)
+		}
+	})
+
+	volunteer, err := repo.CreateAdminUser(ctx, volunteerEmail, "Elig", "Volunteer", string(core.StateActive), nil, nil, nil)
+	if err != nil {
+		t.Fatalf("CreateAdminUser failed: %v", err)
+	}
+
+	unlimited, err := repo.CreateQualification(ctx, unlimitedName, "Unbegrenzt", core.QualificationExpiryUnlimited)
+	if err != nil {
+		t.Fatalf("CreateQualification(unlimited) failed: %v", err)
+	}
+	fixed, err := repo.CreateQualification(ctx, fixedName, "Befristet", core.QualificationExpiryFixed)
+	if err != nil {
+		t.Fatalf("CreateQualification(fixed) failed: %v", err)
+	}
+
+	// Grant the unlimited qualification (no per-assignment expiry) and the fixed
+	// one with an ALREADY-EXPIRED per-assignment valid-until.
+	if err := repo.AssignQualificationToUser(ctx, volunteer.ID, unlimited.ID, nil); err != nil {
+		t.Fatalf("AssignQualificationToUser(unlimited) failed: %v", err)
+	}
+	past := time.Now().UTC().Add(-time.Hour)
+	if err := repo.AssignQualificationToUser(ctx, volunteer.ID, fixed.ID, &past); err != nil {
+		t.Fatalf("AssignQualificationToUser(fixed, past) failed: %v", err)
+	}
+
+	// READ: the assignments come back with the per-assignment expires_at
+	// (the unlimited one without, the fixed one with the past date).
+	assignments, err := repo.ListUserQualificationAssignments(ctx, volunteer.ID)
+	if err != nil {
+		t.Fatalf("ListUserQualificationAssignments failed: %v", err)
+	}
+	if len(assignments) != 2 {
+		t.Fatalf("assignments = %d, want 2", len(assignments))
+	}
+	byName := map[string]core.QualificationAssignment{}
+	for _, a := range assignments {
+		byName[a.Name] = a
+	}
+	unlim, ok := byName[unlimitedName]
+	if !ok || unlim.ExpiryKind != core.QualificationExpiryUnlimited || unlim.ExpiresAt != nil {
+		t.Errorf("unlimited assignment = %+v, want unlimited with no expires_at", unlim)
+	}
+	fxd, ok := byName[fixedName]
+	if !ok || fxd.ExpiryKind != core.QualificationExpiryFixed || fxd.ExpiresAt == nil {
+		t.Fatalf("fixed assignment = %+v, want fixed with a per-assignment expires_at", fxd)
+	}
+	if !fxd.ExpiresAt.UTC().Truncate(time.Microsecond).Equal(past.UTC().Truncate(time.Microsecond)) {
+		t.Errorf("fixed expires_at = %v, want %v", fxd.ExpiresAt, past)
+	}
+
+	// ELIGIBILITY via the real core service (Story 5.1): the unlimited
+	// qualification is held; the EXPIRED fixed assignment counts as NOT held.
+	hasher := crypto.NewHasher()
+	sm := core.NewSessionManager(repo, time.Hour)
+	svc := core.NewService(repo, hasher, sm, nil, discardLogger())
+
+	held, err := svc.UserHoldsQualification(ctx, volunteer.ID, unlimited.ID)
+	if err != nil {
+		t.Fatalf("UserHoldsQualification(unlimited) err = %v", err)
+	}
+	if !held {
+		t.Error("UserHoldsQualification(unlimited) = false, want true (never expires)")
+	}
+	held, err = svc.UserHoldsQualification(ctx, volunteer.ID, fixed.ID)
+	if err != nil {
+		t.Fatalf("UserHoldsQualification(expired fixed) err = %v", err)
+	}
+	if held {
+		t.Error("UserHoldsQualification(expired fixed) = true, want false (expired = not held, live resolution)")
+	}
+
+	// Extending the per-assignment valid-until into the FUTURE makes the same
+	// assignment held again (live resolution, AD-7/FR-22).
+	future := time.Now().UTC().Add(30 * 24 * time.Hour)
+	if err := repo.UpdateUserQualificationExpiry(ctx, volunteer.ID, fixed.ID, &future); err != nil {
+		t.Fatalf("UpdateUserQualificationExpiry(future) failed: %v", err)
+	}
+	held, err = svc.UserHoldsQualification(ctx, volunteer.ID, fixed.ID)
+	if err != nil {
+		t.Fatalf("UserHoldsQualification(future fixed) err = %v", err)
+	}
+	if !held {
+		t.Error("UserHoldsQualification(future fixed) = false, want true after the extension")
+	}
+
+	// Unknown user → empty list, not held.
+	empty, err := repo.ListUserQualificationAssignments(ctx, "00000000-0000-0000-0000-000000000000")
+	if err != nil {
+		t.Fatalf("ListUserQualificationAssignments(unknown) err = %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("unknown-user assignments = %d, want 0", len(empty))
+	}
+	held, err = svc.UserHoldsQualification(ctx, "00000000-0000-0000-0000-000000000000", unlimited.ID)
+	if err != nil {
+		t.Fatalf("UserHoldsQualification(unknown user) err = %v", err)
+	}
+	if held {
+		t.Error("UserHoldsQualification(unknown user) = true, want false")
+	}
+}

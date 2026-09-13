@@ -95,13 +95,22 @@
 
 .row {
   display: flex;
-  align-items: center;
-  justify-content: space-between;
-  gap: var(--gear-space-3);
+  flex-direction: column;
+  gap: var(--gear-space-2);
   padding: var(--gear-space-4);
   background-color: var(--gear-color-surface-raised);
   border: 1px solid var(--gear-color-border-hairline);
   border-radius: var(--gear-radius-md);
+}
+
+/* rowMain keeps the Story 4-3b layout (info left, status/action right) inside
+   the row that can now also carry an inline start error below it (Story 5.1). */
+.rowMain {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gear-space-3);
+  width: 100%;
 }
 
 .rowInfo {
@@ -120,6 +129,57 @@
 .rowMeta {
   font-size: var(--gear-font-meta-size);
   color: var(--gear-color-ink-secondary);
+}
+
+/* rowActions stacks the "verfügbar" label and the "Prüfung starten" control
+   (Story 5.1) on the right edge of the row. */
+.rowActions {
+  flex-shrink: 0;
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: var(--gear-space-2);
+}
+
+/* The "Prüfung starten" button (Story 5.1, FR-11/UX-DR9): ≥48px target, starts
+   the qualification-gated inspection. Enabled until clicked (the 403 IS the
+   gate, AD-6); disabled for the session after a 403 with the inline German
+   reason. */
+.startButton {
+  min-height: 48px;
+  padding: var(--gear-space-2) var(--gear-space-4);
+  border: 1px solid var(--gear-color-brand);
+  border-radius: var(--gear-radius-md);
+  background-color: var(--gear-color-brand);
+  color: var(--gear-color-surface-base);
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  line-height: var(--gear-font-label-line-height);
+  cursor: pointer;
+}
+
+.startButton:hover:not(:disabled) {
+  background-color: var(--gear-color-brand-hover, var(--gear-color-brand));
+}
+
+.startButton:disabled {
+  background-color: var(--gear-color-surface-muted, var(--gear-color-surface-base));
+  border-color: var(--gear-color-border-hairline);
+  color: var(--gear-color-ink-secondary);
+  cursor: not-allowed;
+}
+
+/* The inline start error (Story 5.1): the server's German reason (e.g.
+   "Erforderliche Qualifikation fehlt.") below the row. */
+.rowError {
+  margin: 0;
+  padding: var(--gear-space-2) var(--gear-space-3);
+  border-radius: var(--gear-radius-md);
+  background-color: var(--gear-color-status-red-soft);
+  border: 1px solid var(--gear-color-status-red);
+  color: var(--gear-color-status-red);
+  font-size: var(--gear-font-label-size);
+  line-height: var(--gear-font-label-line-height);
 }
 
 /* "verfügbar" is a STATIC label (Story 4-3b) — no status derivation here

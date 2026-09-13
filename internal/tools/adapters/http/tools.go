@@ -53,6 +53,18 @@ type dashboardToolDTO struct {
 	InventoryNumber string `json:"inventory_number"`
 }
 
+// inspectionStartDTO is the eligible POST /api/v1/tools/{id}/inspection/start
+// payload (Story 5.1, FR-11): the tool plus its type's inspection_mode —
+// enough for the stub inspection screen (the real screen is Stories
+// 5.2/5.4/5.5). No inspection record is created here.
+type inspectionStartDTO struct {
+	ToolID         string `json:"tool_id"`
+	ToolName       string `json:"tool_name"`
+	ToolTypeID     string `json:"tool_type_id"`
+	ToolTypeName   string `json:"tool_type_name"`
+	InspectionMode string `json:"inspection_mode"`
+}
+
 // ToolRoutes returns the Tool tool router (Story 4.3 + 4-3b, FR-9/FR-10):
 // GET/POST / and PUT /{id}, POST /{id}/archive — soft archive only, NO DELETE
 // endpoint (archived rows keep FK history intact). The outer mount gate is
@@ -100,6 +112,64 @@ func (h *Handler) DashboardToolsRoutes() http.Handler {
 	r.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
 	r.Get("/", h.ListDashboardTools)
 	return r
+}
+
+// InspectionRoutes returns the inspection-start router (Story 5.1, FR-11/AD-7):
+// the POST inspection-start handler at the router ROOT — the composition root
+// mounts this router at the full path prefix (/api/v1/tools/{id}/inspection/start
+// via chi Mount, which strips the prefix and preserves the {id} param), so the
+// route pattern is defined ONCE here and never duplicated at the mount site. The
+// whole router is gated by `inspection.submit` at the composition-root mount
+// point — its OWN gate, one permission per surface (AD-6) — so this router
+// carries no gateway itself; 404/405 answer with the uniform JSON envelope so no
+// sub-path can emit a plain-text body. No inspection record is created here
+// (Stories 5.2/5.4/5.5).
+func (h *Handler) InspectionRoutes() http.Handler {
+	r := chi.NewRouter()
+	r.NotFound(httpapi.NotFoundHandler())
+	r.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
+	r.Post("/", h.StartInspection)
+	return r
+}
+
+// StartInspection handles POST /api/v1/tools/{id}/inspection/start
+// (START_ELIGIBLE / START_QUALIFIED / START_MISSING_QUAL / START_EXPIRED_QUAL /
+// START_NO_QUAL_TYPE / START_TOOL_NOT_FOUND, Story 5.1, FR-11/AD-7): it
+// resolves the tool + its type's required qualification and checks the caller's
+// granted qualifications through the User module's port (expiry-aware). An
+// eligible caller gets 200 with the tool + its type's inspection_mode (the SPA
+// navigates to the inspection screen). Gated `inspection.submit` at the mount;
+// the core re-checks the code defense-in-depth (AD-6).
+//
+// Error mapping (uniform envelope):
+//   - 401 unauthorized when the caller is not authenticated
+//   - 403 forbidden with the German reason when the caller lacks the required
+//     qualification (missing OR expired) — or lacks inspection.submit (no tool
+//     data exposed)
+//   - 404 not_found for an unknown / archived tool id
+//   - 500 internal_error on an unexpected failure
+func (h *Handler) StartInspection(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFrom(r.Context())
+	if user == nil {
+		httpapi.WriteError(w, http.StatusUnauthorized, "unauthorized", "Authentifizierung erforderlich.")
+		return
+	}
+
+	id := chi.URLParam(r, "id")
+	result, err := h.service.StartInspection(r.Context(), user.ID, id)
+	if err != nil {
+		h.mapInspectionError(w, r, err, user)
+		return
+	}
+	h.log().Info("inspection started", "email", user.Email, "id", id, "name", result.ToolName, "mode", result.InspectionMode)
+
+	httpapi.WriteJSON(w, http.StatusOK, inspectionStartDTO{
+		ToolID:         result.ToolID,
+		ToolName:       result.ToolName,
+		ToolTypeID:     result.ToolTypeID,
+		ToolTypeName:   result.ToolTypeName,
+		InspectionMode: result.InspectionMode,
+	})
 }
 
 // ListTools handles GET /api/v1/admin/tools (GET_LIST_EMPTY / GET_LIST): it
@@ -271,6 +341,30 @@ func toToolDTO(tool *toolscore.Tool) toolDTO {
 		ArchivedAt:      archivedAt,
 		CreatedAt:       tool.CreatedAt.UTC().Format(time.RFC3339),
 		UpdatedAt:       tool.UpdatedAt.UTC().Format(time.RFC3339),
+	}
+}
+
+// mapInspectionError writes the uniform envelope for the inspection-start
+// service errors (Story 5.1). The qualification-gate denial is its OWN 403 with
+// the German reason (MsgToolQualificationMissing) — distinct from the generic
+// forbidden; an inspection.submit-less caller gets the generic no-hint 403.
+func (h *Handler) mapInspectionError(w http.ResponseWriter, r *http.Request, err error, user *usercore.User) {
+	switch {
+	case errors.Is(err, toolscore.ErrForbidden):
+		h.log().Warn("inspection start forbidden", "email", user.Email)
+		httpapi.WriteError(w, http.StatusForbidden, "forbidden", "Keine Berechtigung.")
+	case errors.Is(err, toolscore.ErrToolQualificationMissing):
+		h.log().Warn("inspection start denied: required qualification missing", "email", user.Email)
+		httpapi.WriteError(w, http.StatusForbidden, "forbidden", toolscore.MsgToolQualificationMissing)
+	case errors.Is(err, toolscore.ErrToolNotFound):
+		httpapi.WriteError(w, http.StatusNotFound, "not_found", toolscore.MsgToolNotFound)
+	default:
+		// Client-abort guard: a canceled request has no one to answer.
+		if r.Context().Err() != nil {
+			return
+		}
+		h.log().Error("inspection start failed unexpectedly", "error", err)
+		httpapi.WriteError(w, http.StatusInternalServerError, "internal_error", "Ein interner Fehler ist aufgetreten.")
 	}
 }
 

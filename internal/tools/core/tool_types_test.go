@@ -143,6 +143,9 @@ func (f *fakeToolTypeStore) ToolExistsActive(context.Context, string) (bool, err
 func (f *fakeToolTypeStore) CreateTool(_ context.Context, _ *Tool) (*Tool, error) { return nil, ErrToolNotFound }
 func (f *fakeToolTypeStore) UpdateTool(_ context.Context, _ *Tool) (*Tool, error) { return nil, ErrToolNotFound }
 func (f *fakeToolTypeStore) ArchiveTool(_ context.Context, _ string) (*Tool, error) { return nil, ErrToolNotFound }
+func (f *fakeToolTypeStore) GetToolWithTypeQualification(_ context.Context, _ string) (*ToolWithTypeQualification, error) {
+	return nil, ErrToolNotFound
+}
 
 // fakeSchedulesPort is an adminports.SchedulesPort over a fixed ACTIVE catalog.
 type fakeSchedulesPort struct {
@@ -154,14 +157,30 @@ func (f *fakeSchedulesPort) CurrentSchedules(context.Context) ([]*admcore.Schedu
 }
 
 // fakeQualificationPort is a userports.QualificationCatalogPort over a fixed
-// vocabulary.
+// vocabulary. heldQualifications maps a user ID to the qualification IDs they
+// currently HOLD (Story 5.1 eligibility); holdErr lets tests simulate a
+// resolution failure.
 type fakeQualificationPort struct {
-	qualificationIDs []string
+	qualificationIDs   []string
+	heldQualifications map[string][]string
+	holdErr            error
 }
 
 func (f *fakeQualificationPort) QualificationExists(_ context.Context, id string) (bool, error) {
 	for _, q := range f.qualificationIDs {
 		if q == id {
+			return true, nil
+		}
+	}
+	return false, nil
+}
+
+func (f *fakeQualificationPort) UserHoldsQualification(_ context.Context, userID, qualificationID string) (bool, error) {
+	if f.holdErr != nil {
+		return false, f.holdErr
+	}
+	for _, held := range f.heldQualifications[userID] {
+		if held == qualificationID {
 			return true, nil
 		}
 	}

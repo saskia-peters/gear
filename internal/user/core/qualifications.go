@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"time"
 )
 
 // Qualification Management (Story 2.7, AD-6/FR-19/FR-22/AD-7): the admin
@@ -374,6 +375,35 @@ func (s *Service) QualificationExists(ctx context.Context, id string) (bool, err
 		if q.ID == id {
 			return true, nil
 		}
+	}
+	return false, nil
+}
+
+// UserHoldsQualification implements the ungated QualificationCatalogPort read
+// for the inspection-start gate (Story 5.1, FR-11/AD-7): it reports whether a
+// user currently HOLDS a qualification, resolved live per request and
+// EXPIRY-AWARE — a fixed assignment past its per-user expires_at counts as NOT
+// held (mirror qualification_status.go, so a lapsed volunteer can never start
+// an inspection). An unlimited assignment is always held; a missing assignment,
+// an unknown user, or an unknown qualification id reports false. No actor, no
+// permission re-check: this is the trusted internal read path (the caller
+// already holds an authenticated session, AD-2/AD-7).
+func (s *Service) UserHoldsQualification(ctx context.Context, userID, qualificationID string) (bool, error) {
+	if strings.TrimSpace(userID) == "" || strings.TrimSpace(qualificationID) == "" {
+		return false, nil
+	}
+	assignments, err := s.repo.ListUserQualificationAssignments(ctx, userID)
+	if err != nil {
+		return false, fmt.Errorf("user core: failed to resolve user qualification assignments: %w", err)
+	}
+	now := time.Now().UTC()
+	for _, a := range assignments {
+		if a.ID != qualificationID {
+			continue
+		}
+		// A fixed assignment past expires_at derives 'expired' (a qualification
+		// expiring exactly NOW counts as expired); anything else is held.
+		return qualificationStatus(a, now) != QualificationStatusExpired, nil
 	}
 	return false, nil
 }

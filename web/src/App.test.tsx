@@ -730,6 +730,45 @@ describe('App & Dashboard Foundation', () => {
 
     expect(await screen.findByRole('heading', { level: 2, name: 'Anmeldung' })).toBeInTheDocument()
   })
+
+  it('INSPECTION_ROUTE: the stub inspection screen renders the tool name + mode (Story 5.1)', async () => {
+    // The qualification-gated start navigates to /inspection/:toolId with the
+    // eligible /start payload as router state; the stub screen (the real one is
+    // Stories 5.2/5.4/5.5) renders the tool name + its type's mode.
+    stubSessionValidation(validProfile())
+    await act(async () => {
+      render(
+        <ThemeProvider>
+          <MemoryRouter
+            initialEntries={[
+              { pathname: '/inspection/id-w1', state: { tool_name: 'Bohrmaschine-01', inspection_mode: 'checklist' } },
+            ]}
+          >
+            <AppRoutes />
+          </MemoryRouter>
+        </ThemeProvider>,
+      )
+    })
+
+    expect(
+      await screen.findByRole('heading', { level: 2, name: 'Prüfung' }),
+    ).toBeInTheDocument()
+    expect(screen.getByText('Bohrmaschine-01')).toBeInTheDocument()
+    expect(screen.getByText('Checkliste')).toBeInTheDocument()
+  })
+
+  it('INSPECTION_ROUTE_PROTECTED: redirects to /login without a session token', async () => {
+    localStorage.removeItem(TOKEN_STORAGE_KEY)
+    render(
+      <ThemeProvider>
+        <MemoryRouter initialEntries={['/inspection/id-w1']}>
+          <AppRoutes />
+        </MemoryRouter>
+      </ThemeProvider>,
+    )
+
+    expect(await screen.findByRole('heading', { level: 2, name: 'Anmeldung' })).toBeInTheDocument()
+  })
 })
 
 describe('Sidebar', () => {

@@ -273,10 +273,19 @@ type ResetEmailSender interface {
 
 // QualificationCatalogPort is the ungated read-only qualification-vocabulary
 // consumer port (AD-7/AD-11): the Tool module (Story 4.2) validates its
-// required_qualification_id FK against it — never by joining user tables.
-// Implemented by the User core Service.
+// required_qualification_id FK against it — never by joining user tables —
+// and (Story 5.1, FR-11/AD-7) resolves whether a caller holds a required
+// qualification (expiry-aware) for the inspection-start gate. Implemented by
+// the User core Service.
 type QualificationCatalogPort interface {
 	// QualificationExists reports whether the qualification id is present in
 	// the vocabulary.
 	QualificationExists(ctx context.Context, id string) (bool, error)
+	// UserHoldsQualification reports whether the user holds the qualification
+	// (Story 5.1, FR-11/AD-7). The check is EXPIRY-AWARE: a fixed assignment
+	// past its per-user expires_at counts as NOT held (live resolution, mirror
+	// qualification_status.go). A missing assignment, an unknown user, or an
+	// unknown qualification id reports false. Ungated by design — the trusted
+	// internal read path for the cross-module eligibility gate.
+	UserHoldsQualification(ctx context.Context, userID, qualificationID string) (bool, error)
 }

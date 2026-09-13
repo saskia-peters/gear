@@ -945,6 +945,20 @@ func (m *mockRepo) GetUserDetail(_ context.Context, userID string) (*AdminUserDe
 	for _, code := range m.directGrants[userID] {
 		detail.DirectGrants = append(detail.DirectGrants, DirectGrantRef{Code: code})
 	}
+	detail.Qualifications = m.mockQualificationAssignments(userID)
+	sort.SliceStable(detail.Roles, func(i, j int) bool { return detail.Roles[i].Name < detail.Roles[j].Name })
+	sort.SliceStable(detail.UserGroups, func(i, j int) bool { return detail.UserGroups[i].Name < detail.UserGroups[j].Name })
+	return detail, nil
+}
+
+// mockQualificationAssignments builds the qualification assignments of a user
+// (Story 5.1): the vocabulary row with the per-assignment valid-until override
+// (Spec 2.9) applied and the server-derived display status (FR-22/AD-7). It is
+// the shared read behind GetUserDetail AND the ungated
+// ListUserQualificationAssignments (the expiry-aware UserHoldsQualification
+// seam).
+func (m *mockRepo) mockQualificationAssignments(userID string) []QualificationAssignment {
+	out := make([]QualificationAssignment, 0, len(m.userQualifications[userID]))
 	for _, qid := range m.userQualifications[userID] {
 		if q := m.qualifications[qid]; q != nil {
 			assignment := QualificationAssignment{
@@ -956,12 +970,17 @@ func (m *mockRepo) GetUserDetail(_ context.Context, userID string) (*AdminUserDe
 				assignment.ExpiresAt = perUser
 			}
 			assignment.Status = qualificationStatus(assignment, time.Now().UTC())
-			detail.Qualifications = append(detail.Qualifications, assignment)
+			out = append(out, assignment)
 		}
 	}
-	sort.SliceStable(detail.Roles, func(i, j int) bool { return detail.Roles[i].Name < detail.Roles[j].Name })
-	sort.SliceStable(detail.UserGroups, func(i, j int) bool { return detail.UserGroups[i].Name < detail.UserGroups[j].Name })
-	return detail, nil
+	return out
+}
+
+// ListUserQualificationAssignments returns the qualification assignments of a
+// user (Story 5.1), mirroring the postgres adapter's ListUserQualifications
+// read. An unknown user yields an empty list.
+func (m *mockRepo) ListUserQualificationAssignments(_ context.Context, userID string) ([]QualificationAssignment, error) {
+	return m.mockQualificationAssignments(userID), nil
 }
 
 // CreateAdminUser creates a user (Story 2.6): a case-insensitive duplicate

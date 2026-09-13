@@ -80,8 +80,8 @@ development_status:
   4-5-bulk-csv-import: deferred
   epic-4-retrospective: done
 
-  epic-5: backlog
-  5-1-qualification-gated-inspection-start: backlog
+  epic-5: in-progress
+  5-1-qualification-gated-inspection-start: done
   5-2-inspection-ux-foundation: backlog
   5-3-out-of-service-flagging: backlog
   5-4-pass-fail-inspection-execution: backlog

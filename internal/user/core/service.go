@@ -174,6 +174,14 @@ type Repository interface {
 	AssignQualificationToUser(ctx context.Context, userID, qualificationID string, expiresAt *time.Time) error
 	RevokeQualificationFromUser(ctx context.Context, userID, qualificationID string) error
 	UpdateUserQualificationExpiry(ctx context.Context, userID, qualificationID string, expiresAt *time.Time) error
+	// ListUserQualificationAssignments returns the qualification assignments of
+	// a user (Spec 2.9, Story 5.1): the vocabulary id/name/expiry-kind plus the
+	// PER-ASSIGNMENT expires_at (NULL for an unlimited assignment), so the core
+	// can derive expiry-aware eligibility (AD-7/FR-22). An unknown user yields
+	// an empty list (eligibility is a read; the caller already holds an
+	// authenticated session). Display status is NOT derived here — that is the
+	// core's job.
+	ListUserQualificationAssignments(ctx context.Context, userID string) ([]QualificationAssignment, error)
 }
 
 // SecretCipher encrypts/decrypts the TOTP shared secret at rest (NFR-S4). The

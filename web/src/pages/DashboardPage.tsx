@@ -1,11 +1,11 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Header } from '../components/Header.tsx'
 import { SummaryGrid } from '../components/SummaryGrid.tsx'
 import { FilterChips } from '../components/FilterChips.tsx'
 import { EmptyState } from '../components/EmptyState.tsx'
 import { clearAuthState } from '../auth/authState.ts'
-import { listDashboardTools } from '../auth/tools.ts'
+import { listDashboardTools, startInspection } from '../auth/tools.ts'
 import type { DashboardTool } from '../auth/tools.ts'
 import type { FilterStatus } from '../types/filters.ts'
 import styles from './DashboardPage.module.css'
@@ -19,11 +19,30 @@ import styles from './DashboardPage.module.css'
 // kept. 401 → /login (stale/revoked session); 403 should never happen for a
 // logged-in dashboard.view holder but is handled defensively the same way
 // (AD-6: no tool data is exposed either way).
+//
+// Story 5.1 (FR-11/AD-7): every row gains a "Prüfung starten" control — the
+// qualification-gated inspection START. The button stays ENABLED until clicked
+// (the 403 IS the gate — never a client-side pre-query, AD-6): 200 → navigate
+// to /inspection/:toolId; 403 → the server's German reason shows inline and the
+// row's button disables for the session (persisting across LIST REFETCHES — the
+// disabled/pending ids live in refs, cleared only on a full reload); 401 →
+// login; other → inline error (button stays enabled for a retry). A double
+// click is guarded: the button disables while its request is in flight.
 export function DashboardPage() {
   const [selectedFilter, setSelectedFilter] = useState<FilterStatus>('Alle')
   const [loaded, setLoaded] = useState(false)
   const [loadError, setLoadError] = useState('')
   const [tools, setTools] = useState<DashboardTool[]>([])
+  const [rowErrors, setRowErrors] = useState<Record<string, string>>({})
+  // disabledStarts/pendingStarts hold tool ids whose start button is disabled
+  // for the session (a 403) or in flight. They are COMPONENT STATE, so they
+  // persist across the list REFETCH effect (the component instance is stable
+  // across refetches) and are only cleared on a full reload (the component
+  // remounts). pendingGuardRef adds the SYNCHRONOUS double-submit guard (a
+  // second click in the same tick cannot slip past the async state update).
+  const [disabledStarts, setDisabledStarts] = useState<ReadonlySet<string>>(new Set())
+  const [pendingStarts, setPendingStarts] = useState<ReadonlySet<string>>(new Set())
+  const pendingGuardRef = useRef<Set<string>>(new Set())
   const navigate = useNavigate()
 
   useEffect(() => {
@@ -31,7 +50,14 @@ export function DashboardPage() {
     async function run() {
       try {
         const items = await listDashboardTools()
-        if (!cancelled) setTools(items)
+        if (cancelled) return
+        setTools(items)
+        // Clear stale inline start errors on a list reload (Story 5.1): a
+        // transient failure must not linger after a successful refresh, and an
+        // error for a tool that left the list disappears with it. The session
+        // DISABLED set is deliberately NOT cleared (it persists across
+        // refetches).
+        setRowErrors({})
       } catch (err) {
         if (cancelled) return
         const status = err instanceof Error && 'status' in err ? (err as { status: number }).status : 0
@@ -50,6 +76,42 @@ export function DashboardPage() {
       cancelled = true
     }
   }, [navigate])
+
+  // handleStart POSTs the qualification-gated inspection start (Story 5.1).
+  // 200 → navigate to the stub inspection screen with the server's tool + mode
+  // (router state); 403 → show the German reason inline and disable the row's
+  // button for the session; 401 → login; other → inline error (retry allowed).
+  // The pending guard + disabled button prevent a DOUBLE SUBMIT.
+  const handleStart = async (tool: DashboardTool): Promise<void> => {
+    if (pendingGuardRef.current.has(tool.id) || disabledStarts.has(tool.id)) {
+      return
+    }
+    pendingGuardRef.current.add(tool.id)
+    setPendingStarts((prev) => new Set(prev).add(tool.id))
+    try {
+      const result = await startInspection(tool.id)
+      navigate(`/inspection/${tool.id}`, { state: { tool_name: result.tool_name, inspection_mode: result.inspection_mode } })
+    } catch (err) {
+      const status = err instanceof Error && 'status' in err ? (err as { status: number }).status : 0
+      if (status === 401) {
+        clearAuthState()
+        navigate('/login', { replace: true })
+        return
+      }
+      const message = err instanceof Error && err.message !== '' ? err.message : 'Die Prüfung konnte nicht gestartet werden.'
+      setRowErrors((prev) => ({ ...prev, [tool.id]: message }))
+      if (status === 403) {
+        setDisabledStarts((prev) => new Set(prev).add(tool.id))
+      }
+    } finally {
+      pendingGuardRef.current.delete(tool.id)
+      setPendingStarts((prev) => {
+        const next = new Set(prev)
+        next.delete(tool.id)
+        return next
+      })
+    }
+  }
 
   return (
     <div className={styles.page}>
@@ -85,12 +147,30 @@ export function DashboardPage() {
             <ul className={styles.list} aria-label="Werkzeuge">
               {tools.map((tool) => (
                 <li key={tool.id} className={styles.row}>
-                  <div className={styles.rowInfo}>
-                    <span className={styles.rowName}>{tool.name}</span>
-                    <span className={styles.rowMeta}>{tool.tool_type_name}</span>
-                    <span className={styles.rowMeta}>{tool.inventory_number}</span>
+                  <div className={styles.rowMain}>
+                    <div className={styles.rowInfo}>
+                      <span className={styles.rowName}>{tool.name}</span>
+                      <span className={styles.rowMeta}>{tool.tool_type_name}</span>
+                      <span className={styles.rowMeta}>{tool.inventory_number}</span>
+                    </div>
+                    <div className={styles.rowActions}>
+                      <span className={styles.available}>verfügbar</span>
+                      <button
+                        type="button"
+                        className={styles.startButton}
+                        disabled={disabledStarts.has(tool.id) || pendingStarts.has(tool.id)}
+                        aria-label={`Prüfung starten für ${tool.name}`}
+                        onClick={() => void handleStart(tool)}
+                      >
+                        Prüfung starten
+                      </button>
+                    </div>
                   </div>
-                  <span className={styles.available}>verfügbar</span>
+                  {rowErrors[tool.id] && (
+                    <p role="alert" className={styles.rowError}>
+                      {rowErrors[tool.id]}
+                    </p>
+                  )}
                 </li>
               ))}
             </ul>

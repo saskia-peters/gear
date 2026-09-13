@@ -23,6 +23,7 @@ import (
 	admsmtp "github.com/saskia-peters/gear/internal/admin/adapters/smtp"
 	"github.com/saskia-peters/gear/internal/platform/auth"
 	"github.com/saskia-peters/gear/internal/platform/crypto"
+	"github.com/saskia-peters/gear/internal/platform/httpapi"
 	"github.com/saskia-peters/gear/internal/platform/router"
 	toolhttp "github.com/saskia-peters/gear/internal/tools/adapters/http"
 	toolpostgres "github.com/saskia-peters/gear/internal/tools/adapters/postgres"
@@ -558,6 +559,12 @@ func (s *compToolTypeService) ArchiveTool(_ context.Context, _, id string) (*too
 	return &toolscore.Tool{ID: id, Name: "archiviert"}, nil
 }
 
+func (s *compToolTypeService) StartInspection(_ context.Context, _, toolID string) (*toolscore.InspectionStartResult, error) {
+	// Echo the toolID the handler read from the URL path, so the composed test
+	// proves the {id} path param really reaches the service (a real round-trip).
+	return &toolscore.InspectionStartResult{ToolID: toolID, ToolName: "test", InspectionMode: toolscore.InspectionModePassFail}, nil
+}
+
 var _ toolports.Service = (*compToolTypeService)(nil)
 
 // newCompositionToolTypeRouter mirrors the main() mounts exactly for the Story
@@ -934,13 +941,16 @@ func TestCompositionToolsEditOnlyGate(t *testing.T) {
 	}
 }
 
-// newCompositionDashboardToolsRouter mirrors the main() mounts exactly for the
-// Story 4-3b dashboard tool-list surface: /api/v1/tools is mounted with its OWN
-// `dashboard.view` gate (RequirePermission — the single-code gateway, NOT the
-// admin RequireAnyPermission), alongside the admin mounts. This pins that the
-// dashboard surface is a separate, read-only, GEAR-module mount reachable by
-// ANY dashboard.view holder regardless of tools.manage.
-func newCompositionDashboardToolsRouter(perms []string, session *usercore.Session) http.Handler {
+// newCompositionToolsRouter mirrors the main() mounts exactly for the combined
+// /api/v1/tools surface (Story 4-3b dashboard list + Story 5.1 inspection
+// start): the dashboard list is mounted with its OWN `dashboard.view` gate and
+// the inspection start with its OWN `inspection.submit` gate (RequirePermission
+// — the single-code gateway, NOT the admin RequireAnyPermission), combined via
+// exact-match Handle + prefix Mount. This pins that each /api/v1/tools surface
+// is a separate GEAR-module surface behind ONE permission per surface (AD-6):
+// the dashboard list is reachable by ANY dashboard.view holder regardless of
+// tools.manage, and the start only by inspection.submit holders.
+func newCompositionToolsRouter(perms []string, session *usercore.Session) http.Handler {
 	log := discardLogger()
 	validator := &compValidator{session: session}
 	resolver := &compResolver{perms: perms}
@@ -954,6 +964,12 @@ func newCompositionDashboardToolsRouter(perms []string, session *usercore.Sessio
 	toolTypesSurface := auth.RequireAnyPermission(validator, resolver, []string{toolscore.ToolTypesManagePermission}, "tool_types.manage access denied", log)(toolHandler.ToolTypeRoutes())
 	toolToolsSurface := auth.RequireAnyPermission(validator, resolver, []string{toolscore.ToolsManagePermission, toolscore.ToolEditPermission}, "tools.manage/tool.edit access denied", log)(toolHandler.ToolRoutes())
 	dashboardToolsSurface := auth.RequirePermission(validator, resolver, toolscore.DashboardViewPermission)(toolHandler.DashboardToolsRoutes())
+	inspectionStartSurface := auth.RequirePermission(validator, resolver, toolscore.InspectionSubmitPermission)(toolHandler.InspectionRoutes())
+	toolsSurface := chi.NewRouter()
+	toolsSurface.NotFound(httpapi.NotFoundHandler())
+	toolsSurface.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
+	toolsSurface.Handle("/", dashboardToolsSurface)
+	toolsSurface.Mount("/{id}/inspection/start", inspectionStartSurface)
 
 	outer := chi.NewRouter()
 	outer.Get("/", func(w http.ResponseWriter, _ *http.Request) {
@@ -968,7 +984,7 @@ func newCompositionDashboardToolsRouter(perms []string, session *usercore.Sessio
 		router.WithMount("/api/v1/admin/settings/schedules", schedulesSurface),
 		router.WithMount("/api/v1/admin/tool-types", toolTypesSurface),
 		router.WithMount("/api/v1/admin/tools", toolToolsSurface),
-		router.WithMount("/api/v1/tools", dashboardToolsSurface),
+		router.WithMount("/api/v1/tools", toolsSurface),
 	)
 }
 
@@ -981,13 +997,13 @@ func newCompositionDashboardToolsRouter(perms []string, session *usercore.Sessio
 // callers answer 401.
 func TestCompositionDashboardToolsMountGating(t *testing.T) {
 	// 401: no token.
-	if rec := doComposedJSONRequest(newCompositionDashboardToolsRouter([]string{}, nil), "", http.MethodGet, "/api/v1/tools", ""); rec.Code != http.StatusUnauthorized {
+	if rec := doComposedJSONRequest(newCompositionToolsRouter([]string{}, nil), "", http.MethodGet, "/api/v1/tools", ""); rec.Code != http.StatusUnauthorized {
 		t.Errorf("no token: status = %d, want 401", rec.Code)
 	}
 
 	// 403: a caller holding ONLY tools.manage (no dashboard.view) is denied the
 	// dashboard surface with no tool data exposed (AD-6).
-	rec := doComposedJSONRequest(newCompositionDashboardToolsRouter([]string{toolscore.ToolsManagePermission}, activeUser("u-tools", "tools@gear.local")), "tok", http.MethodGet, "/api/v1/tools", "")
+	rec := doComposedJSONRequest(newCompositionToolsRouter([]string{toolscore.ToolsManagePermission}, activeUser("u-tools", "tools@gear.local")), "tok", http.MethodGet, "/api/v1/tools", "")
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("tools.manage-only holder: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -998,7 +1014,7 @@ func TestCompositionDashboardToolsMountGating(t *testing.T) {
 	// 200: a dashboard.view holder WITHOUT tools.manage reaches the dashboard
 	// surface (empty list from the in-memory service) — proves the ungated core
 	// read + the dashboard.view HTTP gate work together.
-	dashRouter := newCompositionDashboardToolsRouter([]string{toolscore.DashboardViewPermission}, activeUser("u-vol", "vol@gear.local"))
+	dashRouter := newCompositionToolsRouter([]string{toolscore.DashboardViewPermission}, activeUser("u-vol", "vol@gear.local"))
 	rec = doComposedJSONRequest(dashRouter, "tok", http.MethodGet, "/api/v1/tools", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("dashboard.view holder: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
@@ -1008,7 +1024,7 @@ func TestCompositionDashboardToolsMountGating(t *testing.T) {
 	}
 
 	// 200: a caller holding BOTH codes also reaches it.
-	rec = doComposedJSONRequest(newCompositionDashboardToolsRouter([]string{toolscore.DashboardViewPermission, toolscore.ToolsManagePermission}, activeUser("u-admin", "admin@gear.local")), "tok", http.MethodGet, "/api/v1/tools", "")
+	rec = doComposedJSONRequest(newCompositionToolsRouter([]string{toolscore.DashboardViewPermission, toolscore.ToolsManagePermission}, activeUser("u-admin", "admin@gear.local")), "tok", http.MethodGet, "/api/v1/tools", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("dashboard.view + tools.manage holder: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -1017,6 +1033,62 @@ func TestCompositionDashboardToolsMountGating(t *testing.T) {
 	// (its code opens only the dashboard mount, not the tools.manage gate).
 	if rec := doComposedJSONRequest(dashRouter, "tok", http.MethodGet, "/api/v1/admin/tools", ""); rec.Code != http.StatusForbidden {
 		t.Errorf("dashboard-only holder on admin tools: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestCompositionInspectionStartMountGating verifies the Story 5.1
+// composition-root wiring: the inspection START is a NEW surface under
+// /api/v1/tools with its OWN gate — `inspection.submit` (one permission per
+// surface, AD-6/FR-11/AD-7) — combined with the dashboard.view-gated list via
+// exact-match Handle (each surface keeps its own gate, no shared middleware).
+// A dashboard.view-but-not-inspection.submit caller still READS the
+// Werkzeugliste but 403s on the start (no tool data); an inspection.submit
+// holder reaches the start; unauthenticated callers answer 401.
+func TestCompositionInspectionStartMountGating(t *testing.T) {
+	// 401: no token.
+	if rec := doComposedJSONRequest(newCompositionToolsRouter([]string{}, nil), "", http.MethodPost, "/api/v1/tools/id-a/inspection/start", ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no token: status = %d, want 401 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// 200: an inspection.submit holder (all base roles) reaches the start —
+	// the in-memory service answers an eligible /start with the tool + mode.
+	startRouter := newCompositionToolsRouter([]string{toolscore.InspectionSubmitPermission}, activeUser("u-vol", "vol@gear.local"))
+	rec := doComposedJSONRequest(startRouter, "tok", http.MethodPost, "/api/v1/tools/id-a/inspection/start", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("inspection.submit holder: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var startBody map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &startBody); err != nil {
+		t.Fatalf("decoding start response err = %v", err)
+	}
+	// The fake echoes the {id} URL path param back — a REAL round-trip: the
+	// path param reached the service and flowed back out as tool_id.
+	if startBody["tool_id"] != "id-a" || startBody["tool_name"] != "test" {
+		t.Errorf("start body = %+v, want tool_id id-a (the path param) + the eligible DTO", startBody)
+	}
+	if startBody["inspection_mode"] != toolscore.InspectionModePassFail {
+		t.Errorf("mode = %+v, want %q", startBody["inspection_mode"], toolscore.InspectionModePassFail)
+	}
+
+	// 403 with NO tool data: a dashboard.view-but-not-inspection.submit caller
+	// is denied the start (the dashboard gate does NOT widen into the start
+	// surface), while the dashboard LIST itself still 200s for the same caller.
+	dashboardOnly := newCompositionToolsRouter([]string{toolscore.DashboardViewPermission}, activeUser("u-vol", "vol@gear.local"))
+	rec = doComposedJSONRequest(dashboardOnly, "tok", http.MethodPost, "/api/v1/tools/id-a/inspection/start", "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("dashboard.view-only start: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(strings.ToLower(rec.Body.String()), "werkzeug") || strings.Contains(rec.Body.String(), "id-a") {
+		t.Errorf("403 body leaks tool data: %s", rec.Body.String())
+	}
+	if rec := doComposedJSONRequest(dashboardOnly, "tok", http.MethodGet, "/api/v1/tools", ""); rec.Code != http.StatusOK {
+		t.Errorf("dashboard.view-only list: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// REVERSE: the inspection.submit holder (no dashboard.view) reaches the
+	// start but is denied the dashboard list — each surface has its OWN gate.
+	if rec := doComposedJSONRequest(startRouter, "tok", http.MethodGet, "/api/v1/tools", ""); rec.Code != http.StatusForbidden {
+		t.Errorf("inspection.submit-only list: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
 	}
 }
 

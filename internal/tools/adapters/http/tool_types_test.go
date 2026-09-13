@@ -99,6 +99,10 @@ func (f *fakeService) ArchiveTool(_ context.Context, _, _ string) (*toolscore.To
 	return nil, toolscore.ErrToolNotFound
 }
 
+func (f *fakeService) StartInspection(_ context.Context, _, _ string) (*toolscore.InspectionStartResult, error) {
+	return nil, toolscore.ErrToolNotFound
+}
+
 // toolTypeGateway wraps the REAL ToolTypeRoutes() behind the same
 // RequireAnyPermission gate the composition root uses (tool_types.manage), with
 // a fake session validator + permission resolver.
