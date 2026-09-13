@@ -39,8 +39,10 @@ export function AdminPage() {
                 <span className={styles.cardIcon} aria-hidden="true">
                   {entry.icon && <entry.icon />}
                 </span>
-                <span className={styles.cardTitle}>{entry.label}</span>
-                <span className={styles.cardDescription}>{entry.description}</span>
+                <span className={styles.cardText}>
+                  <span className={styles.cardTitle}>{entry.label}</span>
+                  <span className={styles.cardDescription}>{entry.description}</span>
+                </span>
               </Link>
             ))}
           </section>

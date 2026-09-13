@@ -47,8 +47,9 @@
 
 .card {
   display: flex;
-  flex-direction: column;
-  gap: var(--gear-space-2);
+  align-items: flex-start;
+  flex-direction: row;
+  gap: var(--gear-space-3);
   min-height: 96px;
   padding: var(--gear-space-4) var(--gear-space-5);
   background-color: var(--gear-color-surface-raised);
@@ -75,8 +76,16 @@
   justify-content: center;
   width: 24px;
   height: 24px;
+  margin-top: var(--gear-space-1);
   color: var(--gear-color-brand);
   flex-shrink: 0;
+}
+
+.cardText {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-1);
+  min-width: 0;
 }
 
 .cardTitle {
