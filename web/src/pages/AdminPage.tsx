@@ -36,6 +36,9 @@ export function AdminPage() {
                 to={entry.route}
                 className={styles.card}
               >
+                <span className={styles.cardIcon} aria-hidden="true">
+                  {entry.icon && <entry.icon />}
+                </span>
                 <span className={styles.cardTitle}>{entry.label}</span>
                 <span className={styles.cardDescription}>{entry.description}</span>
               </Link>

@@ -80,6 +80,11 @@ export function AdminNav({ entries }: AdminNavProps) {
                 `${styles.link} ${isActive ? styles.active : ''}`
               }
             >
+              {entry.icon && (
+                <span className={styles.navIcon} aria-hidden="true">
+                  <entry.icon />
+                </span>
+              )}
               {entry.label}
             </NavLink>
           </li>

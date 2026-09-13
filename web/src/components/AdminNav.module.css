@@ -49,6 +49,7 @@
 .link {
   display: flex;
   align-items: center;
+  gap: var(--gear-space-2);
   min-height: 48px;
   padding: var(--gear-space-2) var(--gear-space-4);
   border-radius: var(--gear-radius-md);
@@ -58,6 +59,15 @@
   font-weight: var(--gear-font-label-weight);
   line-height: var(--gear-font-label-line-height);
   transition: background-color 0.15s ease;
+}
+
+.navIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 20px;
+  height: 20px;
+  flex-shrink: 0;
 }
 
 .link:hover {

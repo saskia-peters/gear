@@ -8,6 +8,18 @@
 // Kept in its own file so the app-shell and nav code do not grow into a
 // god-class (standing convention).
 
+import type { ComponentType } from 'react'
+import {
+  IconBenutzer,
+  IconBenutzergruppen,
+  IconDsgvo,
+  IconEinstellungen,
+  IconQualifikationen,
+  IconRollen,
+  IconUebersicht,
+  IconWerkzeuge,
+} from '../components/Icons.tsx'
+
 export interface AdminNavEntry {
   /** Stable key, also used for the route segment. */
   key: string
@@ -19,6 +31,8 @@ export interface AdminNavEntry {
   description: string
   /** Permission codes that gate this entry (holding any of them exposes it). */
   codes: string[]
+  /** Inline-SVG icon shown beside the nav label and on the landing card. */
+  icon?: ComponentType<{ className?: string }>
 }
 
 export const ADMIN_NAV_ENTRIES: readonly AdminNavEntry[] = [
@@ -27,6 +41,7 @@ export const ADMIN_NAV_ENTRIES: readonly AdminNavEntry[] = [
     route: '/admin',
     label: 'Übersicht',
     description: 'Start der Verwaltung mit allen anstehenden Freigaben.',
+    icon: IconUebersicht,
     codes: [
       'users.view',
       'users.approve',
@@ -50,6 +65,7 @@ export const ADMIN_NAV_ENTRIES: readonly AdminNavEntry[] = [
     route: '/admin/benutzer',
     label: 'Benutzer',
     description: 'Mitglieder verwalten und neue Anträge freigeben.',
+    icon: IconBenutzer,
     codes: ['users.view', 'users.approve', 'users.manage'],
   },
   {
@@ -57,6 +73,7 @@ export const ADMIN_NAV_ENTRIES: readonly AdminNavEntry[] = [
     route: '/admin/benutzergruppen',
     label: 'Benutzergruppen',
     description: 'Teams anlegen, Mitglieder zuordnen und Rollen vergeben.',
+    icon: IconBenutzergruppen,
     codes: ['user_groups.manage'],
   },
   {
@@ -64,6 +81,7 @@ export const ADMIN_NAV_ENTRIES: readonly AdminNavEntry[] = [
     route: '/admin/rollen',
     label: 'Rollen',
     description: 'Rollen ansehen und anpassen.',
+    icon: IconRollen,
     codes: ['roles.create', 'roles.edit', 'roles.assign'],
   },
   {
@@ -71,6 +89,7 @@ export const ADMIN_NAV_ENTRIES: readonly AdminNavEntry[] = [
     route: '/admin/qualifikationen',
     label: 'Qualifikationen',
     description: 'Qualifikationen pflegen, z. B. Zertifikate und Lizenzen.',
+    icon: IconQualifikationen,
     codes: ['qualifications.manage'],
   },
   {
@@ -78,6 +97,7 @@ export const ADMIN_NAV_ENTRIES: readonly AdminNavEntry[] = [
     route: '/admin/werkzeuge',
     label: 'Werkzeuge',
     description: 'Geräte und Gerätetypen verwalten.',
+    icon: IconWerkzeuge,
     // tool.edit (Story 4-3b) is the scoped tool-EDIT code: a Führende with
     // only it can view + edit tools (incl. the inventory number) but not
     // create/archive (those stay tools.manage).
@@ -88,6 +108,7 @@ export const ADMIN_NAV_ENTRIES: readonly AdminNavEntry[] = [
     route: '/admin/einstellungen',
     label: 'Einstellungen',
     description: 'E-Mail-, Sicherungs- und Zeitplan-Einstellungen.',
+    icon: IconEinstellungen,
     codes: ['admin.settings.email', 'admin.settings.backup', 'schedules.manage'],
   },
   {
@@ -95,6 +116,7 @@ export const ADMIN_NAV_ENTRIES: readonly AdminNavEntry[] = [
     route: '/admin/dsgvo',
     label: 'DSGVO',
     description: 'Datenauskünfte und Löschungen nach Datenschutz.',
+    icon: IconDsgvo,
     codes: ['dsgvo.access_report', 'dsgvo.delete'],
   },
 ] as const

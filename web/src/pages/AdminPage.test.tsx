@@ -142,6 +142,34 @@ describe('AdminPage', () => {
     ).toHaveAttribute('href', '/admin/recovery')
   })
 
+  it('CARD_ICONS: every landing card renders its icon svg alongside the title', () => {
+    seedPermissions([
+      'users.manage',
+      'user_groups.manage',
+      'roles.edit',
+      'qualifications.manage',
+      'tools.manage',
+      'admin.settings.email',
+      'dsgvo.delete',
+    ])
+    render(
+      <ThemeProvider>
+        <MemoryRouter>
+          <AdminPage />
+        </MemoryRouter>
+      </ThemeProvider>,
+    )
+
+    const cards = screen.getByRole('region', { name: 'Verwaltungsbereiche' })
+    const links = within(cards).getAllByRole('link')
+    expect(links.length).toBeGreaterThan(1)
+    for (const link of links) {
+      const icon = link.querySelector('svg')
+      expect(icon, `${link.textContent} card should show its icon`).not.toBeNull()
+      expect(icon).toHaveAttribute('aria-hidden', 'true')
+    }
+  })
+
   it('GROUPS_CARD: a "Benutzergruppen" card is shown to user_groups.manage holders and links to its own surface', () => {
     localStorage.clear()
     seedPermissions(['users.view', 'user_groups.manage'])

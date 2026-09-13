@@ -69,6 +69,16 @@
   outline-offset: 2px;
 }
 
+.cardIcon {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 24px;
+  height: 24px;
+  color: var(--gear-color-brand);
+  flex-shrink: 0;
+}
+
 .cardTitle {
   font-size: var(--gear-font-title-size);
   font-weight: var(--gear-font-title-weight);

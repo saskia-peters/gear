@@ -118,6 +118,40 @@ describe('AdminNav', () => {
     expect(toggle).toHaveAttribute('aria-expanded', 'false')
   })
 
+  it('NAV_ICONS: every nav link renders an aria-hidden svg icon before its label', () => {
+    const entries = filteredAdminNav([
+      'users.view',
+      'users.approve',
+      'users.manage',
+      'user_groups.manage',
+      'roles.create',
+      'roles.edit',
+      'roles.assign',
+      'qualifications.manage',
+      'tools.manage',
+      'tool_types.manage',
+      'admin.settings.email',
+      'admin.settings.backup',
+      'schedules.manage',
+      'dsgvo.access_report',
+      'dsgvo.delete',
+    ])
+    render(
+      <MemoryRouter initialEntries={['/admin']}>
+        <AdminNav entries={entries} />
+      </MemoryRouter>,
+    )
+
+    for (const entry of entries) {
+      const link = screen.getByRole('link', { name: entry.label })
+      const icon = link.querySelector('svg')
+      expect(icon, `${entry.label} link should show its icon`).not.toBeNull()
+      expect(icon).toHaveAttribute('aria-hidden', 'true')
+      // The icon is purely decorative and never leaks into the label text.
+      expect(link.textContent).toBe(entry.label)
+    }
+  })
+
   it('FUEHRENDE_AFTER_REVOKE: a revoked tools.manage removes the Werkzeuge link on the next render (live set)', () => {
     // First render: fuehrende holds tools.manage → Werkzeuge present.
     const before = filteredAdminNav(['tools.manage'])
