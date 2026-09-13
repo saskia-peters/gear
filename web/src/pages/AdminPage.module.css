@@ -77,7 +77,6 @@
   width: 24px;
   height: 24px;
   margin-top: var(--gear-space-1);
-  color: var(--gear-color-brand);
   flex-shrink: 0;
 }
 

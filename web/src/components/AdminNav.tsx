@@ -81,7 +81,11 @@ export function AdminNav({ entries }: AdminNavProps) {
               }
             >
               {entry.icon && (
-                <span className={styles.navIcon} aria-hidden="true">
+                <span
+                  className={styles.navIcon}
+                  style={entry.iconColor ? { color: entry.iconColor } : undefined}
+                  aria-hidden="true"
+                >
                   <entry.icon />
                 </span>
               )}

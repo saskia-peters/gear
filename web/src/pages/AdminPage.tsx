@@ -1,3 +1,4 @@
+import { useMemo } from 'react'
 import { Link } from 'react-router-dom'
 import { Header } from '../components/Header.tsx'
 import { AdminNav } from '../components/AdminNav.tsx'
@@ -17,6 +18,21 @@ import styles from './AdminPage.module.css'
 export function AdminPage() {
   const entries = filteredAdminNav(getPermissions())
 
+  // The card grid pairs adjacent entries two-per-row on wide screens. To put
+  // the Übersicht and DSGVO cards side by side (the two "command/overview"
+  // surfaces), DSGVO is pulled right after Übersicht in the CARD order only —
+  // the sidebar nav keeps its own logical order (entries).
+  const cardEntries = useMemo(() => {
+    const overview = entries.find((e) => e.key === 'uebersicht')
+    const dsgvo = entries.find((e) => e.key === 'dsgvo')
+    const rest = entries.filter((e) => e.key !== 'uebersicht' && e.key !== 'dsgvo')
+    return [
+      ...(overview ? [overview] : []),
+      ...(dsgvo ? [dsgvo] : []),
+      ...rest,
+    ]
+  }, [entries])
+
   return (
     <div className={styles.page}>
       <Header />
@@ -30,13 +46,17 @@ export function AdminPage() {
           </p>
 
           <section aria-label="Verwaltungsbereiche" className={styles.grid}>
-            {entries.map((entry) => (
+            {cardEntries.map((entry) => (
               <Link
                 key={entry.key}
                 to={entry.route}
                 className={styles.card}
               >
-                <span className={styles.cardIcon} aria-hidden="true">
+                <span
+                  className={styles.cardIcon}
+                  style={entry.iconColor ? { color: entry.iconColor } : undefined}
+                  aria-hidden="true"
+                >
                   {entry.icon && <entry.icon />}
                 </span>
                 <span className={styles.cardText}>

@@ -170,6 +170,30 @@ describe('AdminPage', () => {
     }
   })
 
+  it('CARD_ORDER: Übersicht and DSGVO render adjacent so they pair side by side', () => {
+    seedPermissions(['users.view', 'dsgvo.delete', 'user_groups.manage'])
+    render(
+      <ThemeProvider>
+        <MemoryRouter>
+          <AdminPage />
+        </MemoryRouter>
+      </ThemeProvider>,
+    )
+
+    const cards = screen.getByRole('region', { name: 'Verwaltungsbereiche' })
+    const links = within(cards).getAllByRole('link')
+    const labels = links.map((l) => l.textContent ?? '')
+
+    // Übersicht and DSGVO are the first two cards → adjacent (paired on the
+    // 2-column grid). Benutzer + Benutzergruppen pair next.
+    expect(labels[0]).toMatch(/Übersicht/)
+    expect(labels[1]).toMatch(/DSGVO/)
+    const benutzer = labels.findIndex((l) => l.includes('Benutzer'))
+    const benutzergruppen = labels.findIndex((l) => l.includes('Benutzergruppen'))
+    expect(benutzer).toBeGreaterThanOrEqual(0)
+    expect(benutzergruppen).toBe(benutzer + 1)
+  })
+
   it('GROUPS_CARD: a "Benutzergruppen" card is shown to user_groups.manage holders and links to its own surface', () => {
     localStorage.clear()
     seedPermissions(['users.view', 'user_groups.manage'])

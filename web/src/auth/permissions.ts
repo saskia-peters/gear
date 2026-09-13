@@ -31,8 +31,10 @@ export interface AdminNavEntry {
   description: string
   /** Permission codes that gate this entry (holding any of them exposes it). */
   codes: string[]
-  /** Inline-SVG icon shown beside the nav label and on the landing card. */
+  /** Icon rendered next to the label in the nav + landing card. */
   icon?: ComponentType<{ className?: string }>
+  /** Accent color for the icon (a --gear-color-icon-* token). */
+  iconColor?: string
 }
 
 export const ADMIN_NAV_ENTRIES: readonly AdminNavEntry[] = [
@@ -42,6 +44,7 @@ export const ADMIN_NAV_ENTRIES: readonly AdminNavEntry[] = [
     label: 'Übersicht',
     description: 'Start der Verwaltung mit allen anstehenden Freigaben.',
     icon: IconUebersicht,
+    iconColor: 'var(--gear-color-icon-blue)',
     codes: [
       'users.view',
       'users.approve',
@@ -66,6 +69,7 @@ export const ADMIN_NAV_ENTRIES: readonly AdminNavEntry[] = [
     label: 'Benutzer',
     description: 'Mitglieder verwalten und neue Anträge freigeben.',
     icon: IconBenutzer,
+    iconColor: 'var(--gear-color-icon-green)',
     codes: ['users.view', 'users.approve', 'users.manage'],
   },
   {
@@ -74,6 +78,7 @@ export const ADMIN_NAV_ENTRIES: readonly AdminNavEntry[] = [
     label: 'Benutzergruppen',
     description: 'Teams anlegen, Mitglieder zuordnen und Rollen vergeben.',
     icon: IconBenutzergruppen,
+    iconColor: 'var(--gear-color-icon-teal)',
     codes: ['user_groups.manage'],
   },
   {
@@ -82,6 +87,7 @@ export const ADMIN_NAV_ENTRIES: readonly AdminNavEntry[] = [
     label: 'Rollen',
     description: 'Rollen ansehen und anpassen.',
     icon: IconRollen,
+    iconColor: 'var(--gear-color-icon-purple)',
     codes: ['roles.create', 'roles.edit', 'roles.assign'],
   },
   {
@@ -90,6 +96,7 @@ export const ADMIN_NAV_ENTRIES: readonly AdminNavEntry[] = [
     label: 'Qualifikationen',
     description: 'Qualifikationen pflegen, z. B. Zertifikate und Lizenzen.',
     icon: IconQualifikationen,
+    iconColor: 'var(--gear-color-icon-orange)',
     codes: ['qualifications.manage'],
   },
   {
@@ -98,6 +105,7 @@ export const ADMIN_NAV_ENTRIES: readonly AdminNavEntry[] = [
     label: 'Werkzeuge',
     description: 'Geräte und Gerätetypen verwalten.',
     icon: IconWerkzeuge,
+    iconColor: 'var(--gear-color-icon-red)',
     // tool.edit (Story 4-3b) is the scoped tool-EDIT code: a Führende with
     // only it can view + edit tools (incl. the inventory number) but not
     // create/archive (those stay tools.manage).
@@ -109,6 +117,7 @@ export const ADMIN_NAV_ENTRIES: readonly AdminNavEntry[] = [
     label: 'Einstellungen',
     description: 'E-Mail-, Sicherungs- und Zeitplan-Einstellungen.',
     icon: IconEinstellungen,
+    iconColor: 'var(--gear-color-icon-indigo)',
     codes: ['admin.settings.email', 'admin.settings.backup', 'schedules.manage'],
   },
   {
@@ -117,6 +126,7 @@ export const ADMIN_NAV_ENTRIES: readonly AdminNavEntry[] = [
     label: 'DSGVO',
     description: 'Datenauskünfte und Löschungen nach Datenschutz.',
     icon: IconDsgvo,
+    iconColor: 'var(--gear-color-icon-amber)',
     codes: ['dsgvo.access_report', 'dsgvo.delete'],
   },
 ] as const

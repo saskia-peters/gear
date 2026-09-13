@@ -23,6 +23,27 @@
   --gear-color-status-oos: #1c1c1c;
   --gear-color-status-oos-dark: #424242;
 
+  /* Icon Accent Colors (light variants; per-entry admin nav icons — a small
+     curated palette so each surface is memorable at a glance). Dark-mode
+     variants live with the theme overrides below. */
+  --gear-color-icon-blue-light: #1a56db;
+  --gear-color-icon-green-light: #15803d;
+  --gear-color-icon-teal-light: #0f766e;
+  --gear-color-icon-orange-light: #ea580c;
+  --gear-color-icon-purple-light: #7c3aed;
+  --gear-color-icon-red-light: #c81e1e;
+  --gear-color-icon-indigo-light: #4338ca;
+  --gear-color-icon-amber-light: #b45309;
+
+  --gear-color-icon-blue-dark: #60a5fa;
+  --gear-color-icon-green-dark: #4ade80;
+  --gear-color-icon-teal-dark: #2dd4bf;
+  --gear-color-icon-orange-dark: #fb923c;
+  --gear-color-icon-purple-dark: #a78bfa;
+  --gear-color-icon-red-dark: #f87171;
+  --gear-color-icon-indigo-dark: #818cf8;
+  --gear-color-icon-amber-dark: #fbbf24;
+
   /* Surface Constants */
   --gear-color-surface-base-light: #F5F6F8;
   --gear-color-surface-raised-light: #FFFFFF;
@@ -121,6 +142,15 @@
   --gear-color-status-red-current: var(--gear-color-status-red);
   --gear-color-status-oos-current: var(--gear-color-status-oos);
 
+  --gear-color-icon-blue: var(--gear-color-icon-blue-light);
+  --gear-color-icon-green: var(--gear-color-icon-green-light);
+  --gear-color-icon-teal: var(--gear-color-icon-teal-light);
+  --gear-color-icon-orange: var(--gear-color-icon-orange-light);
+  --gear-color-icon-purple: var(--gear-color-icon-purple-light);
+  --gear-color-icon-red: var(--gear-color-icon-red-light);
+  --gear-color-icon-indigo: var(--gear-color-icon-indigo-light);
+  --gear-color-icon-amber: var(--gear-color-icon-amber-light);
+
   --gear-color-surface-base: var(--gear-color-surface-base-light);
   --gear-color-surface-raised: var(--gear-color-surface-raised-light);
   --gear-color-surface-overlay: var(--gear-color-surface-overlay-light);
@@ -188,6 +218,15 @@
     --gear-color-status-red-current: var(--gear-color-status-red-dark);
     --gear-color-status-oos-current: var(--gear-color-status-oos-dark);
 
+    --gear-color-icon-blue: var(--gear-color-icon-blue-dark);
+    --gear-color-icon-green: var(--gear-color-icon-green-dark);
+    --gear-color-icon-teal: var(--gear-color-icon-teal-dark);
+    --gear-color-icon-orange: var(--gear-color-icon-orange-dark);
+    --gear-color-icon-purple: var(--gear-color-icon-purple-dark);
+    --gear-color-icon-red: var(--gear-color-icon-red-dark);
+    --gear-color-icon-indigo: var(--gear-color-icon-indigo-dark);
+    --gear-color-icon-amber: var(--gear-color-icon-amber-dark);
+
     --gear-color-surface-base: var(--gear-color-surface-base-dark);
     --gear-color-surface-raised: var(--gear-color-surface-raised-dark);
     --gear-color-surface-overlay: var(--gear-color-surface-overlay-dark);
@@ -241,6 +280,15 @@
   --gear-color-status-orange-current: var(--gear-color-status-orange-dark);
   --gear-color-status-red-current: var(--gear-color-status-red-dark);
   --gear-color-status-oos-current: var(--gear-color-status-oos-dark);
+
+  --gear-color-icon-blue: var(--gear-color-icon-blue-dark);
+  --gear-color-icon-green: var(--gear-color-icon-green-dark);
+  --gear-color-icon-teal: var(--gear-color-icon-teal-dark);
+  --gear-color-icon-orange: var(--gear-color-icon-orange-dark);
+  --gear-color-icon-purple: var(--gear-color-icon-purple-dark);
+  --gear-color-icon-red: var(--gear-color-icon-red-dark);
+  --gear-color-icon-indigo: var(--gear-color-icon-indigo-dark);
+  --gear-color-icon-amber: var(--gear-color-icon-amber-dark);
 
   --gear-color-surface-base: var(--gear-color-surface-base-dark);
   --gear-color-surface-raised: var(--gear-color-surface-raised-dark);
