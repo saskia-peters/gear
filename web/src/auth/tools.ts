@@ -279,14 +279,19 @@ export async function listDashboardTools(): Promise<DashboardTool[]> {
 // ============================================================================
 
 // InspectionStart is the eligible POST /api/v1/tools/{id}/inspection/start
-// payload: the tool plus its type's inspection_mode — enough for the stub
-// inspection screen (the real screen is Stories 5.2/5.4/5.5).
+// payload: the tool plus its type's inspection_mode — enough for the inspection
+// screen foundation (the real screen is Stories 5.2/5.4/5.5). inventory_number
+// is OPTIONAL: the dashboard carries it into the inspection route from the tool
+// LIST (the /start response does NOT include it yet — no backend change in
+// Story 5.2), so the inspection header can show the identifier when present and
+// fall back to the tool name otherwise.
 export interface InspectionStart {
   tool_id: string
   tool_name: string
   tool_type_id: string
   tool_type_name: string
   inspection_mode: InspectionMode
+  inventory_number?: string
 }
 
 // startInspection POSTs the inspection start for a tool. 200 → eligible (the
@@ -298,6 +303,15 @@ export async function startInspection(toolId: string): Promise<InspectionStart> 
     method: 'POST',
     headers: authTokenHeaders(),
   })) as InspectionStart
+}
+
+// submitInspectionPlaceholder is the Story 5.2 UX PLACEHOLDER seam — the
+// stand-in for the real inspection-record call that Stories 5.4/5.5 replace
+// (they define the persisted shape: identity/timestamp/per-item results/OOS).
+// Deliberately NO fetch to a nonexistent endpoint. Kept async so the submit
+// button has a real in-flight window for the double-submit guard.
+export async function submitInspectionPlaceholder(): Promise<void> {
+  await Promise.resolve()
 }
 
 export { ApiError }

@@ -1,0 +1,64 @@
+.chipsFieldset {
+  border: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-2);
+}
+
+.chipsLegend {
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  color: var(--gear-color-ink-secondary);
+}
+
+.chipsRow {
+  display: flex;
+  flex-wrap: wrap;
+  gap: var(--gear-space-2);
+}
+
+/* Base chip: ≥48px tappable target (UX-DR9), radius from the design tokens. */
+.chip {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: var(--gear-space-2);
+  min-height: 48px;
+  padding: var(--gear-space-2) var(--gear-space-4);
+  border: 1px solid var(--gear-color-border-hairline);
+  border-radius: var(--gear-radius-md);
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  color: var(--gear-color-ink-primary);
+  cursor: pointer;
+}
+
+/* Selected chip fills: green OK/BESTANDEN vs red FEHLER/NICHT BESTANDEN, using
+   the shared pass/fail chip tokens (tokens.css). */
+.chipSelectedPass {
+  border-color: var(--gear-color-pass-chip-bg);
+  background-color: var(--gear-color-pass-chip-bg);
+  color: var(--gear-color-pass-chip-text);
+}
+
+.chipSelectedFail {
+  border-color: var(--gear-color-fail-chip-bg);
+  background-color: var(--gear-color-fail-chip-bg);
+  color: var(--gear-color-fail-chip-text);
+}
+
+/* The radios are visually hidden inside the label; the keyboard focus ring is
+   drawn on the LABEL via :has() so a tabbing user sees a visible indicator
+   (mirrors the AdminWerkzeugePage mode switch). */
+.chip input {
+  position: absolute;
+  opacity: 0;
+  pointer-events: none;
+}
+
+.chip:has(input:focus-visible) {
+  outline: 2px solid var(--gear-color-brand);
+  outline-offset: 2px;
+}

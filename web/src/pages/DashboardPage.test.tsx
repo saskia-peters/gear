@@ -2,13 +2,13 @@
 import { render, screen, cleanup } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { MemoryRouter, Routes, Route, useParams } from 'react-router-dom'
+import { MemoryRouter, Routes, Route, useParams, useLocation } from 'react-router-dom'
 import { DashboardPage } from './DashboardPage.tsx'
 import { ThemeProvider } from '../context/ThemeContext.tsx'
 
 const DASHBOARD_TOOLS_URL = '/api/v1/tools'
 
-function dashboardToolFixture(id: string, name: string, toolTypeName = 'Bohrmaschine', inventoryNumber = 'GEAR00000X') {
+function dashboardToolFixture(id: string, name: string, toolTypeName = 'Bohrmaschine', inventoryNumber = 'GEAR000001') {
   return {
     id,
     name,
@@ -20,9 +20,16 @@ function dashboardToolFixture(id: string, name: string, toolTypeName = 'Bohrmasc
 
 function InspectionStubRoute() {
   const { toolId } = useParams()
+  const location = useLocation()
+  // The stub route captures the EXACT navigation-state object the dashboard
+  // builds (Story 5.1/5.2), so the SPA_200 test can assert the real state.
+  const state = (location.state ?? {}) as { tool_name?: string; inventory_number?: string; inspection_mode?: string }
   return (
     <div>
-      InspectionStub <span data-testid="stub-tool-id">{toolId}</span>
+      InspectionStub <span data-testid="stub-tool-id">{toolId}</span>{' '}
+      <span data-testid="stub-tool-name">{state.tool_name}</span>{' '}
+      <span data-testid="stub-inventory-number">{state.inventory_number}</span>{' '}
+      <span data-testid="stub-inspection-mode">{state.inspection_mode}</span>
     </div>
   )
 }
@@ -165,6 +172,13 @@ describe('DashboardPage inspection start (Story 5.1, FR-11/AD-7)', () => {
     // The stub inspection route is reached with the tool id.
     expect(await screen.findByText('InspectionStub')).toBeInTheDocument()
     expect(screen.getByTestId('stub-tool-id')).toHaveTextContent('id-w1')
+    // Story 5.1/5.2: the navigation-state object the dashboard builds carries
+    // the tool name, the inspection mode and the inventory number (the latter
+    // from the tool LIST — the /start payload has no identifier), so the
+    // inspection header can show it.
+    expect(screen.getByTestId('stub-tool-name')).toHaveTextContent('Bohrmaschine-01')
+    expect(screen.getByTestId('stub-inspection-mode')).toHaveTextContent('checklist')
+    expect(screen.getByTestId('stub-inventory-number')).toHaveTextContent('GEAR000001')
   })
 
   it('SPA_403: an ineligible click shows the German reason inline and disables that row for the session (persists across list refetches)', async () => {
@@ -275,6 +289,9 @@ describe('DashboardPage inspection start (Story 5.1, FR-11/AD-7)', () => {
       }),
     })
     expect(await screen.findByText('InspectionStub')).toBeInTheDocument()
+    expect(screen.getByTestId('stub-tool-name')).toHaveTextContent('Bohrmaschine-01')
+    expect(screen.getByTestId('stub-inspection-mode')).toHaveTextContent('checklist')
+    expect(screen.getByTestId('stub-inventory-number')).toHaveTextContent('GEAR000001')
   })
 
   it('RELOAD_CLEARS_ERROR: a stale inline start error is cleared on a successful list reload', async () => {

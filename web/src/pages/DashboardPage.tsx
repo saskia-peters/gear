@@ -90,7 +90,13 @@ export function DashboardPage() {
     setPendingStarts((prev) => new Set(prev).add(tool.id))
     try {
       const result = await startInspection(tool.id)
-      navigate(`/inspection/${tool.id}`, { state: { tool_name: result.tool_name, inspection_mode: result.inspection_mode } })
+      // Story 5.2: the inspection header shows the inventory number as the tool
+      // identifier. The /start payload does not carry it, so it is added to the
+      // router state from the tool LIST (which has it) — the header falls back
+      // to the tool name when the state lacks it (refresh/deep link).
+      navigate(`/inspection/${tool.id}`, {
+        state: { tool_name: result.tool_name, inspection_mode: result.inspection_mode, inventory_number: tool.inventory_number },
+      })
     } catch (err) {
       const status = err instanceof Error && 'status' in err ? (err as { status: number }).status : 0
       if (status === 401) {

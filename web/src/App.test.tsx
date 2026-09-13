@@ -731,17 +731,17 @@ describe('App & Dashboard Foundation', () => {
     expect(await screen.findByRole('heading', { level: 2, name: 'Anmeldung' })).toBeInTheDocument()
   })
 
-  it('INSPECTION_ROUTE: the stub inspection screen renders the tool name + mode (Story 5.1)', async () => {
+  it('INSPECTION_ROUTE: the inspection screen renders the tool name + identifier + mode (Stories 5.1/5.2)', async () => {
     // The qualification-gated start navigates to /inspection/:toolId with the
-    // eligible /start payload as router state; the stub screen (the real one is
-    // Stories 5.2/5.4/5.5) renders the tool name + its type's mode.
+    // eligible /start payload as router state; Story 5.2 adds the inventory
+    // number (from the tool list) so the header shows the identifier.
     stubSessionValidation(validProfile())
     await act(async () => {
       render(
         <ThemeProvider>
           <MemoryRouter
             initialEntries={[
-              { pathname: '/inspection/id-w1', state: { tool_name: 'Bohrmaschine-01', inspection_mode: 'checklist' } },
+              { pathname: '/inspection/id-w1', state: { tool_name: 'Bohrmaschine-01', inspection_mode: 'checklist', inventory_number: 'GEAR000001' } },
             ]}
           >
             <AppRoutes />
@@ -754,6 +754,7 @@ describe('App & Dashboard Foundation', () => {
       await screen.findByRole('heading', { level: 2, name: 'Prüfung' }),
     ).toBeInTheDocument()
     expect(screen.getByText('Bohrmaschine-01')).toBeInTheDocument()
+    expect(screen.getByText('GEAR000001')).toBeInTheDocument()
     expect(screen.getByText('Checkliste')).toBeInTheDocument()
   })
 

@@ -67,12 +67,17 @@
   line-height: var(--gear-font-label-line-height);
 }
 
-.detail {
-  margin: 0;
+/* The tool header card (Story 5.2): tool name + identifier + mode, the first
+   block of the SINGLE-COLUMN inspection content (UX-DR3/DR10). */
+.toolHeader {
   padding: var(--gear-space-4);
   background-color: var(--gear-color-surface-raised);
   border: 1px solid var(--gear-color-border-hairline);
   border-radius: var(--gear-radius-md);
+}
+
+.detail {
+  margin: 0;
   display: flex;
   flex-direction: column;
   gap: var(--gear-space-3);
@@ -96,4 +101,52 @@
   font-size: var(--gear-font-title-size);
   font-weight: var(--gear-font-title-weight);
   color: var(--gear-color-ink-primary);
+}
+
+/* The single submit row (Story 5.2, UX-DR7/DR8): ONE column — the whole
+   inspection is saved by a single tap, no chained modals. */
+.submitRow {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-2);
+}
+
+/* "Prüfung speichern" (du-form German): a ≥48px target (UX-DR9). Disabled
+   while the placeholder submit is in flight AND during the auto-return delay
+   (double-submit guard). */
+.submitButton {
+  min-height: 48px;
+  padding: var(--gear-space-2) var(--gear-space-4);
+  border: 1px solid var(--gear-color-brand);
+  border-radius: var(--gear-radius-md);
+  background-color: var(--gear-color-brand);
+  color: var(--gear-color-surface-base);
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  line-height: var(--gear-font-label-line-height);
+  cursor: pointer;
+}
+
+.submitButton:hover:not(:disabled) {
+  background-color: var(--gear-color-brand-hover, var(--gear-color-brand));
+}
+
+.submitButton:disabled {
+  background-color: var(--gear-color-surface-muted, var(--gear-color-surface-base));
+  border-color: var(--gear-color-border-hairline);
+  color: var(--gear-color-ink-secondary);
+  cursor: not-allowed;
+}
+
+/* The inline post-submit confirmation (Story 5.2, UX-DR7): role="status" so
+   screen readers announce it; names the tool + a generic saved consequence. */
+.confirmation {
+  margin: 0;
+  padding: var(--gear-space-3) var(--gear-space-4);
+  border-radius: var(--gear-radius-md);
+  background-color: var(--gear-color-status-green-soft);
+  border: 1px solid var(--gear-color-status-green);
+  color: var(--gear-color-status-green);
+  font-size: var(--gear-font-label-size);
+  line-height: var(--gear-font-label-line-height);
 }
