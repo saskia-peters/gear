@@ -103,6 +103,12 @@ export function InspectionPage({ submitInspection = submitInspectionPlaceholder 
   // DashboardPage start guard); the disabled button is the visible one.
   const [result, setResult] = useState<PassFailValue | null>(null)
   const [itemResults, setItemResults] = useState<Record<string, PassFailValue>>({})
+  // comment is the OPTIONAL inspection note (FR-13 "optional notes" / the
+  // inspection comment the user asked for): a free-form German textarea
+  // surfaced between the result chips and the submit. It is optional — the
+  // submit never depends on it — and is part of the inspection data 5.4/5.5
+  // persist with the record.
+  const [comment, setComment] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [submitted, setSubmitted] = useState(false)
   const submitPendingRef = useRef(false)
@@ -318,6 +324,23 @@ export function InspectionPage({ submitInspection = submitInspectionPlaceholder 
                   disabled={submitting || submitted}
                 />
               )}
+
+              <div className={styles.commentField}>
+                <label className={styles.commentLabel} htmlFor="inspection-comment">
+                  Anmerkung (optional)
+                </label>
+                <textarea
+                  id="inspection-comment"
+                  className={styles.commentInput}
+                  value={comment}
+                  onChange={(e) => setComment(e.target.value)}
+                  placeholder="z.B. Ölstand geprüft, auffällige Geräusche..."
+                  rows={3}
+                  maxLength={2000}
+                  disabled={submitting || submitted}
+                  autoComplete="off"
+                />
+              </div>
 
               <div className={styles.submitRow}>
                 <button

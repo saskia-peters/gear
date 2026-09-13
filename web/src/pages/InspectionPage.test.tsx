@@ -310,6 +310,30 @@ describe('InspectionPage UX foundation (Story 5.2)', () => {
     expect(button).toBeDisabled()
   })
 
+  it('COMMENT: the optional Anmerkung textarea is present, editable, and does NOT gate the submit', async () => {
+    renderLoaded()
+
+    // The comment field exists with a German label and placeholder.
+    const comment = screen.getByLabelText('Anmerkung (optional)')
+    expect(comment).toBeInTheDocument()
+
+    // It is OPTIONAL: with no result selected the submit is still disabled
+    // (gated by the result, not the comment), and typing a comment does not
+    // enable it.
+    const button = screen.getByRole('button', { name: 'Prüfung speichern' })
+    expect(button).toBeDisabled()
+    fireEvent.change(comment, { target: { value: 'Ölstand geprüft, auffällige Geräusche.' } })
+    expect(comment).toHaveValue('Ölstand geprüft, auffällige Geräusche.')
+    expect(button).toBeDisabled()
+
+    // Once a result is selected the submit enables — the comment stays
+    // optional and editable alongside it.
+    fireEvent.click(screen.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    expect(button).toBeEnabled()
+    fireEvent.change(comment, { target: { value: 'Alles in Ordnung.' } })
+    expect(comment).toHaveValue('Alles in Ordnung.')
+  })
+
   it('SUBMIT: one submit shows the inline confirmation (names the tool + the outcome, SR role=status), disables the controls, then auto-returns to / after ~2s', async () => {
     vi.useFakeTimers()
     renderLoaded()

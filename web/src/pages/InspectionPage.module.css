@@ -126,6 +126,47 @@
   gap: var(--gear-space-2);
 }
 
+/* The OPTIONAL inspection comment (FR-13 "optional notes"): a free-form German
+   textarea between the result chips and the submit. Single-column like the
+   rest of the surface (UX-DR10); ≥48px min-height for the tap target, with a
+   visible focus ring (UX-DR9). The submit never depends on it. */
+.commentField {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-2);
+}
+
+.commentLabel {
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  line-height: var(--gear-font-label-line-height);
+  color: var(--gear-color-ink-primary);
+}
+
+.commentInput {
+  min-height: 96px;
+  padding: var(--gear-space-3);
+  border: 1px solid var(--gear-color-input-border);
+  border-radius: var(--gear-radius-md);
+  background-color: var(--gear-color-input-bg);
+  color: var(--gear-color-input-text);
+  font-family: var(--gear-font-family);
+  font-size: var(--gear-font-body-size);
+  line-height: var(--gear-font-body-line-height);
+  box-sizing: border-box;
+  resize: vertical;
+}
+
+.commentInput:focus-visible {
+  outline: 2px solid var(--gear-focus-ring-color);
+  outline-offset: 2px;
+}
+
+.commentInput:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 /* "Prüfung speichern" (du-form German): a ≥48px target (UX-DR9). Disabled
    while the placeholder submit is in flight AND during the auto-return delay
    (double-submit guard). */
