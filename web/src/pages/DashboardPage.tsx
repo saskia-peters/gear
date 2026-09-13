@@ -91,11 +91,20 @@ export function DashboardPage() {
     try {
       const result = await startInspection(tool.id)
       // Story 5.2: the inspection header shows the inventory number as the tool
-      // identifier. The /start payload does not carry it, so it is added to the
-      // router state from the tool LIST (which has it) — the header falls back
-      // to the tool name when the state lacks it (refresh/deep link).
+      // identifier and the type display name; the mode-aware surface needs the
+      // type's checklist items for a checklist-mode inspection. The /start
+      // payload carries the type name + checklist items, so they travel in the
+      // router state; the inventory number is added from the tool LIST (which
+      // has it) — the header falls back to the tool name when the state lacks
+      // it (refresh/deep link).
       navigate(`/inspection/${tool.id}`, {
-        state: { tool_name: result.tool_name, inspection_mode: result.inspection_mode, inventory_number: tool.inventory_number },
+        state: {
+          tool_name: result.tool_name,
+          tool_type_name: result.tool_type_name,
+          inspection_mode: result.inspection_mode,
+          inventory_number: tool.inventory_number,
+          checklist_items: result.checklist_items,
+        },
       })
     } catch (err) {
       const status = err instanceof Error && 'status' in err ? (err as { status: number }).status : 0

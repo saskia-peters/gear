@@ -279,18 +279,19 @@ export async function listDashboardTools(): Promise<DashboardTool[]> {
 // ============================================================================
 
 // InspectionStart is the eligible POST /api/v1/tools/{id}/inspection/start
-// payload: the tool plus its type's inspection_mode — enough for the inspection
-// screen foundation (the real screen is Stories 5.2/5.4/5.5). inventory_number
-// is OPTIONAL: the dashboard carries it into the inspection route from the tool
-// LIST (the /start response does NOT include it yet — no backend change in
-// Story 5.2), so the inspection header can show the identifier when present and
-// fall back to the tool name otherwise.
+// payload (Story 5.1 + 5.2): the tool plus its type's inspection_mode and —
+// for checklist-mode types — the type's ordered checklist items, so the SPA
+// renders the mode-appropriate surface. inventory_number is OPTIONAL: the
+// dashboard carries it into the inspection route from the tool LIST (the /start
+// response does NOT include it yet), so the inspection header can show the
+// identifier when present and fall back to the tool name otherwise.
 export interface InspectionStart {
   tool_id: string
   tool_name: string
   tool_type_id: string
   tool_type_name: string
   inspection_mode: InspectionMode
+  checklist_items: ToolTypeChecklistItem[]
   inventory_number?: string
 }
 

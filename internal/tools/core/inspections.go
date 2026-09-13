@@ -53,6 +53,7 @@ type InspectionStartResult struct {
 	ToolTypeID     string
 	ToolTypeName   string
 	InspectionMode string
+	ChecklistItems []ToolTypeChecklistItem
 }
 
 // StartInspection is the qualification-gated inspection start (Story 5.1,
@@ -118,5 +119,6 @@ func (s *Service) StartInspection(ctx context.Context, actorID, toolID string) (
 		ToolTypeID:     tool.ToolTypeID,
 		ToolTypeName:   tool.ToolTypeName,
 		InspectionMode: tool.InspectionMode,
+		ChecklistItems: tool.ChecklistItems,
 	}, nil
 }

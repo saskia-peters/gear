@@ -345,6 +345,15 @@ func TestPostgresToolGetWithTypeQualification(t *testing.T) {
 	); err != nil {
 		t.Fatalf("updating type with required qualification err = %v", err)
 	}
+	// Seed the type's ordered checklist items (Story 5.2 mode-aware start): the
+	// inspection-start read must carry them so a checklist-mode inspection can
+	// render one Pass/Fail group per item.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO tool_type_checklist_items (tool_type_id, position, label) VALUES ($1, 1, 'Kabel'), ($1, 2, 'Bohrfutter')`,
+		toolTypeID,
+	); err != nil {
+		t.Fatalf("seeding checklist items err = %v", err)
+	}
 	tool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Start-Lesen", ToolTypeID: toolTypeID})
 	if err != nil {
 		t.Fatalf("CreateTool err = %v", err)
@@ -366,6 +375,9 @@ func TestPostgresToolGetWithTypeQualification(t *testing.T) {
 	}
 	if got.InspectionMode != core.InspectionModeChecklist {
 		t.Errorf("inspection_mode = %q, want %q", got.InspectionMode, core.InspectionModeChecklist)
+	}
+	if len(got.ChecklistItems) != 2 || got.ChecklistItems[0].Label != "Kabel" || got.ChecklistItems[1].Label != "Bohrfutter" {
+		t.Errorf("checklist_items = %+v, want the ordered [Kabel, Bohrfutter]", got.ChecklistItems)
 	}
 
 	// MISSING: an unknown id → ErrToolNotFound (never a raw 500).
@@ -454,6 +466,7 @@ func TestPostgresToolsFKConstraints(t *testing.T) {
 		t.Fatalf("raw insert with missing type err = %v, want FK violation 23503", err)
 	}
 }
+
 // toolInventoryNumberFormat is the auto-assigned shape: 'GEAR' + 6 zero-padded
 // digits (Story 4-3b, CREATE_AUTO).
 var toolInventoryNumberFormat = regexp.MustCompile(`^GEAR\d{6}$`)

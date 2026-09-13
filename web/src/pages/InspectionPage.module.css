@@ -103,6 +103,21 @@
   color: var(--gear-color-ink-primary);
 }
 
+/* The empty-checklist state (Story 5.2 mode-aware decision): a checklist-mode
+   type whose items are missing/empty renders this note instead of chips — the
+   graceful fallback, never a crash. The submit stays disabled (an empty
+   checklist must not save a meaningless BESTANDEN). */
+.emptyChecklist {
+  margin: 0;
+  padding: var(--gear-space-3) var(--gear-space-4);
+  border-radius: var(--gear-radius-md);
+  background-color: var(--gear-color-surface-raised);
+  border: 1px solid var(--gear-color-border-hairline);
+  color: var(--gear-color-ink-secondary);
+  font-size: var(--gear-font-label-size);
+  line-height: var(--gear-font-label-line-height);
+}
+
 /* The single submit row (Story 5.2, UX-DR7/DR8): ONE column — the whole
    inspection is saved by a single tap, no chained modals. */
 .submitRow {

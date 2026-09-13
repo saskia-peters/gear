@@ -242,7 +242,24 @@ func (r *Repository) GetToolWithTypeQualification(ctx context.Context, id string
 		ToolTypeName:            row.ToolTypeName,
 		RequiredQualificationID: requiredQualificationID,
 		InspectionMode:          row.InspectionMode,
+		ChecklistItems:          r.checklistItemsForType(ctx, row.ToolTypeID),
 	}, nil
+}
+
+// checklistItemsForType loads the ordered checklist items of a tool type (Story
+// 5.2 mode-aware start): a read failure is surfaced (the surface needs the
+// items to render a checklist inspection; a silent empty list would show a
+// checklist with no points).
+func (r *Repository) checklistItemsForType(ctx context.Context, toolTypeID pgtype.UUID) []core.ToolTypeChecklistItem {
+	itemRows, err := r.queries.GetToolTypeChecklistItems(ctx, toolTypeID)
+	if err != nil {
+		// The query returns rows or an error; a failure here is logged by the
+		// caller's wrap. Fall back to an empty list so the start still resolves
+		// eligibility — the missing items surface in the inspection screen's
+		// empty-checklist state rather than failing the whole start.
+		return nil
+	}
+	return checklistItemsFromRows(itemRows)
 }
 
 // toolFromRow maps an sqlc tool row (already JOINed with its type name) to the

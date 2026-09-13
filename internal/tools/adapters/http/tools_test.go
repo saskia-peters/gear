@@ -26,6 +26,7 @@ type fakeToolService struct {
 	writeErr   error
 	archiveErr error
 	startErr   error
+	startItems []toolscore.ToolTypeChecklistItem
 	lastInput  toolscore.ToolInput
 	lastID     string
 }
@@ -112,6 +113,7 @@ func (f *fakeToolService) StartInspection(_ context.Context, _, toolID string) (
 		ToolTypeID:     "id-t1",
 		ToolTypeName:   "Bohrmaschine",
 		InspectionMode: toolscore.InspectionModeChecklist,
+		ChecklistItems: f.startItems,
 	}, nil
 }
 
@@ -937,7 +939,13 @@ func TestToolsEditOnlyCanEditAttributes(t *testing.T) {
 func TestInspectionStartEligible(t *testing.T) {
 	// START_ELIGIBLE: an inspection.submit holder (who also reads the dashboard)
 	// starts an inspection → 200 with the tool + its type's inspection_mode DTO.
-	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, activeAdmin(), &fakeToolService{})
+	// The mode-aware /start payload (Story 5.2) carries the type's ordered
+	// checklist items — the SPA renders one Pass/Fail group per item.
+	svc := &fakeToolService{startItems: []toolscore.ToolTypeChecklistItem{
+		{ID: "id-i1", Position: 1, Label: "Kabel"},
+		{ID: "id-i2", Position: 2, Label: "Bohrfutter"},
+	}}
+	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, activeAdmin(), svc)
 	rec := doRequest(surface, http.MethodPost, "/id-a/inspection/start", "tok", "")
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
@@ -954,6 +962,31 @@ func TestInspectionStartEligible(t *testing.T) {
 	}
 	if body["inspection_mode"] != toolscore.InspectionModeChecklist {
 		t.Errorf("mode = %+v, want %q", body["inspection_mode"], toolscore.InspectionModeChecklist)
+	}
+	items, ok := body["checklist_items"].([]any)
+	if !ok || len(items) != 2 {
+		t.Fatalf("checklist_items = %+v, want the two ordered items", body["checklist_items"])
+	}
+	if item, ok := items[0].(map[string]any); !ok || item["id"] != "id-i1" || item["position"] != float64(1) || item["label"] != "Kabel" {
+		t.Errorf("checklist_items[0] = %+v, want id-i1 / 1 / Kabel", items[0])
+	}
+	if item, ok := items[1].(map[string]any); !ok || item["id"] != "id-i2" || item["label"] != "Bohrfutter" {
+		t.Errorf("checklist_items[1] = %+v, want id-i2 / Bohrfutter", items[1])
+	}
+}
+
+func TestInspectionStartEligibleEmptyItems(t *testing.T) {
+	// START_ELIGIBLE_NO_ITEMS: a pass_fail (or item-less) type answers an EMPTY
+	// checklist_items array — never null — so the SPA's empty-checklist fallback
+	// is a well-formed array.
+	svc := &fakeToolService{startItems: nil}
+	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPost, "/id-a/inspection/start", "tok", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"checklist_items":[]`) {
+		t.Errorf("body = %s, want an EMPTY checklist_items array", rec.Body.String())
 	}
 }
 

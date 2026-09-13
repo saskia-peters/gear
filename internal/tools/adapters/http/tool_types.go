@@ -217,14 +217,7 @@ func (h *Handler) ArchiveToolType(w http.ResponseWriter, r *http.Request) {
 // jsonb extension surface is exposed (Story 4.4) and always serializes as a
 // JSON object; the active surface never carries an archived row.
 func toToolTypeDTO(tt *toolscore.ToolType) toolTypeDTO {
-	items := make([]toolTypeChecklistItemDTO, 0, len(tt.Items))
-	for _, item := range tt.Items {
-		items = append(items, toolTypeChecklistItemDTO{
-			ID:       item.ID,
-			Position: item.Position,
-			Label:    item.Label,
-		})
-	}
+	items := toChecklistItemDTOs(tt.Items)
 	return toolTypeDTO{
 		ID:                      tt.ID,
 		Name:                    tt.Name,

@@ -1,13 +1,25 @@
 // @vitest-environment jsdom
-import { render, screen, cleanup, fireEvent, act } from '@testing-library/react'
+import { render, screen, cleanup, fireEvent, act, within } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
 import { InspectionPage } from './InspectionPage.tsx'
 import { ThemeProvider } from '../context/ThemeContext.tsx'
+import type { ToolTypeChecklistItem } from '../auth/tools.ts'
 import styles from './InspectionPage.module.css'
 
 type InspectionEntry = string | { pathname: string; state?: Record<string, unknown> }
+
+// checklistItemsFixture is the ordered checklist of a checklist-mode tool type
+// (Story 5.2 mode-aware surface): three points the mode-aware surface renders
+// as ONE PassFailChips group per item.
+function checklistItemsFixture(): ToolTypeChecklistItem[] {
+  return [
+    { id: 'item-1', position: 1, label: 'Kabel' },
+    { id: 'item-2', position: 2, label: 'Bohrfutter' },
+    { id: 'item-3', position: 3, label: 'Sicherheitsschalter' },
+  ]
+}
 
 // submitInspection is forwarded to InspectionPage so the tests can HOLD the
 // Story 5.2 placeholder submit in flight — the double-submit guard needs a real
@@ -33,6 +45,7 @@ function eligibleStart(toolId: string, overrides: Record<string, unknown> = {}) 
     tool_type_id: 'id-t1',
     tool_type_name: 'Bohrmaschine',
     inspection_mode: 'checklist',
+    checklist_items: [],
     ...overrides,
   }
 }
@@ -74,16 +87,25 @@ describe('InspectionPage data loading (Story 5.1)', () => {
     cleanup()
   })
 
-  it('STATE: renders the tool name + mode from router state without re-fetching', async () => {
+  it('STATE: renders the tool name + identifier + type name + mode from router state without re-fetching', async () => {
     const mock = vi.fn()
     vi.stubGlobal('fetch', mock)
     renderPage({
       pathname: '/inspection/id-w1',
-      state: { tool_name: 'Bohrmaschine-01', inventory_number: 'GEAR000001', inspection_mode: 'checklist' },
+      state: {
+        tool_name: 'Bohrmaschine-01',
+        tool_type_name: 'Bohrmaschine',
+        inventory_number: 'GEAR000001',
+        inspection_mode: 'checklist',
+        checklist_items: [],
+      },
     })
 
     expect(await screen.findByText('Bohrmaschine-01')).toBeInTheDocument()
     expect(screen.getByText('GEAR000001')).toBeInTheDocument()
+    // Story 5.2 mode-aware header: the Gerätetyp row shows the type name.
+    expect(screen.getByText('Gerätetyp')).toBeInTheDocument()
+    expect(screen.getByText('Bohrmaschine')).toBeInTheDocument()
     expect(screen.getByText('Checkliste')).toBeInTheDocument()
     // Router state is authoritative: no server call for the display data.
     expect(mock).not.toHaveBeenCalled()
@@ -95,6 +117,8 @@ describe('InspectionPage data loading (Story 5.1)', () => {
 
     expect((await screen.findAllByText('Bohrmaschine-01')).length).toBeGreaterThanOrEqual(1)
     expect(screen.getByText('Checkliste')).toBeInTheDocument()
+    // The fetched /start payload carries the type name → the Gerätetyp row.
+    expect(screen.getByText('Bohrmaschine')).toBeInTheDocument()
   })
 
   it('IDENTIFIER_FALLBACK_FETCHED: on a refresh/deep link the /start payload has no inventory_number, so the identifier row falls back to the tool name', async () => {
@@ -130,18 +154,30 @@ describe('InspectionPage data loading (Story 5.1)', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Ein interner Fehler ist aufgetreten.')
   })
 
-  it('PASS_FAIL: a pass_fail mode maps to "Pass/Fail"', async () => {
+  it('PASS_FAIL: a pass_fail mode maps to "Pass/Fail" and renders the single pass/fail toggle', async () => {
     renderPage({ pathname: '/inspection/id-w2', state: { tool_name: 'Schleifmaschine-01', inspection_mode: 'pass_fail' } })
 
     expect((await screen.findAllByText('Schleifmaschine-01')).length).toBe(2)
     expect(screen.getByText('Pass/Fail')).toBeInTheDocument()
+    // pass_fail renders the SINGLE chips group (one overall result).
+    expect(screen.getByRole('group', { name: 'Ergebnis' })).toBeInTheDocument()
   })
 
-  it('MISSING_MODE: an absent inspection_mode falls back to the neutral dash', async () => {
+  it('MODE_DEFAULT_UNKNOWN: a missing or unknown inspection_mode defaults to pass_fail (the single toggle)', async () => {
+    // Missing mode → the safe default pass_fail.
     renderPage({ pathname: '/inspection/id-w1', state: { tool_name: 'Bohrmaschine-01' } })
 
-    expect((await screen.findAllByText('Bohrmaschine-01')).length).toBe(2)
-    expect(screen.getByText('–')).toBeInTheDocument()
+    expect(await screen.findByRole('group', { name: 'Ergebnis' })).toBeInTheDocument()
+    expect(screen.getByText('Pass/Fail')).toBeInTheDocument()
+
+    cleanup()
+
+    // Unknown mode value → pass_fail too (never an empty/unrenderable surface).
+    renderPage({ pathname: '/inspection/id-w1', state: { tool_name: 'Bohrmaschine-01', inspection_mode: 'matrix' } })
+
+    expect(await screen.findByRole('group', { name: 'Ergebnis' })).toBeInTheDocument()
+    expect(screen.getByText('Pass/Fail')).toBeInTheDocument()
+    expect(screen.queryByText('Checkliste')).not.toBeInTheDocument()
   })
 
   it('EMPTY_NAME_FALLBACK: an absent tool_name falls back to the tool id (`||`, not `??`)', async () => {
@@ -173,19 +209,43 @@ describe('InspectionPage UX foundation (Story 5.2)', () => {
     cleanup()
   })
 
-  function renderLoaded(entry: InspectionEntry = {
-    pathname: '/inspection/id-w1',
-    state: { tool_name: 'Bohrmaschine-01', inventory_number: 'GEAR000001', inspection_mode: 'checklist' },
-  }, submitInspection?: () => Promise<void>) {
+  // The pass_fail default entry: the SINGLE-chip surface the Story 5.2
+  // foundation tests exercise (a pass_fail fixture carries an empty checklist).
+  function renderLoaded(
+    entry: InspectionEntry = {
+      pathname: '/inspection/id-w1',
+      state: {
+        tool_name: 'Bohrmaschine-01',
+        tool_type_name: 'Bohrmaschine',
+        inventory_number: 'GEAR000001',
+        inspection_mode: 'pass_fail',
+      },
+    },
+    submitInspection?: () => Promise<void>,
+  ) {
     renderPage(entry, submitInspection)
   }
 
-  it('RENDER: shows the single-screen content — header (name + identifier + mode), chips and submit', async () => {
+  // The checklist entry: a checklist-mode type WITH its ordered items.
+  const CHECKLIST_ENTRY = {
+    pathname: '/inspection/id-w1',
+    state: {
+      tool_name: 'Bohrmaschine-01',
+      tool_type_name: 'Bohrmaschine',
+      inventory_number: 'GEAR000001',
+      inspection_mode: 'checklist',
+      checklist_items: checklistItemsFixture(),
+    },
+  }
+
+  it('RENDER: shows the single-screen content — header (name + identifier + type + mode), chips and submit', async () => {
     renderLoaded()
 
     expect(await screen.findByText('Bohrmaschine-01')).toBeInTheDocument()
     expect(screen.getByText('GEAR000001')).toBeInTheDocument()
-    expect(screen.getByText('Checkliste')).toBeInTheDocument()
+    expect(screen.getByText('Gerätetyp')).toBeInTheDocument()
+    expect(screen.getByText('Bohrmaschine')).toBeInTheDocument()
+    expect(screen.getByText('Pass/Fail')).toBeInTheDocument()
     expect(screen.getByRole('group', { name: 'Ergebnis' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Prüfung speichern' })).toBeInTheDocument()
   })
@@ -366,6 +426,171 @@ describe('InspectionPage UX foundation (Story 5.2)', () => {
     expect(section).not.toBeNull()
     expect(header.parentElement).toBe(section)
     expect(chips.parentElement).toBe(section)
+    expect(submitRow.parentElement).toBe(section)
+  })
+
+  it('CHECKLIST_HEADER: a checklist-mode type shows the tool type name in the Gerätetyp row (from state or the fetched /start payload)', async () => {
+    // From router state (the dashboard forwards it).
+    renderLoaded(CHECKLIST_ENTRY)
+    expect(await screen.findByText('Bohrmaschine-01')).toBeInTheDocument()
+    expect(screen.getByText('Gerätetyp')).toBeInTheDocument()
+    expect(screen.getByText('Bohrmaschine')).toBeInTheDocument()
+
+    // From the fetched /start response (deep-link refresh — the /start payload
+    // carries the type name + the checklist items).
+    cleanup()
+    stubFetch({
+      ok: true,
+      status: 200,
+      json: async () => eligibleStart('id-w1', { checklist_items: checklistItemsFixture() }),
+    })
+    renderPage('/inspection/id-w1')
+
+    expect(await screen.findByText('Bohrmaschine')).toBeInTheDocument()
+    expect(screen.getByText('Checkliste')).toBeInTheDocument()
+    expect(screen.getByRole('group', { name: 'Kabel' })).toBeInTheDocument()
+  })
+
+  it('CHECKLIST_RENDERS_PER_ITEM: checklist mode renders ONE chips group PER item with the item labels', async () => {
+    renderLoaded(CHECKLIST_ENTRY)
+
+    expect(await screen.findByRole('group', { name: 'Kabel' })).toBeInTheDocument()
+    expect(screen.getByRole('group', { name: 'Bohrfutter' })).toBeInTheDocument()
+    expect(screen.getByRole('group', { name: 'Sicherheitsschalter' })).toBeInTheDocument()
+    // Checklist mode has NO single "Ergebnis" group (that is the pass_fail
+    // toggle); every item's group carries its own pass + fail radio.
+    expect(screen.queryByRole('group', { name: 'Ergebnis' })).not.toBeInTheDocument()
+    expect(screen.getAllByRole('radio', { name: 'OK/BESTANDEN' })).toHaveLength(3)
+    expect(screen.getAllByRole('radio', { name: 'FEHLER/NICHT BESTANDEN' })).toHaveLength(3)
+  })
+
+  it('CHECKLIST_PER_ITEM_TOGGLE: toggling one item is independent of the others (a unique radio group per item)', async () => {
+    const user = userEvent.setup()
+    renderLoaded(CHECKLIST_ENTRY)
+    await screen.findByRole('group', { name: 'Kabel' })
+
+    const kabel = within(screen.getByRole('group', { name: 'Kabel' }))
+    const bohrfutter = within(screen.getByRole('group', { name: 'Bohrfutter' }))
+    const kabelPass = kabel.getByRole('radio', { name: 'OK/BESTANDEN' })
+    const bohrfutterPass = bohrfutter.getByRole('radio', { name: 'OK/BESTANDEN' })
+
+    // The radio groups are UNIQUE per item (each group's radios share a
+    // distinct name attribute) — selecting Kabel must not affect Bohrfutter.
+    expect(kabelPass).toHaveAttribute('name', 'inspection-item-item-1')
+    expect(bohrfutterPass).toHaveAttribute('name', 'inspection-item-item-2')
+
+    await user.click(kabel.getByText('OK/BESTANDEN').closest('label') as HTMLLabelElement)
+    expect(kabelPass).toBeChecked()
+    expect(bohrfutterPass).not.toBeChecked()
+
+    await user.click(bohrfutter.getByText('FEHLER/NICHT BESTANDEN').closest('label') as HTMLLabelElement)
+    expect(bohrfutter.getByRole('radio', { name: 'FEHLER/NICHT BESTANDEN' })).toBeChecked()
+    expect(kabelPass).toBeChecked()
+  })
+
+  it('CHECKLIST_SUBMIT_REQUIRES_ALL: the submit stays disabled until EVERY item has a result (FR-12)', async () => {
+    renderLoaded(CHECKLIST_ENTRY)
+    await screen.findByRole('group', { name: 'Kabel' })
+
+    const button = screen.getByRole('button', { name: 'Prüfung speichern' })
+    const kabel = within(screen.getByRole('group', { name: 'Kabel' }))
+    const bohrfutter = within(screen.getByRole('group', { name: 'Bohrfutter' }))
+    const schalter = within(screen.getByRole('group', { name: 'Sicherheitsschalter' }))
+
+    // No item answered → an outcome-less save is impossible.
+    expect(button).toBeDisabled()
+
+    // 2 of 3 answered → still disabled (all-items-required, FR-12).
+    fireEvent.click(kabel.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    fireEvent.click(bohrfutter.getByRole('radio', { name: 'FEHLER/NICHT BESTANDEN' }))
+    expect(button).toBeDisabled()
+
+    // All 3 answered → enabled.
+    fireEvent.click(schalter.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    expect(button).toBeEnabled()
+
+    // Deselecting one item re-disables the submit (a mis-click must not save
+    // a partial checklist).
+    fireEvent.click(kabel.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    expect(button).toBeDisabled()
+  })
+
+  it('CHECKLIST_SUBMIT_ALL_PASS: one submit with every item passed → "BESTANDEN" confirmation, then auto-return', async () => {
+    vi.useFakeTimers()
+    renderLoaded(CHECKLIST_ENTRY)
+    // State-path render is synchronous — the per-item groups exist immediately
+    // (findBy* would poll on a fake timer and hang, so getBy* is used here).
+    const kabel = within(screen.getByRole('group', { name: 'Kabel' }))
+    const bohrfutter = within(screen.getByRole('group', { name: 'Bohrfutter' }))
+    const schalter = within(screen.getByRole('group', { name: 'Sicherheitsschalter' }))
+    fireEvent.click(kabel.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    fireEvent.click(bohrfutter.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    fireEvent.click(schalter.getByRole('radio', { name: 'OK/BESTANDEN' }))
+
+    const button = screen.getByRole('button', { name: 'Prüfung speichern' })
+    fireEvent.click(button)
+    await act(async () => {})
+
+    const status = screen.getByRole('status')
+    expect(status).toHaveTextContent(/Bohrmaschine-01/)
+    expect(status).toHaveTextContent(/BESTANDEN/)
+    expect(status).not.toHaveTextContent(/NICHT BESTANDEN/)
+    expect(status).toHaveTextContent(/gespeichert/)
+
+    await act(async () => {
+      vi.advanceTimersByTime(2000)
+    })
+    expect(screen.getByText('Dashboard')).toBeInTheDocument()
+  })
+
+  it('CHECKLIST_SUBMIT_SOME_FAILED: a checklist with failed items confirms the failure COUNT ("2 von 3 Punkten NICHT BESTANDEN")', async () => {
+    vi.useFakeTimers()
+    renderLoaded(CHECKLIST_ENTRY)
+    // State-path render is synchronous — see CHECKLIST_SUBMIT_ALL_PASS.
+    const kabel = within(screen.getByRole('group', { name: 'Kabel' }))
+    const bohrfutter = within(screen.getByRole('group', { name: 'Bohrfutter' }))
+    const schalter = within(screen.getByRole('group', { name: 'Sicherheitsschalter' }))
+    fireEvent.click(kabel.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    fireEvent.click(bohrfutter.getByRole('radio', { name: 'FEHLER/NICHT BESTANDEN' }))
+    fireEvent.click(schalter.getByRole('radio', { name: 'FEHLER/NICHT BESTANDEN' }))
+
+    fireEvent.click(screen.getByRole('button', { name: 'Prüfung speichern' }))
+    await act(async () => {})
+
+    const status = screen.getByRole('status')
+    expect(status).toHaveTextContent(/2 von 3 Punkten NICHT BESTANDEN/)
+    expect(status).toHaveTextContent(/Bohrmaschine-01/)
+    expect(status).toHaveTextContent(/gespeichert/)
+  })
+
+  it('CHECKLIST_EMPTY: checklist mode with missing/empty items falls back to an empty-checklist note — no chips, submit disabled', async () => {
+    renderLoaded({
+      pathname: '/inspection/id-w1',
+      state: { tool_name: 'Bohrmaschine-01', inspection_mode: 'checklist' },
+    })
+
+    expect(await screen.findByText('Für diesen Gerätetyp sind keine Prüfpunkte hinterlegt.')).toBeInTheDocument()
+    // No chips groups render, and an empty checklist must not be savable as a
+    // meaningless BESTANDEN (safety-critical).
+    expect(screen.queryByRole('group', { name: 'Ergebnis' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('radio')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Prüfung speichern' })).toBeDisabled()
+  })
+
+  it('LAYOUT_SINGLE_COLUMN_CHECKLIST: in checklist mode the header, every item group and the submit stay SIBLINGS in one section (never split)', async () => {
+    renderLoaded(CHECKLIST_ENTRY)
+    await screen.findByRole('group', { name: 'Kabel' })
+
+    const header = screen.getByText('Bohrmaschine-01').closest('header') as HTMLElement
+    const kabelGroup = screen.getByRole('group', { name: 'Kabel' })
+    const submit = screen.getByRole('button', { name: 'Prüfung speichern' })
+    const submitRow = submit.closest(`.${styles.submitRow}`) as HTMLElement
+    const section = submit.closest(`.${styles.section}`) as HTMLElement
+
+    expect(section).not.toBeNull()
+    expect(header.parentElement).toBe(section)
+    expect(kabelGroup.parentElement).toBe(section)
+    expect(screen.getByRole('group', { name: 'Bohrfutter' }).parentElement).toBe(section)
     expect(submitRow.parentElement).toBe(section)
   })
 })

@@ -145,6 +145,7 @@ type ToolWithTypeQualification struct {
 	ToolTypeName            string
 	RequiredQualificationID string
 	InspectionMode          string
+	ChecklistItems          []ToolTypeChecklistItem
 }
 
 // ToolInput is the shared POST/PUT body (FR-9/FR-10). ScheduleID is the

@@ -54,15 +54,17 @@ type dashboardToolDTO struct {
 }
 
 // inspectionStartDTO is the eligible POST /api/v1/tools/{id}/inspection/start
-// payload (Story 5.1, FR-11): the tool plus its type's inspection_mode —
-// enough for the stub inspection screen (the real screen is Stories
-// 5.2/5.4/5.5). No inspection record is created here.
+// payload (Story 5.1, FR-11): the tool plus its type's inspection_mode and —
+// for checklist-mode types — the type's ordered checklist items (Story 5.2
+// mode-aware start). The SPA renders the mode-appropriate surface from this.
+// No inspection record is created here.
 type inspectionStartDTO struct {
-	ToolID         string `json:"tool_id"`
-	ToolName       string `json:"tool_name"`
-	ToolTypeID     string `json:"tool_type_id"`
-	ToolTypeName   string `json:"tool_type_name"`
-	InspectionMode string `json:"inspection_mode"`
+	ToolID         string                     `json:"tool_id"`
+	ToolName       string                     `json:"tool_name"`
+	ToolTypeID     string                     `json:"tool_type_id"`
+	ToolTypeName   string                     `json:"tool_type_name"`
+	InspectionMode string                     `json:"inspection_mode"`
+	ChecklistItems []toolTypeChecklistItemDTO `json:"checklist_items"`
 }
 
 // ToolRoutes returns the Tool tool router (Story 4.3 + 4-3b, FR-9/FR-10):
@@ -169,6 +171,7 @@ func (h *Handler) StartInspection(w http.ResponseWriter, r *http.Request) {
 		ToolTypeID:     result.ToolTypeID,
 		ToolTypeName:   result.ToolTypeName,
 		InspectionMode: result.InspectionMode,
+		ChecklistItems: toChecklistItemDTOs(result.ChecklistItems),
 	})
 }
 
@@ -389,4 +392,19 @@ func (h *Handler) mapToolError(w http.ResponseWriter, r *http.Request, err error
 		h.log().Error("tool request failed unexpectedly", "error", err)
 		httpapi.WriteError(w, http.StatusInternalServerError, "internal_error", "Ein interner Fehler ist aufgetreten.")
 	}
+}
+// toChecklistItemDTOs maps the ordered domain checklist items to the wire shape
+// (Story 5.2 mode-aware start / Story 4.2 type surface). Shared by the
+// tool-type and inspection-start DTOs so the two surfaces serialize items
+// identically.
+func toChecklistItemDTOs(items []toolscore.ToolTypeChecklistItem) []toolTypeChecklistItemDTO {
+	out := make([]toolTypeChecklistItemDTO, 0, len(items))
+	for _, item := range items {
+		out = append(out, toolTypeChecklistItemDTO{
+			ID:       item.ID,
+			Position: item.Position,
+			Label:    item.Label,
+		})
+	}
+	return out
 }

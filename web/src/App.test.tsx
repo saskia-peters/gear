@@ -731,17 +731,28 @@ describe('App & Dashboard Foundation', () => {
     expect(await screen.findByRole('heading', { level: 2, name: 'Anmeldung' })).toBeInTheDocument()
   })
 
-  it('INSPECTION_ROUTE: the inspection screen renders the tool name + identifier + mode (Stories 5.1/5.2)', async () => {
+  it('INSPECTION_ROUTE: the inspection screen renders the tool name + identifier + type + mode (Stories 5.1/5.2)', async () => {
     // The qualification-gated start navigates to /inspection/:toolId with the
     // eligible /start payload as router state; Story 5.2 adds the inventory
-    // number (from the tool list) so the header shows the identifier.
+    // number (from the tool list), the type name and — for a checklist-mode
+    // type — the ordered checklist items (the mode-aware surface renders one
+    // Pass/Fail group per item).
     stubSessionValidation(validProfile())
     await act(async () => {
       render(
         <ThemeProvider>
           <MemoryRouter
             initialEntries={[
-              { pathname: '/inspection/id-w1', state: { tool_name: 'Bohrmaschine-01', inspection_mode: 'checklist', inventory_number: 'GEAR000001' } },
+              {
+                pathname: '/inspection/id-w1',
+                state: {
+                  tool_name: 'Bohrmaschine-01',
+                  tool_type_name: 'Bohrmaschine',
+                  inspection_mode: 'checklist',
+                  inventory_number: 'GEAR000001',
+                  checklist_items: [{ id: 'item-1', position: 1, label: 'Kabel' }],
+                },
+              },
             ]}
           >
             <AppRoutes />
@@ -755,7 +766,11 @@ describe('App & Dashboard Foundation', () => {
     ).toBeInTheDocument()
     expect(screen.getByText('Bohrmaschine-01')).toBeInTheDocument()
     expect(screen.getByText('GEAR000001')).toBeInTheDocument()
+    expect(screen.getByText('Gerätetyp')).toBeInTheDocument()
+    expect(screen.getByText('Bohrmaschine')).toBeInTheDocument()
     expect(screen.getByText('Checkliste')).toBeInTheDocument()
+    // Checklist mode: one Pass/Fail group per item (each legend = the item).
+    expect(screen.getByRole('group', { name: 'Kabel' })).toBeInTheDocument()
   })
 
   it('INSPECTION_ROUTE_PROTECTED: redirects to /login without a session token', async () => {

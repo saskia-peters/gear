@@ -23,13 +23,21 @@ function InspectionStubRoute() {
   const location = useLocation()
   // The stub route captures the EXACT navigation-state object the dashboard
   // builds (Story 5.1/5.2), so the SPA_200 test can assert the real state.
-  const state = (location.state ?? {}) as { tool_name?: string; inventory_number?: string; inspection_mode?: string }
+  const state = (location.state ?? {}) as {
+    tool_name?: string
+    tool_type_name?: string
+    inventory_number?: string
+    inspection_mode?: string
+    checklist_items?: unknown[]
+  }
   return (
     <div>
       InspectionStub <span data-testid="stub-tool-id">{toolId}</span>{' '}
       <span data-testid="stub-tool-name">{state.tool_name}</span>{' '}
+      <span data-testid="stub-tool-type-name">{state.tool_type_name}</span>{' '}
       <span data-testid="stub-inventory-number">{state.inventory_number}</span>{' '}
-      <span data-testid="stub-inspection-mode">{state.inspection_mode}</span>
+      <span data-testid="stub-inspection-mode">{state.inspection_mode}</span>{' '}
+      <span data-testid="stub-checklist-count">{state.checklist_items?.length ?? 0}</span>
     </div>
   )
 }
@@ -162,7 +170,7 @@ describe('DashboardPage inspection start (Story 5.1, FR-11/AD-7)', () => {
     stubFetchStart(
       [dashboardToolFixture('id-w1', 'Bohrmaschine-01')],
       200,
-      { tool_id: 'id-w1', tool_name: 'Bohrmaschine-01', tool_type_id: 'id-t1', tool_type_name: 'Bohrmaschine', inspection_mode: 'checklist' },
+      { tool_id: 'id-w1', tool_name: 'Bohrmaschine-01', tool_type_id: 'id-t1', tool_type_name: 'Bohrmaschine', inspection_mode: 'checklist', checklist_items: [] },
     )
     renderPage()
     await screen.findByText('Bohrmaschine-01')
@@ -175,10 +183,14 @@ describe('DashboardPage inspection start (Story 5.1, FR-11/AD-7)', () => {
     // Story 5.1/5.2: the navigation-state object the dashboard builds carries
     // the tool name, the inspection mode and the inventory number (the latter
     // from the tool LIST — the /start payload has no identifier), so the
-    // inspection header can show it.
+    // inspection header can show it. The mode-aware surface additionally
+    // receives the type name + the type's checklist items from the /start
+    // payload (the checklist-mode surface renders without a re-fetch).
     expect(screen.getByTestId('stub-tool-name')).toHaveTextContent('Bohrmaschine-01')
+    expect(screen.getByTestId('stub-tool-type-name')).toHaveTextContent('Bohrmaschine')
     expect(screen.getByTestId('stub-inspection-mode')).toHaveTextContent('checklist')
     expect(screen.getByTestId('stub-inventory-number')).toHaveTextContent('GEAR000001')
+    expect(screen.getByTestId('stub-checklist-count')).toHaveTextContent('0')
   })
 
   it('SPA_403: an ineligible click shows the German reason inline and disables that row for the session (persists across list refetches)', async () => {
@@ -286,6 +298,7 @@ describe('DashboardPage inspection start (Story 5.1, FR-11/AD-7)', () => {
         tool_type_id: 'id-t1',
         tool_type_name: 'Bohrmaschine',
         inspection_mode: 'checklist',
+        checklist_items: [],
       }),
     })
     expect(await screen.findByText('InspectionStub')).toBeInTheDocument()
