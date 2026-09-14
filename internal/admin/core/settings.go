@@ -124,6 +124,9 @@ const (
 	MsgSmtpTestSent        = "Test-E-Mail erfolgreich gesendet."
 	MsgSmtpNotConfigured   = "E-Mail-Versand ist nicht konfiguriert."
 	MsgSmtpPasswordInvalid = "Das gespeicherte SMTP-Passwort kann nicht entschlüsselt werden."
+	// MsgSmtpTestRecipientInvalid rejects a missing/malformed recipient for the
+	// test-send action (the SPA asks for the receiver before sending).
+	MsgSmtpTestRecipientInvalid = "Bitte gib eine gültige Empfängeradresse an."
 	// MsgSmtpTestFailed is the generic inline message for a test-send failure.
 	// The detailed engine/TLS/cert error is logged structured (NFR-O1) and
 	// NEVER surfaced to the client (no SMTP/host/TLS detail leaks).
@@ -397,14 +400,25 @@ func (s *Service) UpdateSmtpSettings(ctx context.Context, actorID string, input 
 	return persisted, nil
 }
 
-// TestSmtpSettings sends a test email to the acting admin through the
-// configured server (TEST_OK / TEST_FAIL / DECRYPT_FAIL). Delivery failures
-// return a 200-style result with a GENERIC German error — the detailed
-// engine/TLS/cert error is logged structured (NFR-O1) and never surfaced
-// inline. Every attempt is audited (admin.settings.email.test).
-func (s *Service) TestSmtpSettings(ctx context.Context, actorID, actorEmail string) (*SmtpTestResult, error) {
+// TestSmtpSettings sends a test email to the given recipient through the
+// configured server (TEST_OK / TEST_FAIL / DECRYPT_FAIL). The recipient is the
+// client-supplied receiver (the SPA asks for it before sending); it is
+// validated — missing/malformed/oversized answers the 400-class sentinel and
+// is never audited as an attempt. Delivery failures return a 200-style result
+// with a GENERIC German error — the detailed engine/TLS/cert error is logged
+// structured (NFR-O1) and never surfaced inline. Every attempt is audited
+// (admin.settings.email.test).
+func (s *Service) TestSmtpSettings(ctx context.Context, actorID, to string) (*SmtpTestResult, error) {
 	if err := s.requireSettingsPermission(ctx, actorID); err != nil {
 		return nil, err
+	}
+
+	recipient := strings.TrimSpace(to)
+	if recipient == "" || !strings.Contains(recipient, "@") {
+		return nil, &InvalidSmtpSettingsError{Message: MsgSmtpTestRecipientInvalid}
+	}
+	if len(recipient) > 254 || strings.ContainsAny(recipient, "\r\n") {
+		return nil, &InvalidSmtpSettingsError{Message: MsgSmtpTestRecipientInvalid}
 	}
 
 	settings, err := s.store.GetSmtpSettings(ctx)
@@ -412,7 +426,7 @@ func (s *Service) TestSmtpSettings(ctx context.Context, actorID, actorEmail stri
 		return nil, fmt.Errorf("admin core: failed to read smtp settings: %w", err)
 	}
 	if settings == nil || !settings.DeliveryUsable() {
-		s.auditSettings(ctx, actorID, AuditOperationSmtpSettingsTest, fmt.Sprintf("to=%s result=skipped not_configured", actorEmail))
+		s.auditSettings(ctx, actorID, AuditOperationSmtpSettingsTest, fmt.Sprintf("to=%s result=skipped not_configured", recipient))
 		return &SmtpTestResult{Ok: false, Message: MsgSmtpNotConfigured}, nil
 	}
 
@@ -422,8 +436,8 @@ func (s *Service) TestSmtpSettings(ctx context.Context, actorID, actorEmail stri
 		if err != nil {
 			// DECRYPT_FAIL: stored ciphertext is unreadable (wrong/rotated key
 			// or tampering). Clear German error, logged structured, audited.
-			s.log().Warn("smtp test failed: stored password cannot be decrypted", "to", actorEmail, "error", err)
-			s.auditSettings(ctx, actorID, AuditOperationSmtpSettingsTest, fmt.Sprintf("to=%s result=failed decrypt", actorEmail))
+			s.log().Warn("smtp test failed: stored password cannot be decrypted", "to", recipient, "error", err)
+			s.auditSettings(ctx, actorID, AuditOperationSmtpSettingsTest, fmt.Sprintf("to=%s result=failed decrypt", recipient))
 			return &SmtpTestResult{Ok: false, Message: MsgSmtpPasswordInvalid}, nil
 		}
 	}
@@ -438,20 +452,20 @@ func (s *Service) TestSmtpSettings(ctx context.Context, actorID, actorEmail stri
 		Password:   password,
 		From:       settings.SenderAddress,
 		SenderName: settings.SenderName,
-		To:         actorEmail,
+		To:         recipient,
 		Subject:    subject,
 		Body:       body,
 	}); err != nil {
 		// TEST_FAIL: unreachable server / auth rejected. Generic inline German
 		// message (no SMTP/TLS/cert detail leaks), full detail logged
 		// structured (NFR-O1), audited — never a generic 5xx.
-		s.log().Warn("smtp test email send failed", "to", actorEmail, "host", settings.Host, "error", err)
-		s.auditSettings(ctx, actorID, AuditOperationSmtpSettingsTest, fmt.Sprintf("to=%s result=failed", actorEmail))
+		s.log().Warn("smtp test email send failed", "to", recipient, "host", settings.Host, "error", err)
+		s.auditSettings(ctx, actorID, AuditOperationSmtpSettingsTest, fmt.Sprintf("to=%s result=failed", recipient))
 		return &SmtpTestResult{Ok: false, Message: MsgSmtpTestFailed}, nil
 	}
 
-	s.log().Info("smtp test email sent", "to", actorEmail, "host", settings.Host)
-	s.auditSettings(ctx, actorID, AuditOperationSmtpSettingsTest, fmt.Sprintf("to=%s result=ok", actorEmail))
+	s.log().Info("smtp test email sent", "to", recipient, "host", settings.Host)
+	s.auditSettings(ctx, actorID, AuditOperationSmtpSettingsTest, fmt.Sprintf("to=%s result=ok", recipient))
 	return &SmtpTestResult{Ok: true, Message: MsgSmtpTestSent}, nil
 }
 

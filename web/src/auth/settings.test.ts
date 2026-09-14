@@ -81,17 +81,14 @@ describe('settings client', () => {
     expect(body.password).toBe('geheim123')
   })
 
-  it('testSmtpEmail POSTs /smtp/test and returns the inline result', async () => {
+  it('testSmtpEmail POSTs /smtp/test with the receiver and returns the inline result', async () => {
     const mock = stubOk({ ok: true, message: 'Test-E-Mail erfolgreich gesendet.' })
-    const result = await testSmtpEmail()
+    const result = await testSmtpEmail('ziel@example.com')
     expect(result.ok).toBe(true)
-    expect(mock).toHaveBeenCalledWith(`${SMTP_URL}/test`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        Authorization: 'Bearer sesstoken123',
-      },
-    })
+    const [url, init] = mock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe(`${SMTP_URL}/test`)
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(init.body as string)).toEqual({ to: 'ziel@example.com' })
   })
 
   it('listBackupDestinations GETs /backup with the bearer token', async () => {

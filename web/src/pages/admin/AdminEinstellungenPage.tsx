@@ -36,6 +36,7 @@ import type {
   SystemSetting,
 } from '../../auth/settings.ts'
 import { InfoPopup } from '../../components/InfoPopup.tsx'
+import { PromptDialog } from '../../components/PromptDialog.tsx'
 import styles from './AdminEinstellungenPage.module.css'
 
 const SECURITY_OPTIONS: ReadonlyArray<{ value: SmtpSecurity; label: string }> = [
@@ -211,6 +212,7 @@ function EmailSettingsTab({ onApiError }: { onApiError: (err: unknown) => boolea
   const [passwordConfigured, setPasswordConfigured] = useState(false)
   const [busy, setBusy] = useState(false)
   const [feedback, setFeedback] = useState<Feedback>(null)
+  const [testDialogOpen, setTestDialogOpen] = useState(false)
 
   // apply populates the form from the server settings, never the password
   // (write-only, NFR-S4).
@@ -274,11 +276,11 @@ function EmailSettingsTab({ onApiError }: { onApiError: (err: unknown) => boolea
     }
   }
 
-  async function sendTestEmail() {
+  async function sendTestEmail(recipient: string) {
     setBusy(true)
     setFeedback(null)
     try {
-      const result = await testSmtpEmail()
+      const result = await testSmtpEmail(recipient)
       setFeedback({ kind: result.ok ? 'success' : 'error', message: result.message })
     } catch (err) {
       if (onApiError(err)) return
@@ -329,7 +331,7 @@ function EmailSettingsTab({ onApiError }: { onApiError: (err: unknown) => boolea
               type="button"
               className={styles.testButton}
               disabled={busy}
-              onClick={() => void sendTestEmail()}
+              onClick={() => setTestDialogOpen(true)}
             >
               Sendetest-E-Mail
             </button>
@@ -466,6 +468,23 @@ function EmailSettingsTab({ onApiError }: { onApiError: (err: unknown) => boolea
             />
           </div>
         </form>
+      )}
+
+      {testDialogOpen && (
+        <PromptDialog
+          title="Test-E-Mail senden"
+          label="Empfängeradresse"
+          placeholder="z. B. max@beispiel.de"
+          submitLabel="Senden"
+          cancelLabel="Abbrechen"
+          emptyMessage="Bitte gib eine Empfängeradresse ein."
+          validate={(value) => (value.includes('@') ? null : 'Bitte gib eine gültige Empfängeradresse an.')}
+          onSubmit={(recipient) => {
+            setTestDialogOpen(false)
+            void sendTestEmail(recipient)
+          }}
+          onClose={() => setTestDialogOpen(false)}
+        />
       )}
     </>
   )

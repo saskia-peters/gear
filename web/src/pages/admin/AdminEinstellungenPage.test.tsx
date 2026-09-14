@@ -191,8 +191,8 @@ describe('AdminEinstellungenPage', () => {
     expect(await screen.findByRole('alert')).toHaveTextContent('Bitte gib einen SMTP-Host an.')
   })
 
-  it('TEST_OK: Sendetest-E-Mail shows the inline success', async () => {
-    stubFetchRoutes([
+  it('TEST_OK: Sendetest-E-Mail asks for the receiver in a dialog and shows the inline success', async () => {
+    const fetchMock = stubFetchRoutes([
       stubGet(settingsFixture()),
       {
         matcher: (url, init) => url === SMTP_TEST_URL && init?.method === 'POST',
@@ -205,8 +205,19 @@ describe('AdminEinstellungenPage', () => {
     await screen.findByLabelText('SMTP-Host')
     await user.click(screen.getByRole('button', { name: 'Sendetest-E-Mail' }))
 
+    // The receiver prompt opens before any request goes out.
+    const dialog = await screen.findByRole('dialog', { name: 'Test-E-Mail senden' })
+    expect(dialog).toBeInTheDocument()
+    await user.type(screen.getByLabelText('Empfängeradresse'), 'ziel@example.com')
+    await user.click(screen.getByRole('button', { name: 'Senden' }))
+
     expect(await screen.findByText('Test-E-Mail erfolgreich gesendet.')).toBeInTheDocument()
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    // The receiver travelled in the POST body.
+    const postCall = fetchMock.mock.calls.find(([url, init]) => url === SMTP_TEST_URL && init?.method === 'POST')
+    expect(postCall).toBeTruthy()
+    const body = JSON.parse((postCall![1] as RequestInit).body as string)
+    expect(body.to).toBe('ziel@example.com')
   })
 
   it('TEST_FAIL: an SMTP failure shows the inline German error (never a toast)', async () => {
@@ -222,8 +233,55 @@ describe('AdminEinstellungenPage', () => {
 
     await screen.findByLabelText('SMTP-Host')
     await user.click(screen.getByRole('button', { name: 'Sendetest-E-Mail' }))
+    await user.type(await screen.findByLabelText('Empfängeradresse'), 'ziel@example.com')
+    await user.click(screen.getByRole('button', { name: 'Senden' }))
 
     expect(await screen.findByRole('alert')).toHaveTextContent('Die Test-E-Mail konnte nicht gesendet werden.')
+  })
+
+  it('TEST_PROMPT_EMPTY: sending with an empty receiver is blocked inline, no POST', async () => {
+    const fetchMock = stubFetchRoutes([stubGet(settingsFixture())])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByLabelText('SMTP-Host')
+    await user.click(screen.getByRole('button', { name: 'Sendetest-E-Mail' }))
+    await screen.findByLabelText('Empfängeradresse')
+    await user.click(screen.getByRole('button', { name: 'Senden' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Bitte gib eine Empfängeradresse ein.')
+    const postCalls = fetchMock.mock.calls.filter(([url, init]) => url === SMTP_TEST_URL && init?.method === 'POST')
+    expect(postCalls).toHaveLength(0)
+  })
+
+  it('TEST_PROMPT_INVALID: a malformed receiver is rejected inline with the German message, no POST', async () => {
+    const fetchMock = stubFetchRoutes([stubGet(settingsFixture())])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByLabelText('SMTP-Host')
+    await user.click(screen.getByRole('button', { name: 'Sendetest-E-Mail' }))
+    await user.type(await screen.findByLabelText('Empfängeradresse'), 'kein-at')
+    await user.click(screen.getByRole('button', { name: 'Senden' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Bitte gib eine gültige Empfängeradresse an.')
+    const postCalls = fetchMock.mock.calls.filter(([url, init]) => url === SMTP_TEST_URL && init?.method === 'POST')
+    expect(postCalls).toHaveLength(0)
+  })
+
+  it('TEST_PROMPT_CANCEL: Abbrechen closes the receiver prompt without sending', async () => {
+    const fetchMock = stubFetchRoutes([stubGet(settingsFixture())])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByLabelText('SMTP-Host')
+    await user.click(screen.getByRole('button', { name: 'Sendetest-E-Mail' }))
+    expect(await screen.findByRole('dialog', { name: 'Test-E-Mail senden' })).toBeInTheDocument()
+    await user.click(screen.getByRole('button', { name: 'Abbrechen' }))
+
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+    const postCalls = fetchMock.mock.calls.filter(([url, init]) => url === SMTP_TEST_URL && init?.method === 'POST')
+    expect(postCalls).toHaveLength(0)
   })
 
   it('FORBIDDEN: a 403 on load clears the admin flag and leaves the module', async () => {

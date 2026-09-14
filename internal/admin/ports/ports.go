@@ -31,11 +31,13 @@ type Service interface {
 	// is encrypted at rest and replaced, an absent one keeps the existing
 	// ciphertext (write-only edit).
 	UpdateSmtpSettings(ctx context.Context, actorID string, input core.UpdateSmtpSettingsInput) (*core.SmtpSettings, error)
-	// TestSmtpSettings sends a test email to the acting admin's address
-	// through the configured server and returns the inline German result
-	// (ok + message). Delivery failures are logged structured (NFR-O1) and
-	// audited; the action never answers a generic 5xx for an SMTP failure.
-	TestSmtpSettings(ctx context.Context, actorID, actorEmail string) (*core.SmtpTestResult, error)
+	// TestSmtpSettings sends a test email to the given recipient (the SPA asks
+	// the admin for the receiver before sending) through the configured server
+	// and returns the inline German result (ok + message). A missing/malformed
+	// recipient answers the 400-class sentinel. Delivery failures are logged
+	// structured (NFR-O1) and audited; the action never answers a generic 5xx
+	// for an SMTP failure.
+	TestSmtpSettings(ctx context.Context, actorID, to string) (*core.SmtpTestResult, error)
 
 	// ListBackupDestinations returns every destination, oldest first. The
 	// HTTP surface exposes only credential_configured per row — never the

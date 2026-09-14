@@ -29,6 +29,7 @@ type fakeService struct {
 	putErr   error
 	testRes  *core.SmtpTestResult
 	testErr  error
+	lastTestTo string
 
 	backupDests      []*core.BackupDestination
 	backupListErr    error
@@ -75,7 +76,8 @@ func (f *fakeService) UpdateSmtpSettings(_ context.Context, _ string, input core
 	return s, nil
 }
 
-func (f *fakeService) TestSmtpSettings(_ context.Context, _, _ string) (*core.SmtpTestResult, error) {
+func (f *fakeService) TestSmtpSettings(_ context.Context, _, to string) (*core.SmtpTestResult, error) {
+	f.lastTestTo = to
 	if f.testErr != nil {
 		return nil, f.testErr
 	}
@@ -377,10 +379,11 @@ func TestSmtpSettingsPutForbidden(t *testing.T) {
 }
 
 func TestSmtpSettingsPostTestOK(t *testing.T) {
-	// TEST_OK: 200-style {ok:true} result with German message.
+	// TEST_OK: 200-style {ok:true} result with German message; the recipient
+	// from the request body reaches the service.
 	svc := &fakeService{testRes: &core.SmtpTestResult{Ok: true, Message: core.MsgSmtpTestSent}}
 	surface := gateway([]string{core.SmtpSettingsPermission}, activeAdmin(), svc)
-	rec := doRequest(surface, http.MethodPost, "/smtp/test", "tok", "")
+	rec := doRequest(surface, http.MethodPost, "/smtp/test", "tok", `{"to":"ziel@example.com"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -391,6 +394,9 @@ func TestSmtpSettingsPostTestOK(t *testing.T) {
 	if !res.Ok || res.Message != core.MsgSmtpTestSent {
 		t.Errorf("result = %+v, want ok + %q", res, core.MsgSmtpTestSent)
 	}
+	if svc.lastTestTo != "ziel@example.com" {
+		t.Errorf("service received to = %q, want ziel@example.com", svc.lastTestTo)
+	}
 }
 
 func TestSmtpSettingsPostTestFail(t *testing.T) {
@@ -398,7 +404,7 @@ func TestSmtpSettingsPostTestFail(t *testing.T) {
 	// (never a generic 5xx, never the raw engine detail — finding 5).
 	svc := &fakeService{testRes: &core.SmtpTestResult{Ok: false, Message: core.MsgSmtpTestFailed}}
 	surface := gateway([]string{core.SmtpSettingsPermission}, activeAdmin(), svc)
-	rec := doRequest(surface, http.MethodPost, "/smtp/test", "tok", "")
+	rec := doRequest(surface, http.MethodPost, "/smtp/test", "tok", `{"to":"ziel@example.com"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200-style result (body %s)", rec.Code, rec.Body.String())
 	}
@@ -411,6 +417,47 @@ func TestSmtpSettingsPostTestFail(t *testing.T) {
 	}
 	if res.Message != core.MsgSmtpTestFailed {
 		t.Errorf("message = %q, want generic %q", res.Message, core.MsgSmtpTestFailed)
+	}
+}
+
+func TestSmtpSettingsPostTestInvalidRecipient(t *testing.T) {
+	// PUT_TYPE-style: a missing/malformed recipient in the request body is
+	// rejected by the service with a 400 invalid_request German (the SPA asks
+	// for the receiver, so an empty one is a client error).
+	svc := &fakeService{testErr: &core.InvalidSmtpSettingsError{Message: core.MsgSmtpTestRecipientInvalid}}
+	surface := gateway([]string{core.SmtpSettingsPermission}, activeAdmin(), svc)
+	for _, body := range []string{`{}`, `{"to":""}`, `{"to":"kein-at"}`} {
+		rec := doRequest(surface, http.MethodPost, "/smtp/test", "tok", body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("body %s: status = %d, want 400 (resp %s)", body, rec.Code, rec.Body.String())
+		}
+		var env httpapi.ErrorEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+			t.Fatalf("decoding 400 err = %v", err)
+		}
+		if env.Error.Code != "invalid_request" || env.Error.Message != core.MsgSmtpTestRecipientInvalid {
+			t.Errorf("body %s: envelope = %+v, want %q", body, env.Error, core.MsgSmtpTestRecipientInvalid)
+		}
+	}
+}
+
+func TestSmtpSettingsPostTestMalformedJSON(t *testing.T) {
+	// A malformed (or trailing-content) body answers the handler's 400 before
+	// the service is reached.
+	svc := &fakeService{}
+	surface := gateway([]string{core.SmtpSettingsPermission}, activeAdmin(), svc)
+	for _, body := range []string{`{bad`, `{"to":"a@b.c"} extra`} {
+		rec := doRequest(surface, http.MethodPost, "/smtp/test", "tok", body)
+		if rec.Code != http.StatusBadRequest {
+			t.Fatalf("body %q: status = %d, want 400 (resp %s)", body, rec.Code, rec.Body.String())
+		}
+		var env httpapi.ErrorEnvelope
+		if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+			t.Fatalf("decoding 400 err = %v", err)
+		}
+		if env.Error.Code != "invalid_request" {
+			t.Errorf("body %q: code = %q, want invalid_request", body, env.Error.Code)
+		}
 	}
 }
 

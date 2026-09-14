@@ -3,6 +3,7 @@ package http
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 
 	"github.com/saskia-peters/gear/internal/admin/core"
@@ -33,6 +34,12 @@ type smtpSettingsDTO struct {
 type smtpSettingsWriteDTO struct {
 	smtpSettingsDTO
 	Message string `json:"message"`
+}
+
+// smtpTestEmailRequest is the POST /smtp/test body: the receiver address the
+// SPA asks the admin for before sending. The server validates it.
+type smtpTestEmailRequest struct {
+	To string `json:"to"`
 }
 
 // GetSmtpSettings handles GET /api/v1/admin/settings/smtp (GET_INITIAL /
@@ -91,11 +98,12 @@ func (h *Handler) UpdateSmtpSettings(w http.ResponseWriter, r *http.Request) {
 }
 
 // TestSmtpEmail handles POST /api/v1/admin/settings/smtp/test (TEST_OK /
-// TEST_FAIL / DECRYPT_FAIL): it sends a test email to the acting admin's
-// address through the configured server and returns the inline German result.
-// SMTP failures answer a 200-style result {ok:false, message} (never a generic
-// 5xx), are logged structured (NFR-O1) and audited
-// (admin.settings.email.test).
+// TEST_FAIL / DECRYPT_FAIL): it sends a test email to the client-supplied
+// recipient through the configured server and returns the inline German
+// result. A missing/malformed recipient answers a 400 invalid_request German
+// (the SPA asks for the receiver in a popup before sending). SMTP failures
+// answer a 200-style result {ok:false, message} (never a generic 5xx), are
+// logged structured (NFR-O1) and audited (admin.settings.email.test).
 func (h *Handler) TestSmtpEmail(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFrom(r.Context())
 	if user == nil {
@@ -103,7 +111,20 @@ func (h *Handler) TestSmtpEmail(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	res, err := h.service.TestSmtpSettings(r.Context(), user.ID, user.Email)
+	var req smtpTestEmailRequest
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	if err := dec.Decode(&req); err != nil {
+		httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", "Ungültiges JSON-Format.")
+		return
+	}
+	// Reject trailing content after the JSON object (same buffered-decoder
+	// pattern as the system-settings PUT).
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", "Ungültiges JSON-Format.")
+		return
+	}
+
+	res, err := h.service.TestSmtpSettings(r.Context(), user.ID, req.To)
 	if err != nil {
 		h.mapSettingsError(w, r, err, user)
 		return

@@ -87,12 +87,14 @@ export async function updateSmtpSettings(input: SmtpSettingsInput): Promise<Smtp
   })) as SmtpSettingsWriteResult
 }
 
-// testSmtpEmail sends a test email to the acting admin through the configured
-// server and returns the inline German result (ok + message).
-export async function testSmtpEmail(): Promise<SmtpTestResult> {
+// testSmtpEmail sends a test email to the given receiver through the
+// configured server and returns the inline German result (ok + message). The
+// SPA asks the admin for the recipient in a popup before sending.
+export async function testSmtpEmail(to: string): Promise<SmtpTestResult> {
   return (await request(`${SMTP_URL}/test`, {
     method: 'POST',
     headers: authTokenHeaders(),
+    body: JSON.stringify({ to }),
   })) as SmtpTestResult
 }
 

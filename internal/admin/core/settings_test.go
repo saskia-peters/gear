@@ -373,6 +373,28 @@ func TestTestSmtpSettingsSendFail(t *testing.T) {
 	}
 }
 
+func TestTestSmtpSettingsInvalidRecipient(t *testing.T) {
+	// The recipient is client-supplied (the SPA asks for it): missing,
+	// malformed and oversized values answer the 400-class sentinel, are never
+	// sent and never audited as an attempt.
+	svc, store, _, audit, mailer := newTestService()
+	store.settings = &SmtpSettings{
+		Host: "smtp.example.com", Port: 25, Security: SmtpSecurityNone,
+		SenderAddress: "noreply@example.com",
+	}
+	for _, to := range []string{"", "   ", "kein-at", strings.Repeat("a", 250) + "@x.de", "a@\r\nb"} {
+		if _, err := svc.TestSmtpSettings(context.Background(), actorID, to); !errors.Is(err, ErrSmtpSettingsInvalid) {
+			t.Fatalf("to %q: err = %v, want ErrSmtpSettingsInvalid", to, err)
+		}
+	}
+	if len(mailer.params) != 0 {
+		t.Error("invalid recipient must never reach the mailer")
+	}
+	if len(audit.events) != 0 {
+		t.Error("invalid recipient must not be audited as an attempt")
+	}
+}
+
 func TestTestSmtpSettingsAnonymousRelay(t *testing.T) {
 	// A password-less config (none/starttls, no username) is usable: the test
 	// send works with an empty password (finding 3).
