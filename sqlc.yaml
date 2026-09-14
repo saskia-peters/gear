@@ -78,6 +78,7 @@ sql:
       - "./migrations/000023_tool_type_qualification_optional.up.sql"
       - "./migrations/000024_tools.up.sql"
       - "./migrations/000025_tool_inventory_number.up.sql"
+      - "./migrations/000027_inspections.up.sql"
     queries: "./internal/tools/adapters/postgres/queries.sql"
     gen:
       go:

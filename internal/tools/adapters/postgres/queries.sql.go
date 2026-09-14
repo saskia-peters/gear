@@ -211,6 +211,104 @@ func (q *Queries) DeleteToolTypeChecklistItems(ctx context.Context, toolTypeID p
 	return err
 }
 
+const getInspectionItems = `-- name: GetInspectionItems :many
+SELECT id, inspection_id, item_id, label, position, result
+FROM inspection_items
+WHERE inspection_id = $1
+ORDER BY position ASC
+`
+
+// The snapshotted ordered checklist items of ONE inspection (the item snapshot
+// at submit, FR-12), by position.
+func (q *Queries) GetInspectionItems(ctx context.Context, inspectionID pgtype.UUID) ([]InspectionItem, error) {
+	rows, err := q.db.Query(ctx, getInspectionItems, inspectionID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []InspectionItem
+	for rows.Next() {
+		var i InspectionItem
+		if err := rows.Scan(
+			&i.ID,
+			&i.InspectionID,
+			&i.ItemID,
+			&i.Label,
+			&i.Position,
+			&i.Result,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const getLatestInspection = `-- name: GetLatestInspection :one
+SELECT id, tool_id, inspector_id, mode, overall_result, notes, submitted_at
+FROM inspections
+WHERE tool_id = $1
+ORDER BY submitted_at DESC, id DESC
+LIMIT 1
+`
+
+// The LATEST inspection of a tool (reverse-chronological read, FR-18): the
+// derived-status input. No row → pgx.ErrNoRows (the repository maps it to a nil
+// "never-inspected" status, AD-5).
+func (q *Queries) GetLatestInspection(ctx context.Context, toolID pgtype.UUID) (Inspection, error) {
+	row := q.db.QueryRow(ctx, getLatestInspection, toolID)
+	var i Inspection
+	err := row.Scan(
+		&i.ID,
+		&i.ToolID,
+		&i.InspectorID,
+		&i.Mode,
+		&i.OverallResult,
+		&i.Notes,
+		&i.SubmittedAt,
+	)
+	return i, err
+}
+
+const getLatestPassInspection = `-- name: GetLatestPassInspection :one
+SELECT submitted_at
+FROM inspections
+WHERE tool_id = $1 AND overall_result = 'pass'
+ORDER BY submitted_at DESC, id DESC
+LIMIT 1
+`
+
+// The submitted_at of the LATEST PASSING inspection of a tool (the clock's
+// "last successful inspection" anchor, AD-5). No row → pgx.ErrNoRows (the
+// repository maps it to a nil anchor).
+func (q *Queries) GetLatestPassInspection(ctx context.Context, toolID pgtype.UUID) (pgtype.Timestamptz, error) {
+	row := q.db.QueryRow(ctx, getLatestPassInspection, toolID)
+	var submitted_at pgtype.Timestamptz
+	err := row.Scan(&submitted_at)
+	return submitted_at, err
+}
+
+const getLatestReinstatement = `-- name: GetLatestReinstatement :one
+SELECT created_at
+FROM reinstatements
+WHERE tool_id = $1
+ORDER BY created_at DESC, id DESC
+LIMIT 1
+`
+
+// The created_at of the LATEST reinstatement of a tool (the clock's
+// "last reinstated" anchor, AD-5/AD-9; the WRITE path is Story 5.6). No row →
+// pgx.ErrNoRows (the repository maps it to a nil anchor).
+func (q *Queries) GetLatestReinstatement(ctx context.Context, toolID pgtype.UUID) (pgtype.Timestamptz, error) {
+	row := q.db.QueryRow(ctx, getLatestReinstatement, toolID)
+	var created_at pgtype.Timestamptz
+	err := row.Scan(&created_at)
+	return created_at, err
+}
+
 const getToolTypeChecklistItems = `-- name: GetToolTypeChecklistItems :many
 SELECT id, tool_type_id, position, label, created_at, updated_at
 FROM tool_type_checklist_items
@@ -247,7 +345,7 @@ func (q *Queries) GetToolTypeChecklistItems(ctx context.Context, toolTypeID pgty
 }
 
 const getToolWithTypeQualification = `-- name: GetToolWithTypeQualification :one
-SELECT t.id, t.name, t.tool_type_id, tt.name AS tool_type_name, tt.required_qualification_id, tt.inspection_mode
+SELECT t.id, t.name, t.tool_type_id, tt.name AS tool_type_name, tt.required_qualification_id, tt.inspection_mode, t.schedule_id, tt.default_schedule_id
 FROM tools t
 JOIN tool_types tt ON tt.id = t.tool_type_id
 WHERE t.id = $1 AND t.archived_at IS NULL AND tt.archived_at IS NULL
@@ -260,6 +358,8 @@ type GetToolWithTypeQualificationRow struct {
 	ToolTypeName            string      `json:"tool_type_name"`
 	RequiredQualificationID pgtype.UUID `json:"required_qualification_id"`
 	InspectionMode          string      `json:"inspection_mode"`
+	ScheduleID              pgtype.UUID `json:"schedule_id"`
+	DefaultScheduleID       pgtype.UUID `json:"default_schedule_id"`
 }
 
 // The lean inspection-start read (Story 5.1, FR-11/AD-7): the ACTIVE tool plus
@@ -268,7 +368,9 @@ type GetToolWithTypeQualificationRow struct {
 // AD-8/AD-11). BOTH guards (`t.archived_at IS NULL` AND `tt.archived_at IS
 // NULL`) make a tool with an ARCHIVED type (or an archived/missing tool) answer
 // ErrToolNotFound — an active tool must never resolve a retired type's gating
-// data for the start (the row is non-existent to the surface).
+// data for the start (the row is non-existent to the surface). Story 5.3 also
+// carries the tool's schedule OVERRIDE and the type's DEFAULT schedule id (the
+// AD-5 interval-resolution inputs, resolved through the Admin SchedulesPort).
 func (q *Queries) GetToolWithTypeQualification(ctx context.Context, id pgtype.UUID) (GetToolWithTypeQualificationRow, error) {
 	row := q.db.QueryRow(ctx, getToolWithTypeQualification, id)
 	var i GetToolWithTypeQualificationRow
@@ -279,8 +381,84 @@ func (q *Queries) GetToolWithTypeQualification(ctx context.Context, id pgtype.UU
 		&i.ToolTypeName,
 		&i.RequiredQualificationID,
 		&i.InspectionMode,
+		&i.ScheduleID,
+		&i.DefaultScheduleID,
 	)
 	return i, err
+}
+
+const insertInspection = `-- name: InsertInspection :one
+
+INSERT INTO inspections (tool_id, inspector_id, mode, overall_result, notes)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, tool_id, inspector_id, mode, overall_result, notes, submitted_at
+`
+
+type InsertInspectionParams struct {
+	ToolID        pgtype.UUID `json:"tool_id"`
+	InspectorID   pgtype.UUID `json:"inspector_id"`
+	Mode          string      `json:"mode"`
+	OverallResult string      `json:"overall_result"`
+	Notes         pgtype.Text `json:"notes"`
+}
+
+// ============================================================================
+// Inspection queries (Story 5.3, FR-12/FR-13/FR-14/AD-4/AD-5): the
+// Tool-owned inspections + inspection_items + reinstatements tables. The write
+// (InsertInspection + InsertInspectionItem) runs in ONE transaction (inspection
+// + its snapshot items); the status read (GetToolInspectionStatus's building
+// blocks) feeds the shared derived-status/clock function — OOS is NEVER stored.
+// ============================================================================
+// Insert one inspection record and return the persisted row. The
+// overall_result and mode were validated by the core; inspector_id and notes
+// are snapshotted plain values (no FK, AD-8/3.4).
+func (q *Queries) InsertInspection(ctx context.Context, arg InsertInspectionParams) (Inspection, error) {
+	row := q.db.QueryRow(ctx, insertInspection,
+		arg.ToolID,
+		arg.InspectorID,
+		arg.Mode,
+		arg.OverallResult,
+		arg.Notes,
+	)
+	var i Inspection
+	err := row.Scan(
+		&i.ID,
+		&i.ToolID,
+		&i.InspectorID,
+		&i.Mode,
+		&i.OverallResult,
+		&i.Notes,
+		&i.SubmittedAt,
+	)
+	return i, err
+}
+
+const insertInspectionItem = `-- name: InsertInspectionItem :exec
+INSERT INTO inspection_items (inspection_id, item_id, label, position, result)
+VALUES ($1, $2, $3, $4, $5)
+`
+
+type InsertInspectionItemParams struct {
+	InspectionID pgtype.UUID `json:"inspection_id"`
+	ItemID       pgtype.UUID `json:"item_id"`
+	Label        string      `json:"label"`
+	Position     int32       `json:"position"`
+	Result       string      `json:"result"`
+}
+
+// Insert one snapshotted checklist item of an inspection (FR-12/FR-23): the
+// label + position come from the tool type's checklist at submit time (history
+// stays self-contained even if the template later changes); item_id is a plain
+// uuid (no FK). Called once per item inside the submit transaction.
+func (q *Queries) InsertInspectionItem(ctx context.Context, arg InsertInspectionItemParams) error {
+	_, err := q.db.Exec(ctx, insertInspectionItem,
+		arg.InspectionID,
+		arg.ItemID,
+		arg.Label,
+		arg.Position,
+		arg.Result,
+	)
+	return err
 }
 
 const insertToolTypeChecklistItem = `-- name: InsertToolTypeChecklistItem :exec

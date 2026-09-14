@@ -124,3 +124,8 @@ Triage output of review loops — real, non-story-blocking findings that are not
 - Orphaned/non-catalog `app_settings` rows are only logged by `CurrentAppSettings`, never surfaced — an admin has no signal that a row is drifted.
 - Down migration 000026 removes the `admin.settings.system` permission rows while Go code keeps the codes — inherent to down migrations (code and DB cannot roll back together); no action beyond awareness.
 - The client-abort guard in `mapSystemSettingError` only covers the default (500) branch; a canceled request hitting forbidden/invalid/unknown branches still writes to a dead connection. Minor.
+
+## Deferred from: code review (2026-09-14) of spec-5-3-out-of-service-flagging.md
+
+- No idempotency / at-most-once guard on `POST /api/v1/tools/{id}/inspection`: a client retry after a timeout/500, or a double-click racing the SPA button guard, can persist duplicate inspection records. The SPA double-submit guard (Story 5.2) and an idempotency key on the submit endpoint would harden; revisit when the submission UX (5.4/5.5) wires the real call.
+- The core submit unit tests derive status from a canned `fakeToolService`/fake-store `GetToolInspectionStatus` fixture that never incorporates the just-inserted inspection, so they don't prove the read-after-write wiring at the unit level — the real repo read-after-write is covered by the postgres integration test (`TestPostgresInspectionStore`). Test-quality note.

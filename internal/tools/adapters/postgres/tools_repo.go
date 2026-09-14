@@ -242,6 +242,8 @@ func (r *Repository) GetToolWithTypeQualification(ctx context.Context, id string
 		ToolTypeName:            row.ToolTypeName,
 		RequiredQualificationID: requiredQualificationID,
 		InspectionMode:          row.InspectionMode,
+		ScheduleID:              row.ScheduleID.String(),
+		DefaultScheduleID:       row.DefaultScheduleID.String(),
 		ChecklistItems:          r.checklistItemsForType(ctx, row.ToolTypeID),
 	}, nil
 }

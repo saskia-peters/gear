@@ -8,6 +8,33 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type Inspection struct {
+	ID            pgtype.UUID        `json:"id"`
+	ToolID        pgtype.UUID        `json:"tool_id"`
+	InspectorID   pgtype.UUID        `json:"inspector_id"`
+	Mode          string             `json:"mode"`
+	OverallResult string             `json:"overall_result"`
+	Notes         pgtype.Text        `json:"notes"`
+	SubmittedAt   pgtype.Timestamptz `json:"submitted_at"`
+}
+
+type InspectionItem struct {
+	ID           pgtype.UUID `json:"id"`
+	InspectionID pgtype.UUID `json:"inspection_id"`
+	ItemID       pgtype.UUID `json:"item_id"`
+	Label        string      `json:"label"`
+	Position     int32       `json:"position"`
+	Result       string      `json:"result"`
+}
+
+type Reinstatement struct {
+	ID        pgtype.UUID        `json:"id"`
+	ToolID    pgtype.UUID        `json:"tool_id"`
+	ActorID   pgtype.UUID        `json:"actor_id"`
+	Reason    string             `json:"reason"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+}
+
 type Tool struct {
 	ID              pgtype.UUID        `json:"id"`
 	Name            string             `json:"name"`

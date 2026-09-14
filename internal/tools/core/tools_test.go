@@ -26,6 +26,37 @@ type fakeToolStore struct {
 	created     []*Tool
 	updated     []*Tool
 	archivedIDs []string
+	inspections []*Inspection
+	status      *ToolInspectionStatus
+	statusErr   error
+}
+
+// InsertInspection emulates the repository's transactional insert (Story 5.3):
+// the record is assigned an id + submitted_at (the DB uuidv7 + now()) and kept
+// so tests can assert the persisted shape.
+func (f *fakeToolStore) InsertInspection(_ context.Context, inspection *Inspection) (*Inspection, error) {
+	persisted := *inspection
+	if persisted.ID == "" {
+		persisted.ID = "id-insp-" + inspection.ToolID
+	}
+	if persisted.SubmittedAt.IsZero() {
+		persisted.SubmittedAt = time.Now()
+	}
+	f.inspections = append(f.inspections, &persisted)
+	return &persisted, nil
+}
+
+// GetToolInspectionStatus returns the status-read fixture a test set (nil-safe:
+// an unset fixture reads as a never-inspected tool). statusErr lets tests
+// simulate a post-commit status-read failure (the best-effort path).
+func (f *fakeToolStore) GetToolInspectionStatus(_ context.Context, _ string) (*ToolInspectionStatus, error) {
+	if f.statusErr != nil {
+		return nil, f.statusErr
+	}
+	if f.status != nil {
+		return f.status, nil
+	}
+	return &ToolInspectionStatus{}, nil
 }
 
 func (f *fakeToolStore) ListTools(context.Context) ([]*Tool, error) {
@@ -127,7 +158,8 @@ func (f *fakeToolStore) ToolTypeExistsActive(_ context.Context, id string) (bool
 // the ACTIVE tool plus its type's required_qualification_id and inspection_mode
 // (intra-module JOIN on the Tool-owned types). A missing or archived tool (or a
 // tool whose type is absent from the fake — a wiring defect) answers
-// ErrToolNotFound.
+// ErrToolNotFound. Story 5.3 also carries the schedule-resolution inputs
+// (ScheduleID + DefaultScheduleID) and the type's ordered checklist items.
 func (f *fakeToolStore) GetToolWithTypeQualification(_ context.Context, id string) (*ToolWithTypeQualification, error) {
 	for _, t := range f.tools {
 		if t.ID != id {
@@ -145,6 +177,9 @@ func (f *fakeToolStore) GetToolWithTypeQualification(_ context.Context, id strin
 					ToolTypeName:            t.ToolTypeName,
 					RequiredQualificationID: tt.RequiredQualificationID,
 					InspectionMode:          tt.InspectionMode,
+					ScheduleID:              t.ScheduleID,
+					DefaultScheduleID:       tt.DefaultScheduleID,
+					ChecklistItems:          tt.Items,
 				}, nil
 			}
 		}

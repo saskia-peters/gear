@@ -172,27 +172,28 @@ func main() {
 	// (Story 6.1 owns the color-coded dashboard).
 	dashboardToolsSurface := auth.RequirePermission(sessionManager, userRepo, toolscore.DashboardViewPermission)(toolHandler.DashboardToolsRoutes())
 
-	// Story 5.1 — the qualification-gated inspection START is a NEW surface
-	// under /api/v1/tools with its OWN gate — one permission per surface
-	// (AD-6, FR-11/AD-7): only `inspection.submit` holders (all base roles) reach
-	// it. The core re-checks the exact code defense-in-depth (AD-6) and resolves
-	// the caller's granted qualifications through the User module's
+	// Story 5.1 + 5.3 — the qualification-gated inspection START and SUBMIT are
+	// a NEW surface under /api/v1/tools with its OWN gate — one permission per
+	// surface (AD-6, FR-11/AD-7): only `inspection.submit` holders (all base
+	// roles) reach it. The core re-checks the exact code defense-in-depth (AD-6)
+	// and resolves the caller's granted qualifications through the User module's
 	// QualificationCatalogPort (expiry-aware). It deliberately does NOT widen the
 	// dashboard.view gate — a dashboard.view-but-not-inspection.submit caller can
-	// still read the Werkzeugliste but 403s on the start.
-	inspectionStartSurface := auth.RequirePermission(sessionManager, userRepo, toolscore.InspectionSubmitPermission)(toolHandler.InspectionRoutes())
+	// still read the Werkzeugliste but 403s on the start/submit.
+	inspectionSurface := auth.RequirePermission(sessionManager, userRepo, toolscore.InspectionSubmitPermission)(toolHandler.InspectionRoutes())
 
 	// The two /api/v1/tools surfaces are combined into ONE router: the dashboard
-	// list (GET /, dashboard.view) and the inspection start (POST
-	// /{id}/inspection/start, inspection.submit). The inspection surface is
-	// mounted at the full path prefix (chi Mount strips it and preserves the
-	// {id} param) — InspectionRoutes owns the route pattern, never duplicated
-	// here. Each surface keeps ITS OWN gate — no shared middleware.
+	// list (GET /, dashboard.view) and the inspection start + submit (POST
+	// /{id}/inspection/start and POST /{id}/inspection, inspection.submit). The
+	// inspection surface is mounted at the full path prefix (chi Mount strips it
+	// and preserves the {id} param) — InspectionRoutes owns the route patterns,
+	// never duplicated here. Each surface keeps ITS OWN gate — no shared
+	// middleware.
 	toolsSurface := chi.NewRouter()
 	toolsSurface.NotFound(httpapi.NotFoundHandler())
 	toolsSurface.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
 	toolsSurface.Handle("/", dashboardToolsSurface)
-	toolsSurface.Mount("/{id}/inspection/start", inspectionStartSurface)
+	toolsSurface.Mount("/{id}/inspection", inspectionSurface)
 
 	// Demo route for the gateway composition tests: any active user holding
 	// `dashboard.view` (all base roles) can reach /api/v1/protected/me.

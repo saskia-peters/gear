@@ -147,12 +147,28 @@ func (f *fakeToolTypeStore) GetToolWithTypeQualification(_ context.Context, _ st
 	return nil, ErrToolNotFound
 }
 
+// The combined store dependency (Story 5.3) requires the InspectionStore
+// surface too. The tool-type fakes never exercise the inspection surface —
+// these stubs keep the shared constructor compilable without touching
+// tool-type tests.
+func (f *fakeToolTypeStore) InsertInspection(_ context.Context, _ *Inspection) (*Inspection, error) {
+	return nil, ErrToolNotFound
+}
+func (f *fakeToolTypeStore) GetToolInspectionStatus(_ context.Context, _ string) (*ToolInspectionStatus, error) {
+	return nil, ErrToolNotFound
+}
+
 // fakeSchedulesPort is an adminports.SchedulesPort over a fixed ACTIVE catalog.
+// err lets tests simulate a resolution failure (the submit interval path).
 type fakeSchedulesPort struct {
 	schedules []*admcore.Schedule
+	err       error
 }
 
 func (f *fakeSchedulesPort) CurrentSchedules(context.Context) ([]*admcore.Schedule, error) {
+	if f.err != nil {
+		return nil, f.err
+	}
 	return f.schedules, nil
 }
 

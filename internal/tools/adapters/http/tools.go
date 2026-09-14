@@ -3,6 +3,7 @@ package http
 import (
 	"encoding/json"
 	"errors"
+	"io"
 	"net/http"
 	"time"
 
@@ -67,6 +68,45 @@ type inspectionStartDTO struct {
 	ChecklistItems []toolTypeChecklistItemDTO `json:"checklist_items"`
 }
 
+// inspectionItemDTO is one persisted snapshotted checklist result in the
+// submit response (Story 5.3, FR-12).
+type inspectionItemDTO struct {
+	ID       string `json:"id"`
+	ItemID   string `json:"item_id"`
+	Label    string `json:"label"`
+	Position int    `json:"position"`
+	Result   string `json:"result"`
+}
+
+// inspectionDTO is the persisted inspection record in the submit response
+// (Story 5.3, FR-12/FR-13): identity + timestamp + mode + overall result +
+// notes + the ordered snapshot items (empty for pass_fail).
+type inspectionDTO struct {
+	ID            string              `json:"id"`
+	ToolID        string              `json:"tool_id"`
+	InspectorID   string              `json:"inspector_id"`
+	Mode          string              `json:"mode"`
+	OverallResult string              `json:"overall_result"`
+	Notes         string              `json:"notes"`
+	SubmittedAt   string              `json:"submitted_at"`
+	Items         []inspectionItemDTO `json:"items"`
+}
+
+// statusDTO is the derived status in the submit response (Story 5.3, AD-4/AD-5):
+// `oos|red|orange|green` plus the next-due timestamp (null for `oos` and the
+// never-inspected `red`).
+type statusDTO struct {
+	Status  string  `json:"status"`
+	NextDue *string `json:"next_due"`
+}
+
+// inspectionSubmitResponseDTO is the POST /api/v1/tools/{id}/inspection
+// payload (Story 5.3): the persisted inspection record + the derived status.
+type inspectionSubmitResponseDTO struct {
+	Inspection inspectionDTO `json:"inspection"`
+	Status     statusDTO     `json:"status"`
+}
+
 // ToolRoutes returns the Tool tool router (Story 4.3 + 4-3b, FR-9/FR-10):
 // GET/POST / and PUT /{id}, POST /{id}/archive — soft archive only, NO DELETE
 // endpoint (archived rows keep FK history intact). The outer mount gate is
@@ -116,21 +156,22 @@ func (h *Handler) DashboardToolsRoutes() http.Handler {
 	return r
 }
 
-// InspectionRoutes returns the inspection-start router (Story 5.1, FR-11/AD-7):
-// the POST inspection-start handler at the router ROOT — the composition root
-// mounts this router at the full path prefix (/api/v1/tools/{id}/inspection/start
-// via chi Mount, which strips the prefix and preserves the {id} param), so the
-// route pattern is defined ONCE here and never duplicated at the mount site. The
-// whole router is gated by `inspection.submit` at the composition-root mount
-// point — its OWN gate, one permission per surface (AD-6) — so this router
-// carries no gateway itself; 404/405 answer with the uniform JSON envelope so no
-// sub-path can emit a plain-text body. No inspection record is created here
-// (Stories 5.2/5.4/5.5).
+// InspectionRoutes returns the inspection router (Story 5.1 + 5.3, FR-11/AD-7):
+// the POST inspection-start handler at /start and the POST inspection-submit
+// handler at the router ROOT. The composition root mounts this router at the
+// full path prefix (/api/v1/tools/{id}/inspection via chi Mount, which strips
+// the prefix and preserves the {id} param), so the route patterns are defined
+// ONCE here and never duplicated at the mount site. The whole router is gated
+// by `inspection.submit` at the composition-root mount point — its OWN gate,
+// one permission per surface (AD-6) — so this router carries no gateway itself;
+// 404/405 answer with the uniform JSON envelope so no sub-path can emit a
+// plain-text body.
 func (h *Handler) InspectionRoutes() http.Handler {
 	r := chi.NewRouter()
 	r.NotFound(httpapi.NotFoundHandler())
 	r.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
-	r.Post("/", h.StartInspection)
+	r.Post("/start", h.StartInspection)
+	r.Post("/", h.SubmitInspection)
 	return r
 }
 
@@ -173,6 +214,63 @@ func (h *Handler) StartInspection(w http.ResponseWriter, r *http.Request) {
 		InspectionMode: result.InspectionMode,
 		ChecklistItems: toChecklistItemDTOs(result.ChecklistItems),
 	})
+}
+
+// SubmitInspection handles POST /api/v1/tools/{id}/inspection
+// (SUBMIT_PASSFAIL / SUBMIT_CHECKLIST / SUBMIT_INVALID / SUBMIT_GATED /
+// SUBMIT_ARCHIVED / SUBMIT_UNKNOWN, Story 5.3, FR-12/FR-13/FR-14/AD-4/AD-5):
+// it re-checks `inspection.submit` AND the tool-type qualification on submit
+// (never trusts the client, FR-11), validates the mode/result/notes/items
+// contract, persists the inspection + its snapshot items and returns the
+// record + the shared derived status (OOS on a failed inspection). Gated
+// `inspection.submit` at the mount; the core re-checks defense-in-depth (AD-6).
+//
+// Error mapping (uniform envelope):
+//   - 401 unauthorized when the caller is not authenticated
+//   - 403 forbidden when the caller lacks inspection.submit (no tool data
+//     exposed) or the tool's required qualification (German reason)
+//   - 404 not_found for an unknown / archived tool id
+//   - 400 invalid_request with a German message for a validation failure
+//     (bad mode/result, over-long notes, checklist mismatch, items on a
+//     pass_fail mode)
+//   - 500 internal_error on an unexpected failure
+func (h *Handler) SubmitInspection(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFrom(r.Context())
+	if user == nil {
+		httpapi.WriteError(w, http.StatusUnauthorized, "unauthorized", "Authentifizierung erforderlich.")
+		return
+	}
+
+	id := chi.URLParam(r, "id")
+	var input toolscore.InspectionInput
+	// Buffered decoder (same pattern as the admin settings handlers): reject
+	// UNKNOWN fields (DisallowUnknownFields) and trailing content after the
+	// JSON object — both answer the uniform 400, never a partial parse.
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&input); err != nil {
+		httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", "Ungültiges JSON-Format.")
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", "Ungültiges JSON-Format.")
+		return
+	}
+
+	result, err := h.service.SubmitInspection(r.Context(), user.ID, id, input)
+	if err != nil {
+		h.mapInspectionError(w, r, err, user)
+		return
+	}
+	// Defensive nil-guard: a nil-returning service path (a wiring defect) must
+	// not panic — answer the clean 500 via the error mapper's default branch.
+	if result == nil || result.Inspection == nil {
+		h.mapInspectionError(w, r, errors.New("tools http: nil inspection result from service"), user)
+		return
+	}
+	h.log().Info("inspection submitted", "email", user.Email, "id", id, "result", result.Inspection.OverallResult, "status", result.Status.Status)
+
+	httpapi.WriteJSON(w, http.StatusOK, toInspectionSubmitResponse(result))
 }
 
 // ListTools handles GET /api/v1/admin/tools (GET_LIST_EMPTY / GET_LIST): it
@@ -347,26 +445,32 @@ func toToolDTO(tool *toolscore.Tool) toolDTO {
 	}
 }
 
-// mapInspectionError writes the uniform envelope for the inspection-start
-// service errors (Story 5.1). The qualification-gate denial is its OWN 403 with
-// the German reason (MsgToolQualificationMissing) — distinct from the generic
-// forbidden; an inspection.submit-less caller gets the generic no-hint 403.
+// mapInspectionError writes the uniform envelope for the inspection service
+// errors (Story 5.1 + 5.3). The qualification-gate denial is its OWN 403
+// with the German reason (MsgToolQualificationMissing) — distinct from the
+// generic forbidden; an inspection.submit-less caller gets the generic no-hint
+// 403; a validation failure (ErrInspectionInvalid, Story 5.3) maps to the 400
+// with the field-specific German message; an unknown/archived tool → 404.
 func (h *Handler) mapInspectionError(w http.ResponseWriter, r *http.Request, err error, user *usercore.User) {
+	var inv *toolscore.InvalidInspectionError
 	switch {
 	case errors.Is(err, toolscore.ErrForbidden):
-		h.log().Warn("inspection start forbidden", "email", user.Email)
+		h.log().Warn("inspection access forbidden", "email", user.Email)
 		httpapi.WriteError(w, http.StatusForbidden, "forbidden", "Keine Berechtigung.")
 	case errors.Is(err, toolscore.ErrToolQualificationMissing):
-		h.log().Warn("inspection start denied: required qualification missing", "email", user.Email)
+		h.log().Warn("inspection denied: required qualification missing", "email", user.Email)
 		httpapi.WriteError(w, http.StatusForbidden, "forbidden", toolscore.MsgToolQualificationMissing)
 	case errors.Is(err, toolscore.ErrToolNotFound):
 		httpapi.WriteError(w, http.StatusNotFound, "not_found", toolscore.MsgToolNotFound)
+	case errors.As(err, &inv):
+		h.log().Warn("inspection submit invalid", "email", user.Email)
+		httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", inv.Message)
 	default:
 		// Client-abort guard: a canceled request has no one to answer.
 		if r.Context().Err() != nil {
 			return
 		}
-		h.log().Error("inspection start failed unexpectedly", "error", err)
+		h.log().Error("inspection request failed unexpectedly", "error", err)
 		httpapi.WriteError(w, http.StatusInternalServerError, "internal_error", "Ein interner Fehler ist aufgetreten.")
 	}
 }
@@ -393,6 +497,7 @@ func (h *Handler) mapToolError(w http.ResponseWriter, r *http.Request, err error
 		httpapi.WriteError(w, http.StatusInternalServerError, "internal_error", "Ein interner Fehler ist aufgetreten.")
 	}
 }
+
 // toChecklistItemDTOs maps the ordered domain checklist items to the wire shape
 // (Story 5.2 mode-aware start / Story 4.2 type surface). Shared by the
 // tool-type and inspection-start DTOs so the two surfaces serialize items
@@ -407,4 +512,49 @@ func toChecklistItemDTOs(items []toolscore.ToolTypeChecklistItem) []toolTypeChec
 		})
 	}
 	return out
+}
+
+// toInspectionSubmitResponse maps the domain submit result to the wire payload
+// (Story 5.3): the persisted record + the derived status. An empty notes column
+// serializes as ""; NextDue serializes as null for `oos` and the
+// never-inspected `red`.
+func toInspectionSubmitResponse(result *toolscore.SubmitInspectionResult) inspectionSubmitResponseDTO {
+	if result == nil || result.Inspection == nil {
+		// Defensive: the handler guards nil before this is called (a nil
+		// service result answers 500 there); a nil here serializes an empty
+		// record rather than panicking.
+		return inspectionSubmitResponseDTO{}
+	}
+	insp := result.Inspection
+	items := make([]inspectionItemDTO, 0, len(insp.Items))
+	for _, item := range insp.Items {
+		items = append(items, inspectionItemDTO{
+			ID:       item.ID,
+			ItemID:   item.ItemID,
+			Label:    item.Label,
+			Position: item.Position,
+			Result:   item.Result,
+		})
+	}
+	var nextDue *string
+	if result.Status.NextDue != nil {
+		s := result.Status.NextDue.UTC().Format(time.RFC3339)
+		nextDue = &s
+	}
+	return inspectionSubmitResponseDTO{
+		Inspection: inspectionDTO{
+			ID:            insp.ID,
+			ToolID:        insp.ToolID,
+			InspectorID:   insp.InspectorID,
+			Mode:          insp.Mode,
+			OverallResult: insp.OverallResult,
+			Notes:         insp.Notes,
+			SubmittedAt:   insp.SubmittedAt.UTC().Format(time.RFC3339),
+			Items:         items,
+		},
+		Status: statusDTO{
+			Status:  string(result.Status.Status),
+			NextDue: nextDue,
+		},
+	}
 }

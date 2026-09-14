@@ -324,7 +324,7 @@ func TestPostgresToolGetWithTypeQualification(t *testing.T) {
 	repo := NewRepository(New(pool))
 	// seedToolRefs already cleans up test-% rows and seeds a Test- tool type
 	// (required_qualification_id NULL, pass_fail mode) + a Test- schedule.
-	toolTypeID, _ := seedToolRefs(t, ctx, pool)
+	toolTypeID, scheduleID := seedToolRefs(t, ctx, pool)
 
 	// Seed a qualification so the type can REQUIRE one.
 	qualName := "Test-Quali-" + strings.ReplaceAll(time.Now().Format("20060102150405.000000"), ".", "")
@@ -378,6 +378,39 @@ func TestPostgresToolGetWithTypeQualification(t *testing.T) {
 	}
 	if len(got.ChecklistItems) != 2 || got.ChecklistItems[0].Label != "Kabel" || got.ChecklistItems[1].Label != "Bohrfutter" {
 		t.Errorf("checklist_items = %+v, want the ordered [Kabel, Bohrfutter]", got.ChecklistItems)
+	}
+	// AD-5 schedule-resolution inputs: a tool WITHOUT an override reads an EMPTY
+	// ScheduleID (SQL NULL → inherit) and the type's default schedule id (the
+	// submit path resolves the effective interval through the SchedulesPort).
+	if got.ScheduleID != "" {
+		t.Errorf("schedule_id = %q, want empty (NULL → inherit the type default)", got.ScheduleID)
+	}
+	if got.DefaultScheduleID != scheduleID {
+		t.Errorf("default_schedule_id = %q, want the type's default %q", got.DefaultScheduleID, scheduleID)
+	}
+
+	// A per-tool OVERRIDE round-trips: setting the tool's schedule_id to a
+	// SECOND Test- schedule makes GetToolWithTypeQualification carry the
+	// override id (the type default stays the original schedule).
+	var overrideID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO schedules (name, interval_unit, interval_magnitude) VALUES ('Test-Override', 'month', 1) RETURNING id`,
+	).Scan(&overrideID); err != nil {
+		t.Fatalf("seeding override schedule err = %v", err)
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, "DELETE FROM schedules WHERE id = $1", overrideID) })
+	if _, err := pool.Exec(ctx, `UPDATE tools SET schedule_id = $1 WHERE id = $2`, overrideID, tool.ID); err != nil {
+		t.Fatalf("setting the tool's schedule override err = %v", err)
+	}
+	withOverride, err := repo.GetToolWithTypeQualification(ctx, tool.ID)
+	if err != nil {
+		t.Fatalf("GetToolWithTypeQualification(override) err = %v", err)
+	}
+	if withOverride.ScheduleID != overrideID {
+		t.Errorf("schedule_id = %q, want the override %q", withOverride.ScheduleID, overrideID)
+	}
+	if withOverride.DefaultScheduleID != scheduleID {
+		t.Errorf("default_schedule_id = %q, want %q (the type default is unchanged)", withOverride.DefaultScheduleID, scheduleID)
 	}
 
 	// MISSING: an unknown id → ErrToolNotFound (never a raw 500).

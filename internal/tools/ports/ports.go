@@ -78,4 +78,13 @@ type Service interface {
 	// ErrToolNotFound (404). Re-checks `inspection.submit` defense-in-depth
 	// (AD-6). No inspection record is created (Stories 5.2/5.4/5.5).
 	StartInspection(ctx context.Context, actorID, toolID string) (*core.InspectionStartResult, error)
+	// SubmitInspection persists one inspection (Story 5.3, FR-12/FR-13/FR-14):
+	// it re-checks `inspection.submit` AND re-validates the tool-type
+	// qualification on submit (never trusts the client, FR-11); unknown/archived
+	// tool → ErrToolNotFound (404); a bad mode/result/notes/items contract →
+	// ErrInspectionInvalid (400, German); missing/expired qualification → 403.
+	// Persists the inspection + its snapshot items transactionally, audits
+	// `inspection.submit` and returns the persisted record + the shared derived
+	// status (AD-4/AD-5: `oos` on a failed inspection — never stored).
+	SubmitInspection(ctx context.Context, actorID, toolID string, input core.InspectionInput) (*core.SubmitInspectionResult, error)
 }

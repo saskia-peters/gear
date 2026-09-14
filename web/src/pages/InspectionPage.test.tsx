@@ -587,6 +587,65 @@ describe('InspectionPage UX foundation (Story 5.2)', () => {
     expect(status).toHaveTextContent(/gespeichert/)
   })
 
+  it('OOS_CONSEQUENCE_FAIL: a failing pass_fail submit names the OOS consequence ("⛔ Wird als Außer Betrieb gesperrt") in the confirmation (Story 5.3, UX-DR6/DR8)', async () => {
+    vi.useFakeTimers()
+    renderLoaded()
+
+    fireEvent.click(screen.getByRole('radio', { name: 'FEHLER/NICHT BESTANDEN' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Prüfung speichern' }))
+    await act(async () => {})
+
+    const status = screen.getByRole('status')
+    expect(status).toHaveTextContent(/NICHT BESTANDEN/)
+    expect(status).toHaveTextContent(/⛔ Wird als Außer Betrieb gesperrt/)
+  })
+
+  it('OOS_CONSEQUENCE_PASS: a passing pass_fail submit names NO OOS consequence', async () => {
+    vi.useFakeTimers()
+    renderLoaded()
+
+    fireEvent.click(screen.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Prüfung speichern' }))
+    await act(async () => {})
+
+    const status = screen.getByRole('status')
+    expect(status).toHaveTextContent(/BESTANDEN/)
+    expect(status).not.toHaveTextContent(/Außer Betrieb/)
+  })
+
+  it('OOS_CONSEQUENCE_CHECKLIST_FAIL: a checklist with a failed item names the OOS consequence; an all-pass checklist does not', async () => {
+    vi.useFakeTimers()
+    renderLoaded(CHECKLIST_ENTRY)
+    // State-path render is synchronous — see CHECKLIST_SUBMIT_ALL_PASS.
+    const kabel = within(screen.getByRole('group', { name: 'Kabel' }))
+    const bohrfutter = within(screen.getByRole('group', { name: 'Bohrfutter' }))
+    const schalter = within(screen.getByRole('group', { name: 'Sicherheitsschalter' }))
+
+    // One failed item → the consequence is named (FR-14: any failed item
+    // flips the tool OOS).
+    fireEvent.click(kabel.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    fireEvent.click(bohrfutter.getByRole('radio', { name: 'FEHLER/NICHT BESTANDEN' }))
+    fireEvent.click(schalter.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Prüfung speichern' }))
+    await act(async () => {})
+    expect(screen.getByRole('status')).toHaveTextContent(/⛔ Wird als Außer Betrieb gesperrt/)
+
+    // All items pass → no consequence (the tool stays in service).
+    cleanup()
+    vi.clearAllTimers()
+    renderLoaded(CHECKLIST_ENTRY)
+    const kabel2 = within(screen.getByRole('group', { name: 'Kabel' }))
+    const bohrfutter2 = within(screen.getByRole('group', { name: 'Bohrfutter' }))
+    const schalter2 = within(screen.getByRole('group', { name: 'Sicherheitsschalter' }))
+    fireEvent.click(kabel2.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    fireEvent.click(bohrfutter2.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    fireEvent.click(schalter2.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Prüfung speichern' }))
+    await act(async () => {})
+    expect(screen.getByRole('status')).toHaveTextContent(/BESTANDEN/)
+    expect(screen.getByRole('status')).not.toHaveTextContent(/Außer Betrieb/)
+  })
+
   it('CHECKLIST_EMPTY: checklist mode with missing/empty items falls back to an empty-checklist note — no chips, submit disabled', async () => {
     renderLoaded({
       pathname: '/inspection/id-w1',

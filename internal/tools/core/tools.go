@@ -137,7 +137,11 @@ type Tool struct {
 // FR-11/AD-7): the ACTIVE tool plus its type's required_qualification_id and
 // inspection_mode. It is deliberately a DISTINCT shape from the list DTO so the
 // qualification gate / start response never couples the ListTools path to the
-// type's gating data (the spec's lean-method preference).
+// type's gating data (the spec's lean-method preference). ScheduleID +
+// DefaultScheduleID are the schedule-resolution inputs (AD-5/AD-16): the
+// per-tool override when set, else the type default — Story 5.3 resolves the
+// effective interval through the Admin SchedulesPort; the /start surface never
+// exposes them.
 type ToolWithTypeQualification struct {
 	ID                      string
 	Name                    string
@@ -145,6 +149,8 @@ type ToolWithTypeQualification struct {
 	ToolTypeName            string
 	RequiredQualificationID string
 	InspectionMode          string
+	ScheduleID              string
+	DefaultScheduleID       string
 	ChecklistItems          []ToolTypeChecklistItem
 }
 
@@ -197,10 +203,12 @@ type ToolStore interface {
 // tool store (Story 4.3), so the single `store` dependency of NewService serves
 // both surfaces — the tools write path needs ToolTypeExistsActive for the
 // intra-module type check, exactly like the shared-constructor signature
-// requires.
+// requires. Story 5.3 extends it with the inspection store (the submit + status
+// reads), still one repository.
 type toolModuleStore interface {
 	ToolTypeStore
 	ToolStore
+	InspectionStore
 }
 
 // requireToolsPermission re-verifies (defense-in-depth, AD-6) that the actor's

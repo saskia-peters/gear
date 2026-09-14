@@ -132,8 +132,10 @@ SELECT EXISTS (
 -- AD-8/AD-11). BOTH guards (`t.archived_at IS NULL` AND `tt.archived_at IS
 -- NULL`) make a tool with an ARCHIVED type (or an archived/missing tool) answer
 -- ErrToolNotFound — an active tool must never resolve a retired type's gating
--- data for the start (the row is non-existent to the surface).
-SELECT t.id, t.name, t.tool_type_id, tt.name AS tool_type_name, tt.required_qualification_id, tt.inspection_mode
+-- data for the start (the row is non-existent to the surface). Story 5.3 also
+-- carries the tool's schedule OVERRIDE and the type's DEFAULT schedule id (the
+-- AD-5 interval-resolution inputs, resolved through the Admin SchedulesPort).
+SELECT t.id, t.name, t.tool_type_id, tt.name AS tool_type_name, tt.required_qualification_id, tt.inspection_mode, t.schedule_id, tt.default_schedule_id
 FROM tools t
 JOIN tool_types tt ON tt.id = t.tool_type_id
 WHERE t.id = $1 AND t.archived_at IS NULL AND tt.archived_at IS NULL;
@@ -209,3 +211,65 @@ WITH archived AS (
 SELECT a.id, a.name, a.tool_type_id, tt.name AS tool_type_name, a.schedule_id, a.inventory_number, a.attributes, a.archived_at, a.created_at, a.updated_at
 FROM archived a
 JOIN tool_types tt ON tt.id = a.tool_type_id;
+
+-- ============================================================================
+-- Inspection queries (Story 5.3, FR-12/FR-13/FR-14/AD-4/AD-5): the
+-- Tool-owned inspections + inspection_items + reinstatements tables. The write
+-- (InsertInspection + InsertInspectionItem) runs in ONE transaction (inspection
+-- + its snapshot items); the status read (GetToolInspectionStatus's building
+-- blocks) feeds the shared derived-status/clock function — OOS is NEVER stored.
+-- ============================================================================
+
+-- name: InsertInspection :one
+-- Insert one inspection record and return the persisted row. The
+-- overall_result and mode were validated by the core; inspector_id and notes
+-- are snapshotted plain values (no FK, AD-8/3.4).
+INSERT INTO inspections (tool_id, inspector_id, mode, overall_result, notes)
+VALUES ($1, $2, $3, $4, $5)
+RETURNING id, tool_id, inspector_id, mode, overall_result, notes, submitted_at;
+
+-- name: InsertInspectionItem :exec
+-- Insert one snapshotted checklist item of an inspection (FR-12/FR-23): the
+-- label + position come from the tool type's checklist at submit time (history
+-- stays self-contained even if the template later changes); item_id is a plain
+-- uuid (no FK). Called once per item inside the submit transaction.
+INSERT INTO inspection_items (inspection_id, item_id, label, position, result)
+VALUES ($1, $2, $3, $4, $5);
+
+-- name: GetLatestInspection :one
+-- The LATEST inspection of a tool (reverse-chronological read, FR-18): the
+-- derived-status input. No row → pgx.ErrNoRows (the repository maps it to a nil
+-- "never-inspected" status, AD-5).
+SELECT id, tool_id, inspector_id, mode, overall_result, notes, submitted_at
+FROM inspections
+WHERE tool_id = $1
+ORDER BY submitted_at DESC, id DESC
+LIMIT 1;
+
+-- name: GetInspectionItems :many
+-- The snapshotted ordered checklist items of ONE inspection (the item snapshot
+-- at submit, FR-12), by position.
+SELECT id, inspection_id, item_id, label, position, result
+FROM inspection_items
+WHERE inspection_id = $1
+ORDER BY position ASC;
+
+-- name: GetLatestPassInspection :one
+-- The submitted_at of the LATEST PASSING inspection of a tool (the clock's
+-- "last successful inspection" anchor, AD-5). No row → pgx.ErrNoRows (the
+-- repository maps it to a nil anchor).
+SELECT submitted_at
+FROM inspections
+WHERE tool_id = $1 AND overall_result = 'pass'
+ORDER BY submitted_at DESC, id DESC
+LIMIT 1;
+
+-- name: GetLatestReinstatement :one
+-- The created_at of the LATEST reinstatement of a tool (the clock's
+-- "last reinstated" anchor, AD-5/AD-9; the WRITE path is Story 5.6). No row →
+-- pgx.ErrNoRows (the repository maps it to a nil anchor).
+SELECT created_at
+FROM reinstatements
+WHERE tool_id = $1
+ORDER BY created_at DESC, id DESC
+LIMIT 1;

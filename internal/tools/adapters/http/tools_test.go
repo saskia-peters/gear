@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"strings"
 	"testing"
@@ -21,14 +22,18 @@ import (
 // fakeToolService is an in-memory toolports.Service for the tool-surface
 // handler tests.
 type fakeToolService struct {
-	tools      []*toolscore.Tool
-	listErr    error
-	writeErr   error
-	archiveErr error
-	startErr   error
-	startItems []toolscore.ToolTypeChecklistItem
-	lastInput  toolscore.ToolInput
-	lastID     string
+	tools           []*toolscore.Tool
+	listErr         error
+	writeErr        error
+	archiveErr      error
+	startErr        error
+	submitErr       error
+	startItems      []toolscore.ToolTypeChecklistItem
+	lastInput       toolscore.ToolInput
+	lastID          string
+	lastInspection  toolscore.InspectionInput
+	submitNextDue   *time.Time
+	submitNilResult bool
 }
 
 func (f *fakeToolService) ListToolTypes(context.Context, string) ([]*toolscore.ToolType, error) {
@@ -117,6 +122,49 @@ func (f *fakeToolService) StartInspection(_ context.Context, _, toolID string) (
 	}, nil
 }
 
+func (f *fakeToolService) SubmitInspection(_ context.Context, _, toolID string, input toolscore.InspectionInput) (*toolscore.SubmitInspectionResult, error) {
+	if f.submitErr != nil {
+		return nil, f.submitErr
+	}
+	if f.submitNilResult {
+		// Patch 2: a nil-returning service path (a wiring defect) — the handler
+		// must answer a clean 500, never panic.
+		return nil, nil
+	}
+	f.lastID = toolID
+	f.lastInspection = input
+	// Snapshot the FULL submitted items slice (patch 14): the checklist
+	// round-trip asserts every submitted item, never just the first.
+	items := make([]toolscore.InspectionItem, 0, len(input.Items))
+	for i, in := range input.Items {
+		items = append(items, toolscore.InspectionItem{
+			ID: fmt.Sprintf("id-item-%d", i), InspectionID: "id-insp-1", ItemID: in.ItemID,
+			Label: fmt.Sprintf("Punkt-%d", i), Position: i, Result: in.Result,
+		})
+	}
+	status := toolscore.ToolStatus{Status: toolscore.ToolStatusCodeGreen}
+	if input.Result == toolscore.InspectionResultFail {
+		status = toolscore.ToolStatus{Status: toolscore.ToolStatusCodeOOS}
+	}
+	if f.submitNextDue != nil {
+		t := *f.submitNextDue
+		status.NextDue = &t
+	}
+	return &toolscore.SubmitInspectionResult{
+		Inspection: &toolscore.Inspection{
+			ID:            "id-insp-1",
+			ToolID:        toolID,
+			InspectorID:   "u-admin",
+			Mode:          input.Mode,
+			OverallResult: input.Result,
+			Notes:         input.Notes,
+			SubmittedAt:   time.Now(),
+			Items:         items,
+		},
+		Status: status,
+	}, nil
+}
+
 var _ toolports.Service = (*fakeToolService)(nil)
 
 // toolGateway wraps the REAL ToolRoutes() behind the same ANY-of gate the
@@ -146,12 +194,13 @@ func dashboardToolGateway(perms []string, session *usercore.Session, svc toolpor
 }
 
 // toolsInspectionGateway mimics the composition-root combined /api/v1/tools
-// router (Story 5.1): the dashboard list surface (GET /, dashboard.view) AND
-// the inspection-start surface (POST /{id}/inspection/start, inspection.submit)
-// combined via exact-match Handle + prefix Mount, EACH behind its OWN gate — so
-// the composition mount gate test is exercised here (a dashboard.view-but-not-
-// inspection.submit caller reads the list but 403s on the start). The inspection
-// surface is mounted at the full path prefix; InspectionRoutes owns the route.
+// router (Story 5.1 + 5.3): the dashboard list surface (GET /, dashboard.view)
+// AND the inspection surface (POST /{id}/inspection/start + POST
+// /{id}/inspection, inspection.submit) combined via exact-match Handle + prefix
+// Mount, EACH behind its OWN gate — so the composition mount gate test is
+// exercised here (a dashboard.view-but-not- inspection.submit caller reads the
+// list but 403s on the start/submit). The inspection surface is mounted at the
+// full path prefix; InspectionRoutes owns the route patterns.
 func toolsInspectionGateway(perms []string, session *usercore.Session, svc toolports.Service) http.Handler {
 	h := NewHandler(svc, &gateValidator{session: session}, &gateResolver{perms: perms}, discardLogger())
 	dashboardSurface := auth.RequirePermission(
@@ -168,7 +217,7 @@ func toolsInspectionGateway(perms []string, session *usercore.Session, svc toolp
 	combined.NotFound(httpapi.NotFoundHandler())
 	combined.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
 	combined.Handle("/", dashboardSurface)
-	combined.Mount("/{id}/inspection/start", inspectionSurface)
+	combined.Mount("/{id}/inspection", inspectionSurface)
 	return combined
 }
 
@@ -1160,9 +1209,9 @@ func TestInspectionStartNilUserUnauthorized(t *testing.T) {
 	// composition (the gateway always sets the user), but it is still
 	// defense-in-depth at the handler layer (a direct caller must never see the
 	// start without a session). Drive it through the NAKED router (no gateway,
-	// route owned at "/") — no user in the context → uniform 401.
+	// route owned at "/start") — no user in the context → uniform 401.
 	surface := nakedInspectionRouter(&fakeToolService{})
-	rec := doRequest(surface, http.MethodPost, "/", "", "")
+	rec := doRequest(surface, http.MethodPost, "/start", "", "")
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -1175,5 +1224,391 @@ func TestInspectionStartNilUserUnauthorized(t *testing.T) {
 	}
 	if strings.Contains(strings.ToLower(rec.Body.String()), "bohrmaschine") {
 		t.Errorf("401 body leaks tool data: %s", rec.Body.String())
+	}
+}
+
+// ============================================================================
+// Inspection submit (Story 5.3, FR-12/FR-13/FR-14/AD-4/AD-5): the persistence
+// seam at POST /api/v1/tools/{id}/inspection behind inspection.submit.
+// ============================================================================
+
+// submitPassBody is a pass_fail pass body (SUBMIT_PASSFAIL).
+func submitPassBody() string {
+	return `{"mode":"pass_fail","result":"pass","notes":"Alles ok","items":[]}`
+}
+
+func TestInspectionSubmitPass(t *testing.T) {
+	// SUBMIT_PASSFAIL: a valid pass body → 200 with the persisted record +
+	// derived status (green for a fresh pass), the input travels to the core.
+	svc := &fakeToolService{}
+	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPost, "/id-a/inspection", "tok", submitPassBody())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding err = %v", err)
+	}
+	insp, ok := body["inspection"].(map[string]any)
+	if !ok {
+		t.Fatalf("inspection = %+v, want the persisted record", body["inspection"])
+	}
+	if insp["id"] != "id-insp-1" || insp["tool_id"] != "id-a" {
+		t.Errorf("inspection = %+v, want the persisted record", insp)
+	}
+	if insp["overall_result"] != "pass" || insp["mode"] != "pass_fail" || insp["notes"] != "Alles ok" {
+		t.Errorf("inspection = %+v, want the submitted values", insp)
+	}
+	status, ok := body["status"].(map[string]any)
+	if !ok || status["status"] != "green" {
+		t.Errorf("status = %+v, want green", body["status"])
+	}
+	if svc.lastID != "id-a" || svc.lastInspection.Result != "pass" {
+		t.Errorf("core received id %q / input %+v", svc.lastID, svc.lastInspection)
+	}
+}
+
+func TestInspectionSubmitFailOOS(t *testing.T) {
+	// SUBMIT_FAIL: a failing inspection answers 200 with the record + the
+	// derived `oos` status (AD-4 — the fake mirrors the core derivation).
+	svc := &fakeToolService{}
+	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPost, "/id-a/inspection", "tok",
+		`{"mode":"pass_fail","result":"fail","notes":"","items":[]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding err = %v", err)
+	}
+	insp := body["inspection"].(map[string]any)
+	if insp["overall_result"] != "fail" {
+		t.Errorf("inspection = %+v, want a fail record", insp)
+	}
+	status := body["status"].(map[string]any)
+	if status["status"] != "oos" {
+		t.Errorf("status = %+v, want oos on a fail", status)
+	}
+	if nextDue, present := status["next_due"]; !present || nextDue != nil {
+		t.Errorf("next_due = %v, want present + null for oos", nextDue)
+	}
+}
+
+func TestInspectionSubmitNextDueWire(t *testing.T) {
+	// Patch 11: a NON-nil NextDue serializes as the expected RFC3339 UTC string
+	// on the wire (every other fake returns nil, so the serialization branch is
+	// otherwise untested).
+	due := time.Date(2026, 10, 15, 8, 30, 0, 0, time.UTC)
+	svc := &fakeToolService{submitNextDue: &due}
+	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPost, "/id-a/inspection", "tok", submitPassBody())
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding err = %v", err)
+	}
+	status := body["status"].(map[string]any)
+	if status["status"] != "green" {
+		t.Errorf("status = %+v, want green", status)
+	}
+	if status["next_due"] != "2026-10-15T08:30:00Z" {
+		t.Errorf("next_due = %+v, want the RFC3339 UTC 2026-10-15T08:30:00Z", status["next_due"])
+	}
+}
+
+func TestInspectionSubmitChecklist(t *testing.T) {
+	// SUBMIT_CHECKLIST: the snapshot items round-trip through the response DTO
+	// (patch 14 — EVERY submitted item is snapshotted, never just the first).
+	svc := &fakeToolService{}
+	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPost, "/id-a/inspection", "tok",
+		`{"mode":"checklist","result":"pass","notes":"","items":[{"item_id":"id-i1","result":"pass"},{"item_id":"id-i2","result":"fail"}]}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding err = %v", err)
+	}
+	insp := body["inspection"].(map[string]any)
+	items, ok := insp["items"].([]any)
+	if !ok || len(items) != 2 {
+		t.Fatalf("items = %+v, want the two snapshotted items", insp["items"])
+	}
+	first := items[0].(map[string]any)
+	if first["item_id"] != "id-i1" || first["result"] != "pass" || first["position"] != float64(0) {
+		t.Errorf("item[0] = %+v, want id-i1 / pass / position 0", first)
+	}
+	second := items[1].(map[string]any)
+	if second["item_id"] != "id-i2" || second["result"] != "fail" || second["position"] != float64(1) {
+		t.Errorf("item[1] = %+v, want id-i2 / fail / position 1", second)
+	}
+}
+
+func TestInspectionSubmitInvalid(t *testing.T) {
+	// SUBMIT_INVALID: a validation failure (mode mismatch / bad result / notes
+	// too long / checklist mismatch) → 400 invalid_request with the German
+	// message, never a record.
+	svc := &fakeToolService{submitErr: &toolscore.InvalidInspectionError{Message: toolscore.MsgInspectionModeMismatch}}
+	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPost, "/id-a/inspection", "tok", submitPassBody())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 400 err = %v", err)
+	}
+	if env.Error.Code != "invalid_request" {
+		t.Errorf("code = %q, want invalid_request", env.Error.Code)
+	}
+	if env.Error.Message != toolscore.MsgInspectionModeMismatch {
+		t.Errorf("message = %q, want %q", env.Error.Message, toolscore.MsgInspectionModeMismatch)
+	}
+}
+
+func TestInspectionSubmitNotesTooLong(t *testing.T) {
+	// SUBMIT_NOTES: the notes > 4000 runes German message round-trips.
+	svc := &fakeToolService{submitErr: &toolscore.InvalidInspectionError{Message: toolscore.MsgInspectionNotesTooLong}}
+	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPost, "/id-a/inspection", "tok", submitPassBody())
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "4000") {
+		t.Errorf("body = %s, want the notes bound microcopy", rec.Body.String())
+	}
+}
+
+func TestInspectionSubmitGated(t *testing.T) {
+	// SUBMIT_GATED: a caller lacking inspection.submit (or the tool's required
+	// qualification) → 403 uniform envelope, no tool data leaked.
+	svc := &fakeToolService{submitErr: toolscore.ErrForbidden}
+	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPost, "/id-a/inspection", "tok", submitPassBody())
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 403 err = %v", err)
+	}
+	if env.Error.Code != "forbidden" || env.Error.Message != "Keine Berechtigung." {
+		t.Errorf("403 envelope = %+v, want the generic no-hint forbidden", env)
+	}
+	if strings.Contains(strings.ToLower(rec.Body.String()), "bohrmaschine") || strings.Contains(rec.Body.String(), "id-a") {
+		t.Errorf("403 body leaks tool data: %s", rec.Body.String())
+	}
+
+	// Missing qualification → the German 403.
+	svc = &fakeToolService{submitErr: toolscore.ErrToolQualificationMissing}
+	surface = toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, activeAdmin(), svc)
+	rec = doRequest(surface, http.MethodPost, "/id-a/inspection", "tok", submitPassBody())
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("missing-qual status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), toolscore.MsgToolQualificationMissing) {
+		t.Errorf("body = %s, want the German qualification microcopy", rec.Body.String())
+	}
+}
+
+func TestInspectionSubmitToolNotFound(t *testing.T) {
+	// SUBMIT_ARCHIVED / SUBMIT_UNKNOWN: unknown/archived tool → 404 uniform
+	// envelope.
+	svc := &fakeToolService{submitErr: toolscore.ErrToolNotFound}
+	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPost, "/id-missing/inspection", "tok", submitPassBody())
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 404 err = %v", err)
+	}
+	if env.Error.Code != "not_found" || env.Error.Message != toolscore.MsgToolNotFound {
+		t.Errorf("404 envelope = %+v, want the uniform not_found", env)
+	}
+}
+
+func TestInspectionSubmitUnauthenticated(t *testing.T) {
+	// SUBMIT_UNAUTHENTICATED: no session → 401 uniform envelope.
+	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, nil, &fakeToolService{})
+	rec := doRequest(surface, http.MethodPost, "/id-a/inspection", "", submitPassBody())
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 401 err = %v", err)
+	}
+	if env.Error.Code != "unauthorized" {
+		t.Errorf("code = %q, want unauthorized", env.Error.Code)
+	}
+}
+
+func TestInspectionSubmitRejectsUnknownFields(t *testing.T) {
+	// Patch 1: DisallowUnknownFields — an unknown body field → 400 invalid
+	// JSON, the core never sees the write.
+	svc := &fakeToolService{}
+	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPost, "/id-a/inspection", "tok",
+		`{"mode":"pass_fail","result":"pass","notes":"","items":[],"bogus":1}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "Ungültiges JSON-Format.") {
+		t.Errorf("body = %s, want the German invalid-JSON message", rec.Body.String())
+	}
+	if svc.lastID != "" {
+		t.Errorf("core received id = %q, want none (unknown field rejected at decode)", svc.lastID)
+	}
+}
+
+func TestInspectionSubmitRejectsTrailingContent(t *testing.T) {
+	// Patch 1: trailing content after the JSON object → 400 invalid JSON, the
+	// core never sees the write.
+	svc := &fakeToolService{}
+	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPost, "/id-a/inspection", "tok",
+		`{"mode":"pass_fail","result":"pass","notes":"","items":[]} {"extra":true}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "Ungültiges JSON-Format.") {
+		t.Errorf("body = %s, want the German invalid-JSON message", rec.Body.String())
+	}
+	if svc.lastID != "" {
+		t.Errorf("core received id = %q, want none (trailing content rejected at decode)", svc.lastID)
+	}
+}
+
+func TestInspectionSubmitNilServiceResult(t *testing.T) {
+	// Patch 2: a nil-returning service path must answer a clean 500 (the error
+	// mapper's default branch), never panic on the nil dereference.
+	svc := &fakeToolService{submitNilResult: true}
+	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPost, "/id-a/inspection", "tok", submitPassBody())
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 500 err = %v", err)
+	}
+	if env.Error.Code != "internal_error" {
+		t.Errorf("code = %q, want internal_error", env.Error.Code)
+	}
+}
+
+func TestInspectionSubmitMalformedJSON(t *testing.T) {
+	// SUBMIT_BAD_JSON: a non-decodable body → 400 invalid JSON, the core never
+	// sees the write.
+	svc := &fakeToolService{}
+	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPost, "/id-a/inspection", "tok", `{not-json`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "Ungültiges JSON-Format.") {
+		t.Errorf("body = %s, want the German invalid-JSON message", rec.Body.String())
+	}
+	if svc.lastID != "" {
+		t.Errorf("core received id = %q, want none (bad JSON rejected at decode)", svc.lastID)
+	}
+}
+
+func TestInspectionSubmitCompositionMountGate(t *testing.T) {
+	// Composition mount gate (Story 5.3): the submit surface is a SIBLING to
+	// the dashboard list — a dashboard.view-but-not-inspection.submit caller can
+	// READ the Werkzeugliste but the submit answers 403 with NO tool data. The
+	// inspection.submit holder passes.
+	svc := &fakeToolService{tools: []*toolscore.Tool{toolFixture("id-a", "Bohrmaschine-01")}}
+
+	dashboardOnly := toolsInspectionGateway([]string{toolscore.DashboardViewPermission}, activeAdmin(), svc)
+	if rec := doRequest(dashboardOnly, http.MethodGet, "/", "tok", ""); rec.Code != http.StatusOK {
+		t.Fatalf("dashboard GET status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	rec := doRequest(dashboardOnly, http.MethodPost, "/id-a/inspection", "tok", submitPassBody())
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("submit status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 403 err = %v", err)
+	}
+	if env.Error.Code != "forbidden" {
+		t.Errorf("code = %q, want forbidden", env.Error.Code)
+	}
+	if strings.Contains(strings.ToLower(rec.Body.String()), "bohrmaschine") || strings.Contains(rec.Body.String(), "id-a") {
+		t.Errorf("403 body leaks tool data: %s", rec.Body.String())
+	}
+
+	// inspection.submit WITHOUT dashboard.view: the submit 200s (the mount
+	// gate), the dashboard list 403s (its own gate).
+	submitOnly := toolsInspectionGateway([]string{toolscore.InspectionSubmitPermission}, activeAdmin(), svc)
+	if rec := doRequest(submitOnly, http.MethodPost, "/id-a/inspection", "tok", submitPassBody()); rec.Code != http.StatusOK {
+		t.Fatalf("submit (submit-only) status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if rec := doRequest(submitOnly, http.MethodGet, "/", "tok", ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("dashboard GET (submit-only) status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestInspectionSubmitMethodNotAllowed(t *testing.T) {
+	// Only POST is registered on the submit surface root: GET answers the
+	// uniform 405.
+	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, activeAdmin(), &fakeToolService{})
+	rec := doRequest(surface, http.MethodGet, "/id-a/inspection", "tok", "")
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 405 err = %v", err)
+	}
+	if env.Error.Code != "method_not_allowed" {
+		t.Errorf("code = %q, want method_not_allowed", env.Error.Code)
+	}
+}
+
+func TestInspectionSubmitInternalErrorEnvelope(t *testing.T) {
+	// DEFAULT branch: an UNEXPECTED service error → 500 internal_error with the
+	// German message and NO tool data leak.
+	svc := &fakeToolService{submitErr: errors.New("boom")}
+	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPost, "/id-a/inspection", "tok", submitPassBody())
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 500 err = %v", err)
+	}
+	if env.Error.Code != "internal_error" || env.Error.Message != "Ein interner Fehler ist aufgetreten." {
+		t.Errorf("500 envelope = %+v, want the uniform internal_error", env)
+	}
+	if strings.Contains(strings.ToLower(rec.Body.String()), "bohrmaschine") || strings.Contains(rec.Body.String(), "id-a") {
+		t.Errorf("500 body leaks tool data: %s", rec.Body.String())
+	}
+}
+
+func TestInspectionSubmitNilUserUnauthorized(t *testing.T) {
+	// The submit handler's nil-user 401 guard (unreachable through the gated
+	// composition) — direct callers must never submit without a session.
+	surface := nakedInspectionRouter(&fakeToolService{})
+	rec := doRequest(surface, http.MethodPost, "/", "tok", submitPassBody())
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 401 err = %v", err)
+	}
+	if env.Error.Code != "unauthorized" {
+		t.Errorf("code = %q, want unauthorized", env.Error.Code)
 	}
 }

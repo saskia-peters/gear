@@ -1,4 +1,5 @@
 import styles from './SummaryGrid.module.css'
+import { OOS_STATUS } from '../types/filters.ts'
 
 export interface SummaryCounts {
   einsatzbereit?: number
@@ -40,7 +41,7 @@ export function SummaryGrid({ counts = {} }: SummaryGridProps) {
     },
     {
       id: 'ausser-betrieb',
-      label: 'Außer Betrieb',
+      label: OOS_STATUS,
       count: ausserBetrieb,
       cardClass: styles.cardOos,
     },

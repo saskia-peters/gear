@@ -6,6 +6,7 @@ import type { PassFailValue } from '../components/PassFailChips.tsx'
 import { clearAuthState } from '../auth/authState.ts'
 import { startInspection, submitInspectionPlaceholder } from '../auth/tools.ts'
 import type { InspectionStart, ToolTypeChecklistItem } from '../auth/tools.ts'
+import { OOS_STATUS } from '../types/filters.ts'
 import styles from './InspectionPage.module.css'
 
 // AUTO_RETURN_MS is the post-submit delay before the page auto-returns to the
@@ -201,6 +202,11 @@ export function InspectionPage({ submitInspection = submitInspectionPlaceholder 
         : result === 'fail'
           ? 'NICHT BESTANDEN'
           : null
+  // isFailure is the Story 5.3 consequence trigger: a failed overall outcome
+  // (pass_fail `fail` or any failed checklist item) makes the tool unsafe — the
+  // confirmation names the consequence ("⛔ Wird als Außer Betrieb gesperrt").
+  const isFailure = modeValue === 'checklist' ? failedCount > 0 : result === 'fail'
+  const oosConsequence = isFailure ? `⛔ Wird als ${OOS_STATUS} gesperrt. ` : ''
 
   // handleItemSelect records one checklist item's per-item result (keyed by the
   // item id); re-tapping the selected chip deselects it (null → the key leaves
@@ -355,7 +361,7 @@ export function InspectionPage({ submitInspection = submitInspectionPlaceholder 
 
               {submitted && (
                 <p role="status" className={styles.confirmation}>
-                  Die Prüfung für „{toolName}“ wurde gespeichert — Ergebnis: {outcomeLabel}. Du kehrst zur Werkzeugliste zurück.
+                  Die Prüfung für „{toolName}“ wurde gespeichert — Ergebnis: {outcomeLabel}. {oosConsequence}Du kehrst zur Werkzeugliste zurück.
                 </p>
               )}
             </>
