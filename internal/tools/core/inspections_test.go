@@ -326,8 +326,8 @@ func TestSubmitInspectionPassFailFail(t *testing.T) {
 	// derived status reads `oos` with NextDue nil (AD-4 — never stored).
 	svc, store, _ := submitInspectionService()
 	store.types[0].InspectionMode = InspectionModePassFail
-	latest := &Inspection{ToolID: "id-tool", Mode: InspectionModePassFail, OverallResult: InspectionResultFail, SubmittedAt: time.Now()}
-	store.status = &ToolInspectionStatus{Latest: latest}
+	failAt := time.Now()
+	store.status = &ToolInspectionStatus{LatestFailAt: &failAt}
 
 	result, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", InspectionInput{
 		Mode: InspectionModePassFail, Result: InspectionResultFail,
@@ -352,9 +352,7 @@ func TestSubmitInspectionChecklistWithFailures(t *testing.T) {
 	// the derived status reads `oos`.
 	svc, store, _ := submitInspectionService()
 	failedAt := time.Now()
-	store.status = &ToolInspectionStatus{Latest: &Inspection{
-		ToolID: "id-tool", Mode: InspectionModeChecklist, OverallResult: InspectionResultFail, SubmittedAt: failedAt,
-	}}
+	store.status = &ToolInspectionStatus{LatestFailAt: &failedAt}
 
 	result, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", InspectionInput{
 		Mode:   InspectionModeChecklist,

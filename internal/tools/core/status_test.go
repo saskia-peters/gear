@@ -35,15 +35,52 @@ func TestScheduleInterval(t *testing.T) {
 }
 
 func TestDeriveToolStatusOOS(t *testing.T) {
-	// DERIVE_OOS: the latest inspection is a fail and there is NO reinstatement
-	// after it → `oos`, NextDue nil (Red — OOS outranks the clock).
-	latest := &Inspection{OverallResult: InspectionResultFail, SubmittedAt: fixedNow()}
-	status := deriveToolStatus(latest, nil, nil, 30*24*time.Hour, fixedNow(), OrangeWindowDays)
+	// DERIVE_OOS: the latest FAILED inspection is at-or-after the latest
+	// reinstatement (or none exists) → `oos`, NextDue nil (Red — OOS outranks
+	// the clock).
+	latestFailAt := fixedNow()
+	status := deriveToolStatus(&latestFailAt, nil, nil, 30*24*time.Hour, fixedNow(), OrangeWindowDays)
 	if status.Status != ToolStatusCodeOOS {
 		t.Errorf("status = %q, want oos", status.Status)
 	}
 	if status.NextDue != nil {
 		t.Errorf("next_due = %v, want nil for oos", status.NextDue)
+	}
+}
+
+func TestDeriveToolStatusPassAfterFailStillOOS(t *testing.T) {
+	// FR-15/AD-4: OOS is derived from the LATEST FAILED inspection not since
+	// reinstated. A PASSING inspection (t2) after an earlier fail (t1) does NOT
+	// clear OOS — reinstatement is the SOLE exit. The pass only becomes the
+	// clock's last-success anchor AFTER a reinstatement releases OOS.
+	failAt := fixedNow().Add(-10 * 24 * time.Hour)
+	passAt := fixedNow().Add(-5 * 24 * time.Hour)
+	status := deriveToolStatus(&failAt, &passAt, nil, 30*24*time.Hour, fixedNow(), OrangeWindowDays)
+	if status.Status != ToolStatusCodeOOS {
+		t.Errorf("status = %q, want oos (a passing inspection must NOT clear OOS)", status.Status)
+	}
+	if status.NextDue != nil {
+		t.Errorf("next_due = %v, want nil for oos", status.NextDue)
+	}
+}
+
+func TestDeriveToolStatusPassAfterFailThenReinstatementNotOOS(t *testing.T) {
+	// A reinstatement (t3) AFTER the latest fail (t1) releases OOS — the sole
+	// exit (FR-15). The base is max(last success t2, reinstatement t3) = t3, so
+	// next_due = t3 + interval.
+	failAt := fixedNow().Add(-20 * 24 * time.Hour)
+	passAt := fixedNow().Add(-15 * 24 * time.Hour)
+	reinstatedAt := fixedNow().Add(-5 * 24 * time.Hour)
+	status := deriveToolStatus(&failAt, &passAt, &reinstatedAt, 30*24*time.Hour, fixedNow(), OrangeWindowDays)
+	if status.Status != ToolStatusCodeGreen {
+		t.Errorf("status = %q, want green (reinstated since the fail — the clock reset)", status.Status)
+	}
+	if status.NextDue == nil {
+		t.Fatal("next_due = nil, want the reinstatement + interval")
+	}
+	want := reinstatedAt.Add(30 * 24 * time.Hour)
+	if !status.NextDue.Equal(want) {
+		t.Errorf("next_due = %v, want %v (reinstatement + interval)", status.NextDue, want)
 	}
 }
 
@@ -53,8 +90,7 @@ func TestDeriveToolStatusFailBeforeReinstatementNotOOS(t *testing.T) {
 	// next_due = it + interval.
 	failAt := fixedNow().Add(-10 * 24 * time.Hour)
 	reinstatedAt := fixedNow().Add(-5 * 24 * time.Hour)
-	latest := &Inspection{OverallResult: InspectionResultFail, SubmittedAt: failAt}
-	status := deriveToolStatus(latest, nil, &reinstatedAt, 30*24*time.Hour, fixedNow(), OrangeWindowDays)
+	status := deriveToolStatus(&failAt, nil, &reinstatedAt, 30*24*time.Hour, fixedNow(), OrangeWindowDays)
 	if status.Status != ToolStatusCodeGreen {
 		t.Errorf("status = %q, want green (reinstated since the fail — the clock reset)", status.Status)
 	}
@@ -68,13 +104,13 @@ func TestDeriveToolStatusFailBeforeReinstatementNotOOS(t *testing.T) {
 }
 
 func TestDeriveToolStatusFailAtReinstatementIsOOS(t *testing.T) {
-	// OOS tie boundary (patch 5): a failed inspection whose submitted_at EQUALS
+	// OOS tie boundary (patch 5): a FAILED inspection whose submitted_at EQUALS
 	// the latest reinstatement's created_at is OOS (at-or-after favors safety —
 	// only a fail STRICTLY BEFORE a reinstatement is cleared).
 	at := fixedNow()
-	latest := &Inspection{OverallResult: InspectionResultFail, SubmittedAt: at}
+	latestFailAt := at
 	reinstatedAt := at
-	status := deriveToolStatus(latest, nil, &reinstatedAt, 30*24*time.Hour, fixedNow(), OrangeWindowDays)
+	status := deriveToolStatus(&latestFailAt, nil, &reinstatedAt, 30*24*time.Hour, fixedNow(), OrangeWindowDays)
 	if status.Status != ToolStatusCodeOOS {
 		t.Errorf("status = %q, want oos (fail at the exact reinstatement timestamp)", status.Status)
 	}

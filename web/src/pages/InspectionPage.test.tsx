@@ -21,16 +21,15 @@ function checklistItemsFixture(): ToolTypeChecklistItem[] {
   ]
 }
 
-// submitInspection is forwarded to InspectionPage so the tests can HOLD the
-// Story 5.2 placeholder submit in flight — the double-submit guard needs a real
-// in-flight window to exercise.
-function renderPage(initialEntry: InspectionEntry, submitInspection?: () => Promise<void>) {
+// The page has no prop seam since Story 5.4 (the submit calls the real client);
+// tests render it directly and stub fetch to exercise the submit.
+function renderPage(initialEntry: InspectionEntry) {
   return render(
     <ThemeProvider>
       <MemoryRouter initialEntries={[initialEntry]}>
         <Routes>
           <Route path="/" element={<div>Dashboard</div>} />
-          <Route path="/inspection/:toolId" element={<InspectionPage submitInspection={submitInspection} />} />
+          <Route path="/inspection/:toolId" element={<InspectionPage />} />
           <Route path="/login" element={<div>Anmeldung</div>} />
         </Routes>
       </MemoryRouter>
@@ -73,6 +72,37 @@ function stubMatchMedia(reduced: boolean) {
   }))
   vi.stubGlobal('matchMedia', mock)
   return mock
+}
+
+// submitOkResponse is a server-authoritative 200 pass_fail submit response
+// (Story 5.3 contract, consumed by Story 5.4): the persisted record + the
+// derived status. overall_result (what was persisted) and status.status (the
+// derived state) are INDEPENDENT — a pass can be persisted on an already-OOS
+// tool (a passing inspection does NOT clear OOS, FR-15), so the confirmation
+// must follow the response, not the local chip.
+function submitOkResponse(overallResult: 'pass' | 'fail' = 'pass', status: 'oos' | 'red' | 'orange' | 'green' = 'green') {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({
+      inspection: {
+        id: 'insp-1',
+        tool_id: 'id-w1',
+        inspector_id: 'user-1',
+        mode: 'pass_fail',
+        overall_result: overallResult,
+        notes: '',
+        submitted_at: '2026-09-14T10:00:00Z',
+        items: [],
+      },
+      status: { status, next_due: status === 'oos' || status === 'red' ? null : '2027-09-14T10:00:00Z' },
+    }),
+  }
+}
+
+// submitErrorResponse is a non-2xx submit response in the uniform envelope.
+function submitErrorResponse(status: number, message: string) {
+  return { ok: false, status, json: async () => ({ error: { code: 'error', message } }) }
 }
 
 describe('InspectionPage data loading (Story 5.1)', () => {
@@ -221,9 +251,8 @@ describe('InspectionPage UX foundation (Story 5.2)', () => {
         inspection_mode: 'pass_fail',
       },
     },
-    submitInspection?: () => Promise<void>,
   ) {
-    renderPage(entry, submitInspection)
+    renderPage(entry)
   }
 
   // The checklist entry: a checklist-mode type WITH its ordered items.
@@ -336,12 +365,22 @@ describe('InspectionPage UX foundation (Story 5.2)', () => {
 
   it('SUBMIT: one submit shows the inline confirmation (names the tool + the outcome, SR role=status), disables the controls, then auto-returns to / after ~2s', async () => {
     vi.useFakeTimers()
+    // Story 5.4: the pass_fail submit posts the real payload to the real
+    // endpoint (server-derived status drives the confirmation).
+    const fetchMock = stubFetch(submitOkResponse('pass', 'green'))
     renderLoaded()
 
     fireEvent.click(screen.getByRole('radio', { name: 'OK/BESTANDEN' }))
     const button = screen.getByRole('button', { name: 'Prüfung speichern' })
     fireEvent.click(button)
     await act(async () => {})
+
+    // The real client POSTs { mode: 'pass_fail', result, notes, items: [] } to
+    // /api/v1/tools/{id}/inspection (FR-13: identity/timestamp/result/notes).
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/v1/tools/id-w1/inspection')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(init.body as string)).toEqual({ mode: 'pass_fail', result: 'pass', notes: '', items: [] })
 
     // Inline confirmation, announced via role=status, names the tool + the
     // recorded outcome + a generic saved consequence (UX-DR7).
@@ -361,6 +400,7 @@ describe('InspectionPage UX foundation (Story 5.2)', () => {
   })
 
   it('CHIPS_DISABLED: the chips are disabled during the submit and after it, so the recorded result cannot diverge from the confirmation', async () => {
+    stubFetch(submitOkResponse('pass', 'green'))
     renderLoaded()
 
     fireEvent.click(screen.getByRole('radio', { name: 'OK/BESTANDEN' }))
@@ -371,13 +411,15 @@ describe('InspectionPage UX foundation (Story 5.2)', () => {
     expect(screen.getByRole('radio', { name: 'FEHLER/NICHT BESTANDEN' })).toBeDisabled()
   })
 
-  it('DOUBLE_SUBMIT_GUARD: a second click while the placeholder submit is HELD in flight does not re-fire', async () => {
-    let resolveSubmit: (() => void) | null = null
-    const held = new Promise<void>((resolve) => {
+  it('DOUBLE_SUBMIT_GUARD: a second click while the submit fetch is HELD in flight does not re-fire', async () => {
+    type FetchResponse = { ok: boolean; status: number; json: () => Promise<unknown> }
+    let resolveSubmit: ((value: FetchResponse) => void) | null = null
+    const held = new Promise<FetchResponse>((resolve) => {
       resolveSubmit = resolve
     })
-    const submitSpy = vi.fn().mockReturnValue(held)
-    renderLoaded(undefined, submitSpy)
+    const fetchMock = vi.fn().mockImplementation(() => held)
+    vi.stubGlobal('fetch', fetchMock)
+    renderLoaded()
 
     // A result is required before submit is possible.
     fireEvent.click(screen.getByRole('radio', { name: 'OK/BESTANDEN' }))
@@ -386,14 +428,18 @@ describe('InspectionPage UX foundation (Story 5.2)', () => {
     fireEvent.click(button)
     await act(async () => {})
 
-    // Only ONE submit fired and it is still in flight (the placeholder is
-    // held): no confirmation yet, and the button stays disabled.
-    expect(submitSpy).toHaveBeenCalledTimes(1)
+    // Only ONE submit fired and the fetch is still HELD in flight (the real
+    // client): no confirmation yet, the button stays disabled AND shows the
+    // in-flight label (patch 12: aria-busy + "Wird gespeichert...").
+    expect(fetchMock).toHaveBeenCalledTimes(1)
     expect(button).toBeDisabled()
+    const busyButton = screen.getByRole('button', { name: 'Wird gespeichert...' })
+    expect(busyButton).toBeDisabled()
+    expect(busyButton).toHaveAttribute('aria-busy', 'true')
     expect(screen.queryByRole('status')).not.toBeInTheDocument()
 
-    // Release the held placeholder → the confirmation renders.
-    resolveSubmit!()
+    // Release the held response → the confirmation renders.
+    resolveSubmit!(submitOkResponse('pass', 'green'))
     await act(async () => {})
     expect(screen.getByRole('status')).toBeInTheDocument()
   })
@@ -401,6 +447,7 @@ describe('InspectionPage UX foundation (Story 5.2)', () => {
   it('REDUCE_MOTION: under prefers-reduced-motion the auto-return redirects immediately (no ~2s delay)', async () => {
     vi.useFakeTimers()
     stubMatchMedia(true)
+    stubFetch(submitOkResponse('pass', 'green'))
     renderLoaded()
 
     fireEvent.click(screen.getByRole('radio', { name: 'OK/BESTANDEN' }))
@@ -587,8 +634,12 @@ describe('InspectionPage UX foundation (Story 5.2)', () => {
     expect(status).toHaveTextContent(/gespeichert/)
   })
 
-  it('OOS_CONSEQUENCE_FAIL: a failing pass_fail submit names the OOS consequence ("⛔ Wird als Außer Betrieb gesperrt") in the confirmation (Story 5.3, UX-DR6/DR8)', async () => {
+  it('OOS_CONSEQUENCE_FAIL: a failing pass_fail submit names the OOS consequence from the SERVER-derived status (Story 5.4, UX-DR6/DR8)', async () => {
     vi.useFakeTimers()
+    // Story 5.4: the confirmation follows the RESPONSE status (the server
+    // derives OOS from the full inspection + reinstatement history) — the
+    // 200 body carries status oos.
+    stubFetch(submitOkResponse('fail', 'oos'))
     renderLoaded()
 
     fireEvent.click(screen.getByRole('radio', { name: 'FEHLER/NICHT BESTANDEN' }))
@@ -602,6 +653,7 @@ describe('InspectionPage UX foundation (Story 5.2)', () => {
 
   it('OOS_CONSEQUENCE_PASS: a passing pass_fail submit names NO OOS consequence', async () => {
     vi.useFakeTimers()
+    stubFetch(submitOkResponse('pass', 'green'))
     renderLoaded()
 
     fireEvent.click(screen.getByRole('radio', { name: 'OK/BESTANDEN' }))
@@ -611,6 +663,256 @@ describe('InspectionPage UX foundation (Story 5.2)', () => {
     const status = screen.getByRole('status')
     expect(status).toHaveTextContent(/BESTANDEN/)
     expect(status).not.toHaveTextContent(/Außer Betrieb/)
+  })
+
+  it('OOS_CONSEQUENCE_SERVER_DRIVEN: the consequence follows the SERVER status, never the local result — a fail submit whose response says green shows NO OOS copy (AD-4/AD-5)', async () => {
+    vi.useFakeTimers()
+    // The local result is FAIL, but the response status is green (the server
+    // is authoritative — a naive client guess must never gate the
+    // consequence). The confirmation still names NICHT BESTANDEN (the outcome
+    // comes from the server-persisted overall_result) but omits the OOS
+    // sentence.
+    stubFetch(submitOkResponse('fail', 'green'))
+    renderLoaded()
+
+    fireEvent.click(screen.getByRole('radio', { name: 'FEHLER/NICHT BESTANDEN' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Prüfung speichern' }))
+    await act(async () => {})
+
+    const status = screen.getByRole('status')
+    expect(status).toHaveTextContent(/NICHT BESTANDEN/)
+    expect(status).not.toHaveTextContent(/Außer Betrieb/)
+  })
+
+  it('SUBMIT_400: a server validation 400 shows the German reason inline (role=alert) with NO confirmation and NO navigation, and the controls re-enable', async () => {
+    stubFetch({
+      ok: false,
+      status: 400,
+      json: async () => ({ error: { code: 'invalid_request', message: 'Bitte wähle ein gültiges Prüfergebnis.' } }),
+    })
+    renderLoaded()
+
+    fireEvent.click(screen.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    const button = screen.getByRole('button', { name: 'Prüfung speichern' })
+    fireEvent.click(button)
+    await act(async () => {})
+
+    // Inline German role=alert, no navigation, no confirmation.
+    expect(screen.getByRole('alert')).toHaveTextContent('Bitte wähle ein gültiges Prüfergebnis.')
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(screen.queryByText('Dashboard')).not.toBeInTheDocument()
+    // The submit re-enables for a retry.
+    expect(button).toBeEnabled()
+  })
+
+  it('SUBMIT_403: a gating 403 shows the German reason inline with no navigation or confirmation', async () => {
+    stubFetch({
+      ok: false,
+      status: 403,
+      json: async () => ({ error: { code: 'forbidden', message: 'Erforderliche Qualifikation fehlt.' } }),
+    })
+    renderLoaded()
+
+    fireEvent.click(screen.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    const button = screen.getByRole('button', { name: 'Prüfung speichern' })
+    fireEvent.click(button)
+    await act(async () => {})
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Erforderliche Qualifikation fehlt.')
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(screen.queryByText('Dashboard')).not.toBeInTheDocument()
+    expect(button).toBeEnabled()
+  })
+
+  it('SUBMIT_404: an unknown/archived tool shows the German not-found message inline, no navigation or confirmation', async () => {
+    stubFetch({
+      ok: false,
+      status: 404,
+      json: async () => ({ error: { code: 'not_found', message: 'Das Werkzeug wurde nicht gefunden.' } }),
+    })
+    renderLoaded()
+
+    fireEvent.click(screen.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    const button = screen.getByRole('button', { name: 'Prüfung speichern' })
+    fireEvent.click(button)
+    await act(async () => {})
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Das Werkzeug wurde nicht gefunden.')
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(screen.queryByText('Dashboard')).not.toBeInTheDocument()
+    expect(button).toBeEnabled()
+  })
+
+  it('SUBMIT_401: a 401 on the submit clears auth state and redirects to /login', async () => {
+    stubFetch({
+      ok: false,
+      status: 401,
+      json: async () => ({ error: { code: 'unauthorized', message: 'Authentifizierung erforderlich.' } }),
+    })
+    renderLoaded()
+
+    fireEvent.click(screen.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Prüfung speichern' }))
+    await act(async () => {})
+
+    expect(await screen.findByText('Anmeldung')).toBeInTheDocument()
+    expect(localStorage.getItem('gear.session_token')).toBeNull()
+  })
+
+  it('SUBMIT_NETWORK: a connection failure shows the German inline error with no navigation or confirmation', async () => {
+    const mock = vi.fn().mockRejectedValue(new TypeError('fetch failed'))
+    vi.stubGlobal('fetch', mock)
+    renderLoaded()
+
+    fireEvent.click(screen.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    const button = screen.getByRole('button', { name: 'Prüfung speichern' })
+    fireEvent.click(button)
+    await act(async () => {})
+
+    expect(screen.getByRole('alert')).toHaveTextContent(/Verbindung zum Server fehlgeschlagen/)
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(screen.queryByText('Dashboard')).not.toBeInTheDocument()
+    expect(button).toBeEnabled()
+  })
+
+  it('SUBMIT_500: a 500 submit shows the German inline error with no navigation or confirmation, and the controls re-enable', async () => {
+    stubFetch(submitErrorResponse(500, 'Ein interner Fehler ist aufgetreten.'))
+    renderLoaded()
+
+    fireEvent.click(screen.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    const button = screen.getByRole('button', { name: 'Prüfung speichern' })
+    fireEvent.click(button)
+    await act(async () => {})
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Ein interner Fehler ist aufgetreten.')
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(screen.queryByText('Dashboard')).not.toBeInTheDocument()
+    expect(button).toBeEnabled()
+  })
+
+  it('SUBMIT_NOTES: a non-empty Anmerkung travels in the POST body as notes', async () => {
+    const fetchMock = stubFetch(submitOkResponse('pass', 'green'))
+    renderLoaded()
+
+    fireEvent.change(screen.getByLabelText('Anmerkung (optional)'), {
+      target: { value: 'Ölstand geprüft, auffällige Geräusche.' },
+    })
+    fireEvent.click(screen.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Prüfung speichern' }))
+    await act(async () => {})
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/v1/tools/id-w1/inspection')
+    const body = JSON.parse(init.body as string)
+    expect(body.mode).toBe('pass_fail')
+    expect(body.result).toBe('pass')
+    expect(body.notes).toBe('Ölstand geprüft, auffällige Geräusche.')
+    expect(body.items).toEqual([])
+    // The submit succeeded → the confirmation renders.
+    expect(screen.getByRole('status')).toHaveTextContent(/gespeichert/)
+  })
+
+  it('SUBMIT_RETRY_AFTER_ERROR: after a 400 the submitError clears and a subsequent successful submit renders the confirmation', async () => {
+    // First submit answers 400, the retry answers 200 (the server was
+    // temporarily rejecting a stale payload).
+    const fetchMock = vi
+      .fn()
+      .mockResolvedValueOnce(submitErrorResponse(400, 'Bitte wähle ein gültiges Prüfergebnis.'))
+      .mockResolvedValueOnce(submitOkResponse('pass', 'green'))
+    vi.stubGlobal('fetch', fetchMock)
+    renderLoaded()
+
+    fireEvent.click(screen.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    const button = screen.getByRole('button', { name: 'Prüfung speichern' })
+    fireEvent.click(button)
+    await act(async () => {})
+    expect(screen.getByRole('alert')).toHaveTextContent('Bitte wähle ein gültiges Prüfergebnis.')
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+
+    // Retry: the same payload now succeeds — the stale alert clears and the
+    // confirmation renders (the submit is NOT wedged).
+    fireEvent.click(button)
+    await act(async () => {})
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+    expect(screen.getByRole('status')).toHaveTextContent(/gespeichert/)
+  })
+
+  it('OUTCOME_FROM_SERVER_RECORD: the confirmation names the SERVER-persisted overall_result, not the local chip (Story 5.4)', async () => {
+    vi.useFakeTimers()
+    // The user tapped BESTANDEN locally, but the server persisted a FAIL (the
+    // record is authoritative) → the confirmation must name NICHT BESTANDEN.
+    stubFetch(submitOkResponse('fail', 'oos'))
+    renderLoaded()
+
+    fireEvent.click(screen.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Prüfung speichern' }))
+    await act(async () => {})
+
+    const status = screen.getByRole('status')
+    expect(status).toHaveTextContent(/Ergebnis: NICHT BESTANDEN/)
+    expect(status).not.toHaveTextContent(/Ergebnis: BESTANDEN/)
+  })
+
+  it('OOS_CONSEQUENCE_ORANGE: a response status orange names NO OOS consequence', async () => {
+    vi.useFakeTimers()
+    stubFetch(submitOkResponse('pass', 'orange'))
+    renderLoaded()
+
+    fireEvent.click(screen.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Prüfung speichern' }))
+    await act(async () => {})
+
+    const status = screen.getByRole('status')
+    expect(status).toHaveTextContent(/BESTANDEN/)
+    expect(status).not.toHaveTextContent(/Außer Betrieb/)
+  })
+
+  it('OOS_CONSEQUENCE_RED: a response status red names NO OOS consequence', async () => {
+    vi.useFakeTimers()
+    stubFetch(submitOkResponse('pass', 'red'))
+    renderLoaded()
+
+    fireEvent.click(screen.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Prüfung speichern' }))
+    await act(async () => {})
+
+    const status = screen.getByRole('status')
+    expect(status).toHaveTextContent(/BESTANDEN/)
+    expect(status).not.toHaveTextContent(/Außer Betrieb/)
+  })
+
+  it('OOS_CONSEQUENCE_PASS_ON_OOS_TOOL: a PASSING inspection on an already-OOS tool keeps it OOS (FR-15) — the server status oos drives the consequence even for a pass result', async () => {
+    vi.useFakeTimers()
+    // The server derives oos from the full history: this tool was already OOS
+    // (an earlier fail, no reinstatement) and this PASS does NOT clear it —
+    // the confirmation follows the server, naming BESTANDEN + the OOS
+    // consequence.
+    stubFetch(submitOkResponse('pass', 'oos'))
+    renderLoaded()
+
+    fireEvent.click(screen.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Prüfung speichern' }))
+    await act(async () => {})
+
+    const status = screen.getByRole('status')
+    expect(status).toHaveTextContent(/BESTANDEN/)
+    expect(status).toHaveTextContent(/⛔ Wird als Außer Betrieb gesperrt/)
+  })
+
+  it('SUBMIT_INVALID_SERVER_RESPONSE: a 200 body without the record/status shows "Ungültige Serverantwort." instead of confirming (patch 14)', async () => {
+    stubFetch({ ok: true, status: 200, json: async () => ({}) })
+    renderLoaded()
+
+    fireEvent.click(screen.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    const button = screen.getByRole('button', { name: 'Prüfung speichern' })
+    fireEvent.click(button)
+    await act(async () => {})
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Ungültige Serverantwort.')
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(screen.queryByText('Dashboard')).not.toBeInTheDocument()
+    expect(button).toBeEnabled()
   })
 
   it('OOS_CONSEQUENCE_CHECKLIST_FAIL: a checklist with a failed item names the OOS consequence; an all-pass checklist does not', async () => {

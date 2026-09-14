@@ -13,8 +13,9 @@ import (
 // dev database (migration 000027 applied): the transactional inspection + items
 // insert (SUBMIT_PASSFAIL no items / SUBMIT_CHECKLIST with the snapshot items,
 // notes NULL semantics, item label/position round-trip) and the derived-status
-// input read (latest inspection + latest pass anchor + latest reinstatement
-// anchor, nil-safe for a never-inspected tool).
+// input read (latest-fail anchor + latest pass anchor + latest reinstatement
+// anchor, nil-safe for a never-inspected tool — a PASS inspection does NOT
+// clear the latest-fail OOS anchor, AD-4).
 func TestPostgresInspectionStore(t *testing.T) {
 	pool := toolTestPool(t)
 	ctx := context.Background()
@@ -38,7 +39,7 @@ func TestPostgresInspectionStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetToolInspectionStatus(empty) err = %v", err)
 	}
-	if empty.Latest != nil || empty.LastSuccessAt != nil || empty.LastReinstatedAt != nil {
+	if empty.LatestFailAt != nil || empty.LastSuccessAt != nil || empty.LastReinstatedAt != nil {
 		t.Errorf("empty status = %+v, want all nil anchors", empty)
 	}
 
@@ -100,14 +101,15 @@ func TestPostgresInspectionStore(t *testing.T) {
 		t.Errorf("items carry inspection_id = %q, want %q", check.Items[0].InspectionID, check.ID)
 	}
 
-	// GET_STATUS after the two inspections: the LATEST is the checklist fail;
-	// there is no PASS inspection yet (LastSuccessAt nil); no reinstatement.
+	// GET_STATUS after the two inspections: the latest FAILED is the checklist
+	// fail's submitted_at; there is no PASS inspection yet (LastSuccessAt nil);
+	// no reinstatement.
 	afterFails, err := repo.GetToolInspectionStatus(ctx, tool.ID)
 	if err != nil {
 		t.Fatalf("GetToolInspectionStatus(after fails) err = %v", err)
 	}
-	if afterFails.Latest == nil || afterFails.Latest.ID != check.ID || afterFails.Latest.OverallResult != core.InspectionResultFail {
-		t.Fatalf("latest = %+v, want the checklist fail inspection", afterFails.Latest)
+	if afterFails.LatestFailAt == nil || !afterFails.LatestFailAt.Equal(check.SubmittedAt) {
+		t.Fatalf("latest_fail = %v, want the checklist fail's submitted_at %v", afterFails.LatestFailAt, check.SubmittedAt)
 	}
 	if afterFails.LastSuccessAt != nil {
 		t.Errorf("last_success = %v, want nil (no pass inspection yet)", afterFails.LastSuccessAt)
@@ -116,8 +118,9 @@ func TestPostgresInspectionStore(t *testing.T) {
 		t.Errorf("last_reinstated = %v, want nil (no reinstatement)", afterFails.LastReinstatedAt)
 	}
 
-	// A later PASS inspection becomes the LATEST inspection AND the last-success
-	// anchor.
+	// A later PASS inspection becomes the last-success anchor — but does NOT
+	// clear the latest-FAIL OOS anchor (AD-4: a passing inspection is not the
+	// exit from OOS; reinstatement is).
 	pass, err := repo.InsertInspection(ctx, &core.Inspection{
 		ToolID: tool.ID, InspectorID: "00000000-0000-0000-0000-0000000000ff",
 		Mode: core.InspectionModePassFail, OverallResult: core.InspectionResultPass, Notes: "Ok",
@@ -129,8 +132,8 @@ func TestPostgresInspectionStore(t *testing.T) {
 	if err != nil {
 		t.Fatalf("GetToolInspectionStatus(after pass) err = %v", err)
 	}
-	if afterPass.Latest == nil || afterPass.Latest.ID != pass.ID {
-		t.Fatalf("latest = %+v, want the pass inspection", afterPass.Latest)
+	if afterPass.LatestFailAt == nil || !afterPass.LatestFailAt.Equal(check.SubmittedAt) {
+		t.Errorf("latest_fail = %v, want the earlier fail's submitted_at %v (a pass does NOT clear OOS)", afterPass.LatestFailAt, check.SubmittedAt)
 	}
 	if afterPass.LastSuccessAt == nil || !afterPass.LastSuccessAt.Equal(pass.SubmittedAt) {
 		t.Errorf("last_success = %v, want the pass's submitted_at %v", afterPass.LastSuccessAt, pass.SubmittedAt)

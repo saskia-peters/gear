@@ -4,8 +4,13 @@ import { Header } from '../components/Header.tsx'
 import { PassFailChips } from '../components/PassFailChips.tsx'
 import type { PassFailValue } from '../components/PassFailChips.tsx'
 import { clearAuthState } from '../auth/authState.ts'
-import { startInspection, submitInspectionPlaceholder } from '../auth/tools.ts'
-import type { InspectionStart, ToolTypeChecklistItem } from '../auth/tools.ts'
+import { startInspection, submitInspection, submitInspectionPlaceholder } from '../auth/tools.ts'
+import type {
+  InspectionResult,
+  InspectionStart,
+  InspectionSubmitStatus,
+  ToolTypeChecklistItem,
+} from '../auth/tools.ts'
 import { OOS_STATUS } from '../types/filters.ts'
 import styles from './InspectionPage.module.css'
 
@@ -52,29 +57,34 @@ interface InspectionState {
   checklist_items?: ToolTypeChecklistItem[]
 }
 
-// InspectionPageProps carries ONE optional seam (Story 5.2): submitInspection is
-// the injectable stand-in for the real record call (defaults to the UX
-// placeholder in tools.ts; Stories 5.4/5.5 replace it). It also lets the tests
-// hold the submit in flight to exercise the double-submit guard.
-interface InspectionPageProps {
-  submitInspection?: () => Promise<void>
-}
-
-// InspectionPage is the SINGLE-COLUMN inspection screen foundation (Story 5.2,
+// InspectionPage is the SINGLE-COLUMN inspection screen (Story 5.2 + 5.4,
 // FR-8/UX-DR3/DR5/DR6/DR7/DR8/DR9/DR10): a tool header (name + identifier +
-// type + mode), large green/red Pass/Fail chips (UX-only — Stories 5.4/5.5
-// wire them to the real execution) and ONE submit → inline confirmation →
-// ~2s auto-return to a refreshed Dashboard (immediate under Reduce Motion).
-// The inspection content NEVER splits into a two-column layout at any width
-// (safety-critical input, UX-DR10). A result MUST be chosen before the submit
-// enables — an inspection can never be saved without an outcome.
+// type + mode), large green/red Pass/Fail chips and ONE submit → inline
+// confirmation → ~2s auto-return to a refreshed Dashboard (immediate under
+// Reduce Motion). The inspection content NEVER splits into a two-column layout
+// at any width (safety-critical input, UX-DR10). A result MUST be chosen before
+// the submit enables — an inspection can never be saved without an outcome.
+//
+// PASS_FAIL is REAL since Story 5.4 (FR-13): the submit posts
+// { mode: 'pass_fail', result, notes, items: [] } to
+// POST /api/v1/tools/{id}/inspection; the server persists identity/timestamp/
+// result/notes (AD-4) and returns the derived status. The confirmation names
+// the OUTCOME from the server-persisted record (inspection.overall_result) and
+// the OOS consequence ONLY from the returned status (status.status === 'oos') —
+// never from local state: a passing inspection does NOT clear OOS (reinstatement
+// is the sole exit, FR-15), so the server's derived status is authoritative. A
+// failed submit (400/403/404/500/network) shows an inline German role=alert
+// with NO navigation/confirmation; 401 clears auth and redirects to /login.
 //
 // MODE-AWARE (user decision — the checklist surface ships NOW, not in 5.5): a
 // checklist-mode type renders ONE PassFailChips group PER checklist item; the
 // submit requires EVERY item answered (FR-12) and the confirmation names the
 // count of failed items ("2 von 3 Punkten NICHT BESTANDEN") or overall
-// BESTANDEN when all pass. Every other mode — pass_fail, a missing or unknown
-// one — renders the SINGLE pass/fail toggle (the safe default).
+// BESTANDEN when all pass. In 5.4 the checklist submit stays on the UX
+// PLACEHOLDER seam (no fetch — the consequence is locally derived); Story 5.5
+// wires it to the same endpoint (+ "Alle bestanden"). Every other mode —
+// pass_fail, a missing or unknown one — renders the SINGLE pass/fail toggle
+// (the safe default).
 //
 // Data comes from the eligible /start response, which the dashboard navigates
 // here with as router state. On a refresh / deep link the state is GONE, so the
@@ -82,7 +92,7 @@ interface InspectionPageProps {
 // mode server-side) and shows a loading/error state meanwhile. The display
 // falls back with `||` (not `??`) so an EMPTY string in the state never bypasses
 // the fallback.
-export function InspectionPage({ submitInspection = submitInspectionPlaceholder }: InspectionPageProps = {}) {
+export function InspectionPage() {
   const { toolId } = useParams<{ toolId: string }>()
   const location = useLocation()
   const navigate = useNavigate()
@@ -112,6 +122,23 @@ export function InspectionPage({ submitInspection = submitInspectionPlaceholder 
   const [comment, setComment] = useState('')
   const [submitting, setSubmitting] = useState(false)
   const [submitted, setSubmitted] = useState(false)
+  // serverStatus is the SERVER-authoritative derived status of the last
+  // successful pass_fail submit (Story 5.4, AD-4/AD-5): the confirmation names
+  // the OOS consequence ONLY from status.status === 'oos'. A passing inspection
+  // does NOT clear OOS — reinstatement is the sole exit (FR-15), so the
+  // server's derived status (which sees the full history) is authoritative,
+  // never a local result guess. Checklist mode keeps the local consequence
+  // until Story 5.5.
+  const [serverStatus, setServerStatus] = useState<InspectionSubmitStatus | null>(null)
+  // serverOutcome is the server-PERSISTED overall result of the last successful
+  // pass_fail submit (Story 5.4, FR-13): the confirmation names the outcome
+  // from inspection.overall_result, not the local chip — the confirmation must
+  // name what was actually recorded.
+  const [serverOutcome, setServerOutcome] = useState<InspectionResult | null>(null)
+  // submitError is the inline German role=alert for a failed submit (Story
+  // 5.4): 400/403/404/500/network surface here with NO navigation and NO
+  // confirmation — the controls stay enabled for a retry.
+  const [submitError, setSubmitError] = useState('')
   const submitPendingRef = useRef(false)
   const [reduceMotion] = useState(() => prefersReducedMotion())
 
@@ -191,22 +218,44 @@ export function InspectionPage({ submitInspection = submitInspectionPlaceholder 
   // The confirmation names the recorded outcome (UX-DR7) — always set by the
   // time submit is possible. A checklist inspection names the count of failed
   // items ("2 von 3 Punkten NICHT BESTANDEN") or overall BESTANDEN when all
-  // items pass (FR-12).
+  // items pass (FR-12). For pass_fail the outcome is the SERVER-PERSISTED
+  // overall_result (Story 5.4): the confirmation names what was recorded, with
+  // the local chip only as the pre-submit fallback.
   const outcomeLabel =
     modeValue === 'checklist'
       ? failedCount > 0
         ? `${failedCount} von ${checklistItems.length} Punkten NICHT BESTANDEN`
         : 'BESTANDEN'
-      : result === 'pass'
+      : serverOutcome === 'pass'
         ? 'BESTANDEN'
-        : result === 'fail'
+        : serverOutcome === 'fail'
           ? 'NICHT BESTANDEN'
-          : null
-  // isFailure is the Story 5.3 consequence trigger: a failed overall outcome
-  // (pass_fail `fail` or any failed checklist item) makes the tool unsafe — the
-  // confirmation names the consequence ("⛔ Wird als Außer Betrieb gesperrt").
-  const isFailure = modeValue === 'checklist' ? failedCount > 0 : result === 'fail'
-  const oosConsequence = isFailure ? `⛔ Wird als ${OOS_STATUS} gesperrt. ` : ''
+          : result === 'pass'
+            ? 'BESTANDEN'
+            : result === 'fail'
+              ? 'NICHT BESTANDEN'
+              : null
+  // isFailure is the Story 5.3 consequence trigger for CHECKLIST mode (the 5.4
+  // placeholder seam): any failed checklist item makes the tool unsafe. For
+  // PASS_FAIL the consequence is SERVER-driven (serverStatus), so isFailure is
+  // checklist-only — a local result guess is never the OOS authority (AD-4).
+  const isFailure = modeValue === 'checklist' ? failedCount > 0 : false
+  // oosConsequence is the confirmation consequence. Checklist mode (5.4
+  // placeholder) stays locally derived from isFailure; pass_fail uses the
+  // SERVER-authoritative derived status from the submit response — the
+  // confirmation names the OOS consequence ONLY when the server returned
+  // status.status === 'oos'. A passing inspection does NOT clear OOS
+  // (reinstatement is the sole exit, FR-15), so the server's derived status —
+  // which sees the full inspection + reinstatement history — is authoritative,
+  // never a local result guess (AD-4/AD-5).
+  const oosConsequence =
+    modeValue === 'checklist'
+      ? isFailure
+        ? `⛔ Wird als ${OOS_STATUS} gesperrt. `
+        : ''
+      : serverStatus?.status === 'oos'
+        ? `⛔ Wird als ${OOS_STATUS} gesperrt. `
+        : ''
 
   // handleItemSelect records one checklist item's per-item result (keyed by the
   // item id); re-tapping the selected chip deselects it (null → the key leaves
@@ -223,36 +272,76 @@ export function InspectionPage({ submitInspection = submitInspectionPlaceholder 
     })
   }
 
-  // handleSubmit is the Story 5.2 UX PLACEHOLDER submit (UX-DR7/DR8):
-  //   ====================================================================
-  //   UX PLACEHOLDER SEAM — no inspection-record endpoint exists yet.
-  //   The persisted shape (identity/timestamp/per-item results/OOS) is owned
-  //   by Stories 5.3/5.4/5.5. The `submitInspection` seam is the stand-in for
-  //   the real record call 5.4/5.5 replace; it deliberately does NO fetch to a
-  //   nonexistent endpoint. The button is disabled while it runs AND during
-  //   the auto-return delay (double-submit guard).
-  //   ====================================================================
+  // handleSubmit executes the inspection submit (Story 5.4, UX-DR7/DR8):
+  //   PASS_FAIL builds the real payload { mode: 'pass_fail', result, notes,
+  //   items: [] } and POSTs it via the real client bound to the URL toolId. A
+  //   200 stores the server-authoritative status + the server-persisted outcome
+  //   and confirms (a malformed body answers an inline error instead); any
+  //   error (400/403/404/500/network) shows an inline German role=alert and does
+  //   NOT navigate or confirm — 401 clears auth + redirects to /login (the
+  //   load-path pattern). CHECKLIST mode (5.4) stays on the UX placeholder: no
+  //   fetch, local consequence — Story 5.5 wires it. The button is disabled
+  //   while it runs AND during the auto-return delay (double-submit guard).
   const handleSubmit = async (): Promise<void> => {
     // Defense-in-depth: an incomplete result set can never be submitted (the
     // button is also disabled), keeping an outcome-less save impossible in a
     // safety-critical flow — pass_fail needs one selected chip, a checklist
     // needs EVERY item answered (FR-12).
-    if (
-      (modeValue === 'checklist' ? !isChecklistComplete : result === null) ||
-      submitPendingRef.current ||
-      submitted
-    ) {
+    if (submitPendingRef.current || submitted) return
+    if (modeValue === 'checklist') {
+      if (!isChecklistComplete) return
+    } else if (result === null) {
       return
     }
     submitPendingRef.current = true
     setSubmitting(true)
+    setSubmitError('')
     try {
-      await submitInspection()
+      if (modeValue === 'checklist') {
+        // Story 5.4 checklist placeholder: no fetch, no server status — the
+        // local isFailure consequence drives the confirmation (5.5 wires it).
+        await submitInspectionPlaceholder()
+      } else {
+        // The route always carries a toolId; the guard is defensive (an
+        // unmappable route never confirms).
+        if (!toolId) {
+          setSubmitError('Die Prüfung konnte nicht gespeichert werden.')
+          return
+        }
+        // The guard above guarantees a selected result here; TS cannot narrow
+        // `result` through the checklist disjunction, so assert it explicitly.
+        const serverResult = await submitInspection(toolId, {
+          mode: 'pass_fail',
+          result: result!,
+          notes: comment,
+          items: [],
+        })
+        // Response-shape guard: a 200 whose body lacks the record/status must
+        // NOT confirm a success — surface the inline error instead.
+        if (!serverResult || !serverResult.status || !serverResult.inspection) {
+          setSubmitError('Ungültige Serverantwort.')
+          return
+        }
+        setServerStatus(serverResult.status)
+        setServerOutcome(serverResult.inspection.overall_result)
+      }
+      setSubmitted(true)
+    } catch (err) {
+      // Defensive status extraction (patch 14): an ApiError-like rejection may
+      // be any object shape, so branch on the property rather than instanceof.
+      const status = err && typeof err === 'object' && 'status' in err ? (err as { status: number }).status : 0
+      if (status === 401) {
+        clearAuthState()
+        navigate('/login', { replace: true })
+        return
+      }
+      setSubmitError(
+        err instanceof Error && err.message !== '' ? err.message : 'Die Prüfung konnte nicht gespeichert werden.',
+      )
     } finally {
       submitPendingRef.current = false
       setSubmitting(false)
     }
-    setSubmitted(true)
   }
 
   return (
@@ -342,7 +431,7 @@ export function InspectionPage({ submitInspection = submitInspectionPlaceholder 
                   onChange={(e) => setComment(e.target.value)}
                   placeholder="z.B. Ölstand geprüft, auffällige Geräusche..."
                   rows={3}
-                  maxLength={2000}
+                  maxLength={4000}
                   disabled={submitting || submitted}
                   autoComplete="off"
                 />
@@ -353,11 +442,18 @@ export function InspectionPage({ submitInspection = submitInspectionPlaceholder 
                   type="button"
                   className={styles.submitButton}
                   disabled={!canSubmit || submitting || submitted}
+                  aria-busy={submitting}
                   onClick={() => void handleSubmit()}
                 >
-                  Prüfung speichern
+                  {submitting ? 'Wird gespeichert...' : 'Prüfung speichern'}
                 </button>
               </div>
+
+              {submitError && (
+                <p role="alert" className={styles.error}>
+                  {submitError}
+                </p>
+              )}
 
               {submitted && (
                 <p role="status" className={styles.confirmation}>

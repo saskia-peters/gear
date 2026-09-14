@@ -229,12 +229,14 @@ type SubmitInspectionResult struct {
 	Status     ToolStatus
 }
 
-// ToolInspectionStatus is the status-read input bundle (Story 5.3): the latest
-// inspection (with its snapshot items) plus the two clock anchors — the latest
-// PASSING inspection's submitted_at and the latest reinstatement's created_at.
-// The write path of reinstatements is Story 5.6; this read consumes the table.
+// ToolInspectionStatus is the status-read input bundle (Story 5.3): the LATEST
+// FAILED inspection's submitted_at (the OOS anchor, AD-4 — OOS is derived from
+// the latest FAILED inspection not since reinstated; a PASS inspection does NOT
+// clear it) plus the two clock anchors — the latest PASSING inspection's
+// submitted_at and the latest reinstatement's created_at. The write path of
+// reinstatements is Story 5.6; this read consumes the table.
 type ToolInspectionStatus struct {
-	Latest           *Inspection
+	LatestFailAt     *time.Time
 	LastSuccessAt    *time.Time
 	LastReinstatedAt *time.Time
 }
@@ -245,7 +247,7 @@ type ToolInspectionStatus struct {
 // transaction (a failed half-write never leaves a mixed item state). The
 // records are immutable once persisted (no update path; history is
 // append-only). GetToolInspectionStatus is the derived-status input read: the
-// latest inspection + the latest pass/reinstatement anchors (nil-safe).
+// latest-fail + latest pass/reinstatement anchors (nil-safe).
 type InspectionStore interface {
 	InsertInspection(ctx context.Context, inspection *Inspection) (*Inspection, error)
 	GetToolInspectionStatus(ctx context.Context, toolID string) (*ToolInspectionStatus, error)
@@ -337,23 +339,25 @@ func (s *Service) SubmitInspection(ctx context.Context, actorID, toolID string, 
 	// Derive the status best-effort AFTER the record committed: a failed status
 	// read must NOT surface as an error (a client retry would duplicate the
 	// already-committed record). Log the failure and derive from the persisted
-	// record alone — a pass reads as green-from-submittedAt, a fail as `oos`.
+	// record alone — a pass anchors the clock at its submitted_at (green when
+	// fresh), a fail reads as `oos` (its submitted_at is the latest fail and no
+	// reinstatement is known to follow).
 	var status ToolStatus
 	statusInput, err := s.store.GetToolInspectionStatus(ctx, toolID)
 	if err != nil {
 		s.log().Warn("tools core: inspection status read failed after commit; deriving from the record alone",
 			"tool", toolID, "error", err)
-		// Best-effort from the persisted record alone: a pass anchors the clock
-		// at its own submitted_at (→ green when fresh); a fail is OOS (its
-		// submitted_at is the latest and no reinstatement is known to follow).
-		var lastSuccessAt *time.Time
-		if persisted.OverallResult == InspectionResultPass {
+		var latestFailAt, lastSuccessAt *time.Time
+		if persisted.OverallResult == InspectionResultFail {
+			t := persisted.SubmittedAt
+			latestFailAt = &t
+		} else {
 			t := persisted.SubmittedAt
 			lastSuccessAt = &t
 		}
-		status = deriveToolStatus(persisted, lastSuccessAt, nil, interval, time.Now(), OrangeWindowDays)
+		status = deriveToolStatus(latestFailAt, lastSuccessAt, nil, interval, time.Now(), OrangeWindowDays)
 	} else {
-		status = deriveToolStatus(statusInput.Latest, statusInput.LastSuccessAt, statusInput.LastReinstatedAt,
+		status = deriveToolStatus(statusInput.LatestFailAt, statusInput.LastSuccessAt, statusInput.LastReinstatedAt,
 			interval, time.Now(), OrangeWindowDays)
 	}
 

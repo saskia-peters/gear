@@ -236,13 +236,14 @@ RETURNING id, tool_id, inspector_id, mode, overall_result, notes, submitted_at;
 INSERT INTO inspection_items (inspection_id, item_id, label, position, result)
 VALUES ($1, $2, $3, $4, $5);
 
--- name: GetLatestInspection :one
--- The LATEST inspection of a tool (reverse-chronological read, FR-18): the
--- derived-status input. No row → pgx.ErrNoRows (the repository maps it to a nil
--- "never-inspected" status, AD-5).
-SELECT id, tool_id, inspector_id, mode, overall_result, notes, submitted_at
+-- name: GetLatestFailedInspection :one
+-- The submitted_at of the LATEST FAILED inspection of a tool (the OOS anchor,
+-- AD-4: OOS is derived from the latest FAILED inspection not since reinstated —
+-- a PASS inspection does NOT clear it). No row → pgx.ErrNoRows (the repository
+-- maps it to a nil anchor).
+SELECT submitted_at
 FROM inspections
-WHERE tool_id = $1
+WHERE tool_id = $1 AND overall_result = 'fail'
 ORDER BY submitted_at DESC, id DESC
 LIMIT 1;
 

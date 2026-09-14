@@ -247,30 +247,23 @@ func (q *Queries) GetInspectionItems(ctx context.Context, inspectionID pgtype.UU
 	return items, nil
 }
 
-const getLatestInspection = `-- name: GetLatestInspection :one
-SELECT id, tool_id, inspector_id, mode, overall_result, notes, submitted_at
+const getLatestFailedInspection = `-- name: GetLatestFailedInspection :one
+SELECT submitted_at
 FROM inspections
-WHERE tool_id = $1
+WHERE tool_id = $1 AND overall_result = 'fail'
 ORDER BY submitted_at DESC, id DESC
 LIMIT 1
 `
 
-// The LATEST inspection of a tool (reverse-chronological read, FR-18): the
-// derived-status input. No row → pgx.ErrNoRows (the repository maps it to a nil
-// "never-inspected" status, AD-5).
-func (q *Queries) GetLatestInspection(ctx context.Context, toolID pgtype.UUID) (Inspection, error) {
-	row := q.db.QueryRow(ctx, getLatestInspection, toolID)
-	var i Inspection
-	err := row.Scan(
-		&i.ID,
-		&i.ToolID,
-		&i.InspectorID,
-		&i.Mode,
-		&i.OverallResult,
-		&i.Notes,
-		&i.SubmittedAt,
-	)
-	return i, err
+// The submitted_at of the LATEST FAILED inspection of a tool (the OOS anchor,
+// AD-4: OOS is derived from the latest FAILED inspection not since reinstated —
+// a PASS inspection does NOT clear it). No row → pgx.ErrNoRows (the repository
+// maps it to a nil anchor).
+func (q *Queries) GetLatestFailedInspection(ctx context.Context, toolID pgtype.UUID) (pgtype.Timestamptz, error) {
+	row := q.db.QueryRow(ctx, getLatestFailedInspection, toolID)
+	var submitted_at pgtype.Timestamptz
+	err := row.Scan(&submitted_at)
+	return submitted_at, err
 }
 
 const getLatestPassInspection = `-- name: GetLatestPassInspection :one

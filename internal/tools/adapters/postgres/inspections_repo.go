@@ -86,10 +86,11 @@ func (r *Repository) InsertInspection(ctx context.Context, inspection *core.Insp
 }
 
 // GetToolInspectionStatus is the derived-status input read (Story 5.3,
-// AD-4/AD-5): the LATEST inspection (with its snapshot items), the LATEST
-// PASSING inspection's submitted_at and the LATEST reinstatement's created_at.
-// A tool with no records at all maps to a nil-safe status (never-inspected →
-// the derivation answers `red`); a malformed tool id answers core.ErrToolNotFound.
+// AD-4/AD-5): the LATEST FAILED inspection's submitted_at (the OOS anchor — a
+// PASS inspection does NOT clear it), the LATEST PASSING inspection's
+// submitted_at and the LATEST reinstatement's created_at. A tool with no
+// records at all maps to a nil-safe status (never-inspected → the derivation
+// answers `red`); a malformed tool id answers core.ErrToolNotFound.
 func (r *Repository) GetToolInspectionStatus(ctx context.Context, toolID string) (*core.ToolInspectionStatus, error) {
 	uid, err := parseOptionalUUID(toolID)
 	if err != nil {
@@ -98,16 +99,15 @@ func (r *Repository) GetToolInspectionStatus(ctx context.Context, toolID string)
 
 	status := &core.ToolInspectionStatus{}
 
-	latestRow, err := r.queries.GetLatestInspection(ctx, uid)
+	latestFail, err := r.queries.GetLatestFailedInspection(ctx, uid)
 	switch {
 	case err == nil:
-		itemRows, err := r.queries.GetInspectionItems(ctx, latestRow.ID)
-		if err != nil {
-			return nil, err
+		if latestFail.Valid {
+			t := latestFail.Time
+			status.LatestFailAt = &t
 		}
-		status.Latest = inspectionFromRow(latestRow, itemRows)
 	case errors.Is(err, pgx.ErrNoRows):
-		// Never inspected: Latest stays nil (the derivation handles it).
+		// Never failed: LatestFailAt stays nil (the derivation handles it).
 	default:
 		return nil, err
 	}

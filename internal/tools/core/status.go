@@ -64,20 +64,22 @@ func scheduleInterval(unit string, magnitude int) time.Duration {
 
 // deriveToolStatus is the pure derived-status/clock function (AD-4/AD-5):
 //
-//   - OOS: the latest inspection is a FAIL and its submitted_at is at-or-after
-//     the latest reinstatement (or none exists) → `oos`, NextDue nil. A
-//     reinstatement resets the clock (Story 5.6) — a fail STRICTLY BEFORE the
-//     latest reinstatement is NOT OOS; a fail at the EXACT reinstatement
-//     timestamp is OOS (the equal-timestamp boundary favors safety).
+//   - OOS: the LATEST FAILED inspection's submitted_at is at-or-after the
+//     latest reinstatement (or none exists) → `oos`, NextDue nil. A PASSING
+//     inspection does NOT clear OOS — reinstatement is the SOLE exit (FR-15);
+//     OOS is derived from the latest FAILED inspection not since reinstated.
+//     A fail STRICTLY BEFORE the latest reinstatement is NOT OOS; a fail at
+//     the EXACT reinstatement timestamp is OOS (the equal-timestamp boundary
+//     favors safety).
 //   - Otherwise `base = max(last successful inspection, latest reinstatement)`
 //     (both nil → never-inspected → `red`, NextDue nil, AD-5).
 //   - `next_due = base + interval`; `red` when next_due < now, `orange` when
 //     next_due <= now + orangeWindowDays, else `green`.
 //
 // The inputs are read-only pointers; a nil pointer means "no such record".
-func deriveToolStatus(latest *Inspection, lastSuccessAt, lastReinstatedAt *time.Time, interval time.Duration, now time.Time, orangeWindowDays int) ToolStatus {
-	if latest != nil && latest.OverallResult == InspectionResultFail {
-		if lastReinstatedAt == nil || !latest.SubmittedAt.Before(*lastReinstatedAt) {
+func deriveToolStatus(latestFailAt, lastSuccessAt, lastReinstatedAt *time.Time, interval time.Duration, now time.Time, orangeWindowDays int) ToolStatus {
+	if latestFailAt != nil && !latestFailAt.IsZero() {
+		if lastReinstatedAt == nil || !latestFailAt.Before(*lastReinstatedAt) {
 			return ToolStatus{Status: ToolStatusCodeOOS}
 		}
 	}
