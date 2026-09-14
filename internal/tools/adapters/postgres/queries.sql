@@ -107,8 +107,11 @@ RETURNING id, name, default_schedule_id, required_qualification_id, inspection_m
 -- (JOIN on Tool-owned tool_types). Archived rows (archived_at NOT NULL) are
 -- filtered out — the active surface never shows them. The order is
 -- deterministic: created_at ASC with a name tiebreaker. An empty schedule_id
--- (SQL NULL) means the tool inherits its type's default schedule (AD-5).
-SELECT t.id, t.name, t.tool_type_id, tt.name AS tool_type_name, t.schedule_id, t.inventory_number, t.attributes, t.archived_at, t.created_at, t.updated_at
+-- (SQL NULL) means the tool inherits its type's default schedule (AD-5); the
+-- type's default_schedule_id is carried alongside (Story 6.1: the dashboard's
+-- interval-resolution input, via the Tool-owned JOIN — never a cross-module
+-- join, AD-8/AD-11).
+SELECT t.id, t.name, t.tool_type_id, tt.name AS tool_type_name, t.schedule_id, tt.default_schedule_id AS default_schedule_id, t.inventory_number, t.attributes, t.archived_at, t.created_at, t.updated_at
 FROM tools t
 JOIN tool_types tt ON tt.id = t.tool_type_id
 WHERE t.archived_at IS NULL

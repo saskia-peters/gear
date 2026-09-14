@@ -730,8 +730,8 @@ func (s *compToolTypeService) ListTools(_ context.Context, _ string) ([]*toolsco
 	return []*toolscore.Tool{}, nil
 }
 
-func (s *compToolTypeService) ListToolsForDashboard(_ context.Context) ([]*toolscore.Tool, error) {
-	return []*toolscore.Tool{}, nil
+func (s *compToolTypeService) ListToolsForDashboard(_ context.Context) ([]*toolscore.DashboardTool, error) {
+	return []*toolscore.DashboardTool{}, nil
 }
 
 func (s *compToolTypeService) CreateTool(_ context.Context, _ string, input toolscore.ToolInput) (*toolscore.Tool, error) {

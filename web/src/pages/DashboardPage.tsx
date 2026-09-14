@@ -1,24 +1,31 @@
-import { useEffect, useRef, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Header } from '../components/Header.tsx'
 import { SummaryGrid } from '../components/SummaryGrid.tsx'
+import type { SummaryCounts } from '../components/SummaryGrid.tsx'
 import { FilterChips } from '../components/FilterChips.tsx'
 import { EmptyState } from '../components/EmptyState.tsx'
 import { clearAuthState } from '../auth/authState.ts'
 import { listDashboardTools, startInspection } from '../auth/tools.ts'
 import type { DashboardTool } from '../auth/tools.ts'
-import type { FilterStatus } from '../types/filters.ts'
+import { statusLabel, statusClassKey, type StatusCode } from '../types/filters.ts'
 import styles from './DashboardPage.module.css'
 
 // DashboardPage is the GEAR-module landing surface. The "Werkzeugliste"
-// section (Story 4-3b) fetches the minimal ACTIVE tool list from /api/v1/tools
+// section (Story 4-3b + 6.1) fetches the ACTIVE tool list from /api/v1/tools
 // (gated by dashboard.view on the server — all base roles hold it) and renders
-// name + type name + a static "verfügbar" label (green accent). No status or
-// due-date derivation here — the color-coded dashboard is Story 6.1 (Epic 6).
-// When the list is empty the existing "Keine Werkzeuge vorhanden" EmptyState is
-// kept. 401 → /login (stale/revoked session); 403 should never happen for a
-// logged-in dashboard.view holder but is handled defensively the same way
-// (AD-6: no tool data is exposed either way).
+// name + type name + inventory number plus the server-DERIVED status as a
+// German label + color chip (FR-16/AD-4/AD-5 — Red past due / OOS, Orange ≤14
+// days, Green current, never-inspected Red). The 2×2 summary grid shows the
+// real per-status counts and its NON-ZERO cards are TAPPABLE: tapping a count
+// activates the matching status filter; the filter chips support MULTIPLE
+// active statuses at once (FR-16/UX-DR5). The selection identity is the
+// stable status CODE, never the German label. When the fleet is empty the
+// "Keine Werkzeuge vorhanden" EmptyState is kept; when a NON-EMPTY fleet is
+// filtered to nothing a distinct message + "Alle anzeigen" is shown instead.
+// 401 → /login (stale/revoked session); 403 should never happen for a logged-in
+// dashboard.view holder but is handled defensively the same way (AD-6: no tool
+// data is exposed either way).
 //
 // Story 5.1 (FR-11/AD-7): every row gains a "Prüfung starten" control — the
 // qualification-gated inspection START. The button stays ENABLED until clicked
@@ -29,7 +36,9 @@ import styles from './DashboardPage.module.css'
 // login; other → inline error (button stays enabled for a retry). A double
 // click is guarded: the button disables while its request is in flight.
 export function DashboardPage() {
-  const [selectedFilter, setSelectedFilter] = useState<FilterStatus>('Alle')
+  // selectedFilters holds the ACTIVE status CODES; the EMPTY set means "Alle"
+  // (no filter). "Alle" is cleared via clearFilters (Story 6.1).
+  const [selectedFilters, setSelectedFilters] = useState<ReadonlySet<StatusCode>>(new Set())
   const [loaded, setLoaded] = useState(false)
   const [loadError, setLoadError] = useState('')
   const [tools, setTools] = useState<DashboardTool[]>([])
@@ -76,6 +85,63 @@ export function DashboardPage() {
       cancelled = true
     }
   }, [navigate])
+
+  // counts are the per-status totals of the CURRENT list (Story 6.1,
+  // SPA_COUNTS): derived from the server-returned statuses, never guessed. An
+  // unknown code is never silently uncounted (the default branch keeps it out
+  // of every bucket).
+  const counts: SummaryCounts = useMemo(() => {
+    const c: SummaryCounts = { einsatzbereit: 0, ausstehend: 0, ueberfaellig: 0, ausserBetrieb: 0 }
+    for (const tool of tools) {
+      switch (tool.status.status) {
+        case 'green':
+          c.einsatzbereit!++
+          break
+        case 'orange':
+          c.ausstehend!++
+          break
+        case 'red':
+          c.ueberfaellig!++
+          break
+        case 'oos':
+          c.ausserBetrieb!++
+          break
+        default:
+          // Unknown/empty code: not counted anywhere (defensive).
+          break
+      }
+    }
+    return c
+  }, [tools])
+
+  // visibleTools applies the active status filters: the EMPTY set ("Alle")
+  // shows the full list; otherwise the union of the selected statuses
+  // (FR-16/UX-DR5, SPA_MULTI) — compared directly on the stable status code.
+  const visibleTools = useMemo(() => {
+    if (selectedFilters.size === 0) {
+      return tools
+    }
+    return tools.filter((tool) => selectedFilters.has(tool.status.status))
+  }, [tools, selectedFilters])
+
+  // toggleStatusFilter (Story 6.1, FR-16/UX-DR5): a status CODE toggles
+  // in/out — multiple statuses can be active at once.
+  const toggleStatusFilter = (code: StatusCode): void => {
+    setSelectedFilters((prev) => {
+      const next = new Set(prev)
+      if (next.has(code)) {
+        next.delete(code)
+      } else {
+        next.add(code)
+      }
+      return next
+    })
+  }
+
+  // clearFilters ("Alle") empties the selection → the full list is shown.
+  const clearFilters = (): void => {
+    setSelectedFilters(new Set())
+  }
 
   // handleStart POSTs the qualification-gated inspection start (Story 5.1).
   // 200 → navigate to the stub inspection screen with the server's tool + mode
@@ -139,12 +205,13 @@ export function DashboardPage() {
           </p>
         </section>
 
-        <SummaryGrid />
+        <SummaryGrid counts={counts} onToggleFilter={toggleStatusFilter} />
 
         <section className={styles.section} aria-label="Werkzeugliste">
           <FilterChips
-            selectedFilter={selectedFilter}
-            onSelectFilter={setSelectedFilter}
+            selectedFilters={selectedFilters}
+            onToggleFilter={toggleStatusFilter}
+            onClear={clearFilters}
           />
           {loadError && (
             <p role="alert" className={styles.error}>
@@ -158,9 +225,18 @@ export function DashboardPage() {
             </div>
           ) : tools.length === 0 ? (
             <EmptyState />
+          ) : visibleTools.length === 0 ? (
+            // Story 6.1 (patch 2): a NON-EMPTY fleet filtered to nothing gets a
+            // distinct state with a way out — never the fleet-empty EmptyState.
+            <div className={styles.filteredEmpty} role="status">
+              <p>Keine Werkzeuge mit dem ausgewählten Status.</p>
+              <button type="button" className={styles.showAllButton} onClick={clearFilters}>
+                Alle anzeigen
+              </button>
+            </div>
           ) : (
             <ul className={styles.list} aria-label="Werkzeuge">
-              {tools.map((tool) => (
+              {visibleTools.map((tool) => (
                 <li key={tool.id} className={styles.row}>
                   <div className={styles.rowMain}>
                     <div className={styles.rowInfo}>
@@ -169,7 +245,11 @@ export function DashboardPage() {
                       <span className={styles.rowMeta}>{tool.inventory_number}</span>
                     </div>
                     <div className={styles.rowActions}>
-                      <span className={styles.available}>verfügbar</span>
+                      <span
+                        className={`${styles.statusChip} ${styles[statusClassKey(tool.status.status)]}`}
+                      >
+                        {statusLabel(tool.status.status)}
+                      </span>
                       <button
                         type="button"
                         className={styles.startButton}

@@ -559,7 +559,7 @@ func (q *Queries) ListToolTypes(ctx context.Context) ([]ToolType, error) {
 
 const listTools = `-- name: ListTools :many
 
-SELECT t.id, t.name, t.tool_type_id, tt.name AS tool_type_name, t.schedule_id, t.inventory_number, t.attributes, t.archived_at, t.created_at, t.updated_at
+SELECT t.id, t.name, t.tool_type_id, tt.name AS tool_type_name, t.schedule_id, tt.default_schedule_id AS default_schedule_id, t.inventory_number, t.attributes, t.archived_at, t.created_at, t.updated_at
 FROM tools t
 JOIN tool_types tt ON tt.id = t.tool_type_id
 WHERE t.archived_at IS NULL
@@ -567,16 +567,17 @@ ORDER BY t.created_at ASC, t.name ASC
 `
 
 type ListToolsRow struct {
-	ID              pgtype.UUID        `json:"id"`
-	Name            string             `json:"name"`
-	ToolTypeID      pgtype.UUID        `json:"tool_type_id"`
-	ToolTypeName    string             `json:"tool_type_name"`
-	ScheduleID      pgtype.UUID        `json:"schedule_id"`
-	InventoryNumber string             `json:"inventory_number"`
-	Attributes      []byte             `json:"attributes"`
-	ArchivedAt      pgtype.Timestamptz `json:"archived_at"`
-	CreatedAt       pgtype.Timestamptz `json:"created_at"`
-	UpdatedAt       pgtype.Timestamptz `json:"updated_at"`
+	ID                pgtype.UUID        `json:"id"`
+	Name              string             `json:"name"`
+	ToolTypeID        pgtype.UUID        `json:"tool_type_id"`
+	ToolTypeName      string             `json:"tool_type_name"`
+	ScheduleID        pgtype.UUID        `json:"schedule_id"`
+	DefaultScheduleID pgtype.UUID        `json:"default_schedule_id"`
+	InventoryNumber   string             `json:"inventory_number"`
+	Attributes        []byte             `json:"attributes"`
+	ArchivedAt        pgtype.Timestamptz `json:"archived_at"`
+	CreatedAt         pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt         pgtype.Timestamptz `json:"updated_at"`
 }
 
 // ============================================================================
@@ -590,7 +591,10 @@ type ListToolsRow struct {
 // (JOIN on Tool-owned tool_types). Archived rows (archived_at NOT NULL) are
 // filtered out — the active surface never shows them. The order is
 // deterministic: created_at ASC with a name tiebreaker. An empty schedule_id
-// (SQL NULL) means the tool inherits its type's default schedule (AD-5).
+// (SQL NULL) means the tool inherits its type's default schedule (AD-5); the
+// type's default_schedule_id is carried alongside (Story 6.1: the dashboard's
+// interval-resolution input, via the Tool-owned JOIN — never a cross-module
+// join, AD-8/AD-11).
 func (q *Queries) ListTools(ctx context.Context) ([]ListToolsRow, error) {
 	rows, err := q.db.Query(ctx, listTools)
 	if err != nil {
@@ -606,6 +610,7 @@ func (q *Queries) ListTools(ctx context.Context) ([]ListToolsRow, error) {
 			&i.ToolTypeID,
 			&i.ToolTypeName,
 			&i.ScheduleID,
+			&i.DefaultScheduleID,
 			&i.InventoryNumber,
 			&i.Attributes,
 			&i.ArchivedAt,

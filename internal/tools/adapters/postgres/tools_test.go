@@ -157,6 +157,11 @@ func TestPostgresToolsStore(t *testing.T) {
 	if testRows[0].ToolTypeName != "Test-Geraetetyp" {
 		t.Errorf("listed tool_type_name = %q, want the JOINed type name", testRows[0].ToolTypeName)
 	}
+	// Story 6.1: ListTools carries the type's DEFAULT schedule id (the AD-5
+	// interval-resolution input the dashboard's derived status resolves).
+	if testRows[0].DefaultScheduleID != scheduleID {
+		t.Errorf("default_schedule_id = %q, want %q (the type's default schedule)", testRows[0].DefaultScheduleID, scheduleID)
+	}
 
 	// CREATE_OVERRIDE: a second tool with a valid ACTIVE schedule override is
 	// persisted with the FK override.

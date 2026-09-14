@@ -21,6 +21,33 @@
   text-align: center;
   min-height: 96px;
   transition: transform 0.1s ease;
+  /* Story 6.1: the cards are TAPPABLE buttons — reset the default button
+     chrome so the colored card surfaces render (UX-DR5, ≥48px targets). */
+  border: none;
+  cursor: pointer;
+  font: inherit;
+  -webkit-appearance: none;
+  appearance: none;
+}
+
+.card:hover {
+  filter: brightness(0.95);
+}
+
+/* Zero-count cards are NOT tappable (Story 6.1 patch 3): no pointer, no hover
+   feedback — a disabled summary card is a pure display, never a filter toggle. */
+.card:disabled {
+  cursor: default;
+  opacity: 0.55;
+}
+
+.card:disabled:hover {
+  filter: none;
+}
+
+.card:focus-visible {
+  outline: 2px solid var(--gear-color-brand-accent);
+  outline-offset: 2px;
 }
 
 .cardGreen {

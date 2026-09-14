@@ -83,8 +83,8 @@ func (f *fakeService) ListTools(_ context.Context, _ string) ([]*toolscore.Tool,
 	return []*toolscore.Tool{}, nil
 }
 
-func (f *fakeService) ListToolsForDashboard(_ context.Context) ([]*toolscore.Tool, error) {
-	return []*toolscore.Tool{}, nil
+func (f *fakeService) ListToolsForDashboard(_ context.Context) ([]*toolscore.DashboardTool, error) {
+	return []*toolscore.DashboardTool{}, nil
 }
 
 func (f *fakeService) CreateTool(_ context.Context, _ string, _ toolscore.ToolInput) (*toolscore.Tool, error) {

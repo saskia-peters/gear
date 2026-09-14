@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	admcore "github.com/saskia-peters/gear/internal/admin/core"
 )
 
 // Tool Management (Story 4.3, FR-9/FR-10/AD-5/AD-6/AD-10): the Tool module's
@@ -117,20 +119,33 @@ const InventoryNumberMaxLength = 16
 // display name (read-only, from the Tool-owned tool_types — never a
 // cross-module join). ScheduleID is empty when the tool INHERITS its type's
 // default schedule (the stored SQL NULL, AD-5) and set otherwise (first-class
-// FK to the Admin schedules catalog, never JSONB). Attributes is the
-// no-migration JSONB extension surface (FR-10, default '{}'). ArchivedAt is
-// nil while the tool is active and set (soft-archive) otherwise.
+// FK to the Admin schedules catalog, never JSONB). DefaultScheduleID is the
+// type's default schedule id (AD-5) — the interval-resolution input for the
+// derived-status/clock (Story 6.1); it is read via the dashboard list (never
+// a cross-module join — the Tool module only joins ITS OWN tool_types).
+// Attributes is the no-migration JSONB extension surface (FR-10, default '{}').
+// ArchivedAt is nil while the tool is active and set (soft-archive) otherwise.
 type Tool struct {
-	ID              string
-	Name            string
-	ToolTypeID      string
-	ToolTypeName    string
-	ScheduleID      string
-	InventoryNumber string
-	Attributes      map[string]any
-	ArchivedAt      *time.Time
-	CreatedAt       time.Time
-	UpdatedAt       time.Time
+	ID                string
+	Name              string
+	ToolTypeID        string
+	ToolTypeName      string
+	ScheduleID        string
+	DefaultScheduleID string
+	InventoryNumber   string
+	Attributes        map[string]any
+	ArchivedAt        *time.Time
+	CreatedAt         time.Time
+	UpdatedAt         time.Time
+}
+
+// DashboardTool is the dashboard list row (Story 6.1, FR-16/AD-4/AD-5): the
+// ACTIVE tool plus its DERIVED status — computed on read via the shared clock
+// function, never stored (AD-4). Embedding Tool keeps every list field
+// available; Status carries the color + next-due anchor the SPA renders.
+type DashboardTool struct {
+	Tool
+	Status ToolStatus
 }
 
 // ToolWithTypeQualification is the lean inspection-start read (Story 5.1,
@@ -263,20 +278,83 @@ func (s *Service) ListTools(ctx context.Context, actorID string) ([]*Tool, error
 }
 
 // ListToolsForDashboard returns every ACTIVE tool, oldest first, each with its
-// type display name — the dashboard.view-gated GEAR-module read (Story 4-3b).
-// Unlike ListTools it deliberately does NOT re-check `tools.manage`: the HTTP
-// surface (`/api/v1/tools`, mounted behind `dashboard.view`) carries the gate
-// instead, so a tools.manage-less dashboard.view holder (e.g. Helfer*in) can
-// render the Werkzeugliste — mirroring how SchedulesPort/QualificationCatalogPort
-// expose ungated reads for cross-module consumption. Archived rows are filtered
-// by the store and never reach the surface. No status/due-date derivation
-// (Story 6.1) — the SPA marks every listed tool "verfügbar" statically.
-func (s *Service) ListToolsForDashboard(ctx context.Context) ([]*Tool, error) {
+// type display name AND its derived status (Story 6.1, FR-16/AD-4/AD-5): the
+// dashboard.view-gated GEAR-module read (Story 4-3b + 6.1). Unlike ListTools
+// it deliberately does NOT re-check `tools.manage`: the HTTP surface
+// (`/api/v1/tools`, mounted behind `dashboard.view`) carries the gate instead,
+// so a tools.manage-less dashboard.view holder (e.g. Helfer*in) can render the
+// Werkzeugliste — mirroring how SchedulesPort/QualificationCatalogPort expose
+// ungated reads for cross-module consumption. The status is DERIVED on READ
+// via the shared clock function — never stored (AD-4). The schedule catalog is
+// resolved ONCE per call; each tool's effective interval (per-tool override
+// else type default) resolves against that snapshot via the pure
+// scheduleIntervalFor helper — no per-tool N+1 catalog reads. A tool whose
+// effective schedule is missing/invalid, or whose status read errors, is
+// LOGGED and rendered `red` (NextDue nil) — the dashboard never fails the
+// whole list on one config defect and never falsely claims serviceable
+// (DASH_RESILIENT). Archived rows are filtered by the store and never reach
+// the surface.
+func (s *Service) ListToolsForDashboard(ctx context.Context) ([]*DashboardTool, error) {
 	tools, err := s.store.ListTools(ctx)
 	if err != nil {
 		return nil, fmt.Errorf("tools core: failed to list tools: %w", err)
 	}
-	return tools, nil
+
+	out := make([]*DashboardTool, 0, len(tools))
+	if len(tools) == 0 {
+		// An EMPTY fleet returns the empty list WITHOUT touching the schedule
+		// catalog — the dashboard must answer even if the catalog is
+		// unreachable (there is nothing to derive).
+		return out, nil
+	}
+
+	// The schedule catalog is resolved ONCE per call (the spec's no-N+1
+	// invariant). A nil port is a composition-root wiring defect and FAILS
+	// LOUDLY — the dashboard cannot derive status without the clock.
+	if s.schedules == nil {
+		return nil, fmt.Errorf("tools core: schedule catalog port is not wired")
+	}
+	schedules, err := s.schedules.CurrentSchedules(ctx)
+	if err != nil {
+		return nil, fmt.Errorf("tools core: failed to resolve schedule catalog: %w", err)
+	}
+
+	now := time.Now()
+	for _, tool := range tools {
+		out = append(out, &DashboardTool{
+			Tool:   *tool,
+			Status: s.dashboardStatus(ctx, tool, schedules, now),
+		})
+	}
+	return out, nil
+}
+
+// dashboardStatus derives ONE tool's status on the resilient dashboard read
+// path (DASH_RESILIENT, Story 6.1): a missing/invalid effective schedule or a
+// status-read error is logged and rendered `red` (NextDue nil) — the tool is
+// never falsely claimed serviceable, and the config defect never takes the
+// whole list down. `schedules` is the catalog snapshot resolved once per
+// ListToolsForDashboard call.
+func (s *Service) dashboardStatus(ctx context.Context, tool *Tool, schedules []*admcore.Schedule, now time.Time) ToolStatus {
+	interval, err := scheduleIntervalFor(tool.ScheduleID, tool.DefaultScheduleID, schedules)
+	if err != nil {
+		s.log().Warn("tools core: dashboard tool has no effective schedule; rendering red",
+			"tool", tool.ID, "error", err)
+		return ToolStatus{Status: ToolStatusCodeRed}
+	}
+	statusInput, err := s.store.GetToolInspectionStatus(ctx, tool.ID)
+	if err != nil {
+		s.log().Warn("tools core: dashboard status read failed; rendering red",
+			"tool", tool.ID, "error", err)
+		return ToolStatus{Status: ToolStatusCodeRed}
+	}
+	if statusInput == nil {
+		// A (nil, nil) status read is treated as NEVER-INSPECTED → red (the
+		// nil anchors must never be dereferenced — no panic, no false green).
+		statusInput = &ToolInspectionStatus{}
+	}
+	return deriveToolStatus(statusInput.LatestFailAt, statusInput.LastSuccessAt, statusInput.LastReinstatedAt,
+		interval, now, OrangeWindowDays)
 }
 
 // CreateTool persists a new tool (CREATE_VALID / CREATE_OVERRIDE /

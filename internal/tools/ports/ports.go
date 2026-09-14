@@ -47,11 +47,14 @@ type Service interface {
 	// filtered server-side.
 	ListTools(ctx context.Context, actorID string) ([]*core.Tool, error)
 	// ListToolsForDashboard returns every ACTIVE tool, oldest first, each with
-	// its tool type's display name — the dashboard.view-gated GEAR-module read
-	// (Story 4-3b). UNGATED by design: the HTTP mount (`/api/v1/tools`) carries
-	// the dashboard.view gate, so a tools.manage-less dashboard.view holder can
-	// render the Werkzeugliste. No status/due-date derivation (Story 6.1).
-	ListToolsForDashboard(ctx context.Context) ([]*core.Tool, error)
+	// its tool type's display name AND its DERIVED status — the
+	// dashboard.view-gated GEAR-module read (Story 4-3b + 6.1). UNGATED by
+	// design: the HTTP mount (`/api/v1/tools`) carries the dashboard.view gate,
+	// so a tools.manage-less dashboard.view holder can render the Werkzeugliste.
+	// The status is computed on read via the shared clock function (AD-4, never
+	// stored); a tool whose effective schedule is missing/invalid or whose
+	// status read errors is rendered `red` (DASH_RESILIENT).
+	ListToolsForDashboard(ctx context.Context) ([]*core.DashboardTool, error)
 	// CreateTool persists a new physical tool. The tool's type must EXIST and
 	// be ACTIVE (intra-module ToolTypeExistsActive); an EMPTY schedule override
 	// is stored as NULL (the tool inherits its type's default, AD-5) while a

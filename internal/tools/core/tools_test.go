@@ -29,6 +29,14 @@ type fakeToolStore struct {
 	inspections []*Inspection
 	status      *ToolInspectionStatus
 	statusErr   error
+	// statusNilResult makes GetToolInspectionStatus return (nil, nil) — the
+	// dashboard read must treat it as never-inspected (red), never panic.
+	statusNilResult bool
+	// statusByTool / statusErrByTool drive PER-TOOL status fixtures for the
+	// dashboard list (Story 6.1): keyed by tool id, falling back to the shared
+	// fields above.
+	statusByTool    map[string]*ToolInspectionStatus
+	statusErrByTool map[string]error
 }
 
 // InsertInspection emulates the repository's transactional insert (Story 5.3):
@@ -48,8 +56,24 @@ func (f *fakeToolStore) InsertInspection(_ context.Context, inspection *Inspecti
 
 // GetToolInspectionStatus returns the status-read fixture a test set (nil-safe:
 // an unset fixture reads as a never-inspected tool). statusErr lets tests
-// simulate a post-commit status-read failure (the best-effort path).
-func (f *fakeToolStore) GetToolInspectionStatus(_ context.Context, _ string) (*ToolInspectionStatus, error) {
+// simulate a post-commit status-read failure (the best-effort path); the
+// per-tool statusByTool / statusErrByTool maps let the dashboard tests drive
+// DIFFERENT statuses per tool in one call (Story 6.1), with the shared fields
+// as the fallback.
+func (f *fakeToolStore) GetToolInspectionStatus(_ context.Context, toolID string) (*ToolInspectionStatus, error) {
+	if f.statusNilResult {
+		return nil, nil
+	}
+	if f.statusErrByTool != nil {
+		if err, ok := f.statusErrByTool[toolID]; ok {
+			return nil, err
+		}
+	}
+	if f.statusByTool != nil {
+		if status, ok := f.statusByTool[toolID]; ok {
+			return status, nil
+		}
+	}
 	if f.statusErr != nil {
 		return nil, f.statusErr
 	}
@@ -768,6 +792,246 @@ func TestListToolsForDashboardStoreError(t *testing.T) {
 	store.listErr = errors.New("boom")
 	if _, err := svc.ListToolsForDashboard(context.Background()); err == nil {
 		t.Fatal("ListToolsForDashboard err = nil, want store error propagated")
+	}
+}
+
+// dashboardService wires a Service whose ONE ACTIVE schedule (id-s1, 30 days)
+// resolves a real interval and a tool type whose default schedule is id-s1 —
+// so dashboard tools derive real statuses (Story 6.1). Tools are set per test.
+func dashboardService() (*Service, *fakeToolStore) {
+	store := &fakeToolStore{
+		types: []*ToolType{{
+			ID: "id-t1", Name: "Bohrmaschine", DefaultScheduleID: "id-s1",
+			InspectionMode: InspectionModePassFail,
+		}},
+	}
+	svc := NewService(
+		store,
+		&fakeSchedulesPort{schedules: []*admcore.Schedule{{
+			ID: "id-s1", Name: "30 Tage", IntervalUnit: admcore.IntervalUnitDay, IntervalMagnitude: 30,
+		}}},
+		&fakeQualificationPort{},
+		&fakePerms{perms: []string{DashboardViewPermission}},
+		&fakeAudit{},
+		nil,
+	)
+	return svc, store
+}
+
+// dashboardToolFixture builds an ACTIVE tool inheriting the type's default
+// schedule (id-s1), so the dashboard read resolves a real interval.
+func dashboardToolFixture(id, name string) *Tool {
+	return &Tool{
+		ID:                id,
+		Name:              name,
+		ToolTypeID:        "id-t1",
+		ToolTypeName:      "Bohrmaschine",
+		DefaultScheduleID: "id-s1",
+		InventoryNumber:   "GEAR00000X",
+	}
+}
+
+func TestListToolsForDashboardStatusMatrix(t *testing.T) {
+	// Story 6.1 status matrix over the derived-status anchors (AD-4/AD-5):
+	// never-inspected → red (nil next_due), OOS (latest fail not since
+	// reinstated) → oos, recent pass → green + next_due, and the orange/red
+	// windows relative to the 30-day schedule.
+	now := time.Now()
+	svc, store := dashboardService()
+	store.tools = []*Tool{
+		dashboardToolFixture("id-never", "Nie-geprüft"),
+		dashboardToolFixture("id-oos", "Defekt"),
+		dashboardToolFixture("id-green", "Frisch"),
+		dashboardToolFixture("id-orange", "Bald-fällig"),
+		dashboardToolFixture("id-red", "Überfällig"),
+	}
+	greenAnchor := now.Add(-10 * 24 * time.Hour)  // next_due 20d out → green
+	orangeAnchor := now.Add(-20 * 24 * time.Hour) // next_due 10d out → orange
+	redAnchor := now.Add(-40 * 24 * time.Hour)    // next_due 10d past → red
+	oosAnchor := now.Add(-1 * 24 * time.Hour)
+	store.statusByTool = map[string]*ToolInspectionStatus{
+		"id-oos":    {LatestFailAt: &oosAnchor},
+		"id-green":  {LastSuccessAt: &greenAnchor},
+		"id-orange": {LastSuccessAt: &orangeAnchor},
+		"id-red":    {LastSuccessAt: &redAnchor},
+	}
+
+	got, err := svc.ListToolsForDashboard(context.Background())
+	if err != nil {
+		t.Fatalf("ListToolsForDashboard err = %v", err)
+	}
+	if len(got) != 5 {
+		t.Fatalf("tools = %d, want 5", len(got))
+	}
+	byID := map[string]*DashboardTool{}
+	for _, d := range got {
+		byID[d.ID] = d
+	}
+
+	if s := byID["id-never"].Status; s.Status != ToolStatusCodeRed || s.NextDue != nil {
+		t.Errorf("never-inspected = %+v, want red + nil next_due", s)
+	}
+	if s := byID["id-oos"].Status; s.Status != ToolStatusCodeOOS || s.NextDue != nil {
+		t.Errorf("OOS = %+v, want oos + nil next_due", s)
+	}
+	green := byID["id-green"].Status
+	if green.Status != ToolStatusCodeGreen || green.NextDue == nil {
+		t.Errorf("fresh = %+v, want green + a next_due", green)
+	} else if want := greenAnchor.Add(30 * 24 * time.Hour); !green.NextDue.Equal(want) {
+		t.Errorf("green next_due = %v, want %v (pass + 30-day default interval)", green.NextDue, want)
+	}
+	if s := byID["id-orange"].Status; s.Status != ToolStatusCodeOrange || s.NextDue == nil {
+		t.Errorf("≤14d = %+v, want orange + a next_due", s)
+	}
+	if s := byID["id-red"].Status; s.Status != ToolStatusCodeRed || s.NextDue == nil {
+		t.Errorf("past due = %+v, want red + a next_due", s)
+	}
+}
+
+func TestListToolsForDashboardOverrideBeatsDefault(t *testing.T) {
+	// AD-5: a per-tool OVERRIDE (id-s2, 1 month) beats the type default
+	// (id-s1, 30 days) on the dashboard read — the derived next_due uses the
+	// override interval, never the default.
+	svc, store := dashboardService()
+	svc.schedules = &fakeSchedulesPort{schedules: []*admcore.Schedule{
+		{ID: "id-s1", Name: "30 Tage", IntervalUnit: admcore.IntervalUnitDay, IntervalMagnitude: 30},
+		{ID: "id-s2", Name: "1 Monat", IntervalUnit: admcore.IntervalUnitMonth, IntervalMagnitude: 1},
+	}}
+	store.tools = []*Tool{dashboardToolFixture("id-a", "Override")}
+	store.tools[0].ScheduleID = "id-s2"
+	now := time.Now()
+	store.statusByTool = map[string]*ToolInspectionStatus{
+		"id-a": {LastSuccessAt: &now},
+	}
+
+	got, err := svc.ListToolsForDashboard(context.Background())
+	if err != nil {
+		t.Fatalf("ListToolsForDashboard err = %v", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("tools = %d, want 1", len(got))
+	}
+	if got[0].Status.Status != ToolStatusCodeGreen {
+		t.Errorf("status = %q, want green (a fresh pass under the override interval)", got[0].Status.Status)
+	}
+	want := now.Add(30 * 24 * time.Hour) // the 1-month OVERRIDE interval
+	if got[0].Status.NextDue == nil || !got[0].Status.NextDue.Equal(want) {
+		t.Errorf("next_due = %v, want %v (the override interval, not the type default)", got[0].Status.NextDue, want)
+	}
+}
+
+func TestListToolsForDashboardResilient(t *testing.T) {
+	// DASH_RESILIENT (Story 6.1): a tool whose effective schedule is
+	// missing/invalid, or whose status read errors, is rendered `red`
+	// (NextDue nil) while the list still succeeds — one config defect never
+	// takes the whole list down, and no tool is falsely claimed serviceable.
+	svc, store := dashboardService()
+	svc.schedules = &fakeSchedulesPort{schedules: []*admcore.Schedule{
+		{ID: "id-s1", Name: "30 Tage", IntervalUnit: admcore.IntervalUnitDay, IntervalMagnitude: 30},
+		{ID: "id-bad", Name: "Kaputt", IntervalUnit: "fortnight", IntervalMagnitude: 1},
+	}}
+	now := time.Now()
+	store.tools = []*Tool{
+		dashboardToolFixture("id-good", "Ok"),
+		{ID: "id-no-schedule", Name: "Kein-Zeitplan", ToolTypeID: "id-t1", ToolTypeName: "Bohrmaschine", InventoryNumber: "GEAR000001"},
+		{ID: "id-bad-schedule", Name: "Kaputter-Zeitplan", ToolTypeID: "id-t1", ToolTypeName: "Bohrmaschine", ScheduleID: "id-bad", InventoryNumber: "GEAR000002"},
+		dashboardToolFixture("id-read-error", "Lesefehler"),
+	}
+	store.statusByTool = map[string]*ToolInspectionStatus{
+		"id-good": {LastSuccessAt: &now},
+	}
+	store.statusErrByTool = map[string]error{
+		"id-read-error": errors.New("boom"),
+	}
+
+	got, err := svc.ListToolsForDashboard(context.Background())
+	if err != nil {
+		t.Fatalf("ListToolsForDashboard err = %v, want the list to succeed despite per-tool defects", err)
+	}
+	if len(got) != 4 {
+		t.Fatalf("tools = %d, want all 4 (one defect must not drop a row)", len(got))
+	}
+	byID := map[string]*DashboardTool{}
+	for _, d := range got {
+		byID[d.ID] = d
+	}
+	if s := byID["id-good"].Status; s.Status != ToolStatusCodeGreen || s.NextDue == nil {
+		t.Errorf("good tool = %+v, want green + a next_due", s)
+	}
+	for _, id := range []string{"id-no-schedule", "id-bad-schedule", "id-read-error"} {
+		s := byID[id].Status
+		if s.Status != ToolStatusCodeRed || s.NextDue != nil {
+			t.Errorf("%s = %+v, want red + nil next_due (never falsely serviceable)", id, s)
+		}
+	}
+}
+
+func TestListToolsForDashboardNilSchedulePortFailsLoudly(t *testing.T) {
+	// A nil SchedulesPort is a composition-root wiring defect: with a NON-EMPTY
+	// fleet the dashboard read FAILS LOUDLY (the status cannot be derived
+	// without the clock) — never a silent all-red list. (An EMPTY fleet skips
+	// the catalog entirely — pinned by TestListToolsForDashboardEmptyFleetSkipsCatalog.)
+	svc, store := dashboardService()
+	store.tools = []*Tool{dashboardToolFixture("id-a", "Bohrmaschine-01")}
+	svc.schedules = nil
+	if _, err := svc.ListToolsForDashboard(context.Background()); err == nil {
+		t.Fatal("ListToolsForDashboard(nil port) err = nil, want internal error")
+	}
+}
+
+func TestListToolsForDashboardCatalogErrorFailsLoudly(t *testing.T) {
+	// A catalog resolution failure surfaces as an internal error (500-style),
+	// never a silent all-red list.
+	svc, store := dashboardService()
+	store.tools = []*Tool{dashboardToolFixture("id-a", "Bohrmaschine-01")}
+	svc.schedules = &fakeSchedulesPort{err: errors.New("boom")}
+	if _, err := svc.ListToolsForDashboard(context.Background()); err == nil {
+		t.Fatal("ListToolsForDashboard(catalog error) err = nil, want internal error")
+	}
+}
+
+func TestListToolsForDashboardEmptyFleetSkipsCatalog(t *testing.T) {
+	// Patch 5: an EMPTY fleet must return the empty list WITHOUT touching the
+	// schedule catalog — even an unreachable/erroring catalog (or a nil port)
+	// must not fail the dashboard when there is nothing to derive.
+	svc, store := dashboardService()
+	svc.schedules = &fakeSchedulesPort{err: errors.New("boom")}
+	got, err := svc.ListToolsForDashboard(context.Background())
+	if err != nil {
+		t.Fatalf("ListToolsForDashboard(empty fleet, erroring catalog) err = %v, want the empty list", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("tools = %d, want 0", len(got))
+	}
+
+	// The nil-port case too: nothing to derive → empty list, no loud failure.
+	svc.schedules = nil
+	store.tools = nil
+	got, err = svc.ListToolsForDashboard(context.Background())
+	if err != nil {
+		t.Fatalf("ListToolsForDashboard(empty fleet, nil port) err = %v, want the empty list", err)
+	}
+	if len(got) != 0 {
+		t.Errorf("tools = %d, want 0 (nil port, empty fleet)", len(got))
+	}
+}
+
+func TestListToolsForDashboardNilStatusRead(t *testing.T) {
+	// Patch 13: a (nil, nil) status read is treated as NEVER-INSPECTED → red
+	// (the nil anchors are never dereferenced — no panic, no false green).
+	svc, store := dashboardService()
+	store.tools = []*Tool{dashboardToolFixture("id-a", "Nie-gelesen")}
+	store.statusNilResult = true
+
+	got, err := svc.ListToolsForDashboard(context.Background())
+	if err != nil {
+		t.Fatalf("ListToolsForDashboard(nil status read) err = %v, want success", err)
+	}
+	if len(got) != 1 {
+		t.Fatalf("tools = %d, want 1", len(got))
+	}
+	if s := got[0].Status; s.Status != ToolStatusCodeRed || s.NextDue != nil {
+		t.Errorf("status = %+v, want red + nil next_due (nil read = never-inspected)", s)
 	}
 }
 

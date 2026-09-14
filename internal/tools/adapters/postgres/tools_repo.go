@@ -277,12 +277,16 @@ func toolFromRow(row CreateToolRow) *core.Tool {
 }
 
 // toolFromListRow is the ListTools variant (ListToolsRow is a distinct sqlc
-// struct with the identical shape).
+// struct with the identical shape). It additionally carries the tool type's
+// DEFAULT schedule id (Story 6.1: the dashboard's AD-5 interval-resolution
+// input, via the Tool-owned JOIN).
 func toolFromListRow(row ListToolsRow) *core.Tool {
-	return toolFromToolRow(
+	tool := toolFromToolRow(
 		row.ID, row.Name, row.ToolTypeID, row.ToolTypeName, row.ScheduleID,
 		row.InventoryNumber, row.Attributes, row.ArchivedAt, row.CreatedAt, row.UpdatedAt,
 	)
+	tool.DefaultScheduleID = row.DefaultScheduleID.String()
+	return tool
 }
 
 // toolFromUpdateRow is the UpdateTool variant (UpdateToolRow is a distinct

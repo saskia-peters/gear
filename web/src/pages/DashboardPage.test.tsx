@@ -1,20 +1,29 @@
 // @vitest-environment jsdom
-import { render, screen, cleanup } from '@testing-library/react'
+import { render, screen, within, cleanup } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { MemoryRouter, Routes, Route, useParams, useLocation } from 'react-router-dom'
 import { DashboardPage } from './DashboardPage.tsx'
 import { ThemeProvider } from '../context/ThemeContext.tsx'
+import type { ToolStatusInfo } from '../auth/tools.ts'
+import styles from './DashboardPage.module.css'
 
 const DASHBOARD_TOOLS_URL = '/api/v1/tools'
 
-function dashboardToolFixture(id: string, name: string, toolTypeName = 'Bohrmaschine', inventoryNumber = 'GEAR000001') {
+function dashboardToolFixture(
+  id: string,
+  name: string,
+  toolTypeName = 'Bohrmaschine',
+  inventoryNumber = 'GEAR000001',
+  status: ToolStatusInfo = { status: 'green', next_due: null },
+) {
   return {
     id,
     name,
     tool_type_id: 'id-t1',
     tool_type_name: toolTypeName,
     inventory_number: inventoryNumber,
+    status,
   }
 }
 
@@ -98,7 +107,7 @@ describe('DashboardPage Werkzeugliste (Story 4-3b)', () => {
     cleanup()
   })
 
-  it('GET_LIST: renders each active tool as name + type name + inventory number + "verfügbar" (green)', async () => {
+  it('GET_LIST: renders each active tool as name + type name + inventory number + derived status label (green)', async () => {
     stubFetchTools([
       dashboardToolFixture('id-w1', 'Bohrmaschine-01', 'Bohrmaschine', 'GEAR000001'),
       dashboardToolFixture('id-w2', 'Bohrmaschine-02', 'Schleifmaschine', 'GEAR000002'),
@@ -113,9 +122,11 @@ describe('DashboardPage Werkzeugliste (Story 4-3b)', () => {
     // DASHBOARD (Story 4-3b): the inventory number shows as row meta.
     expect(screen.getByText('GEAR000001')).toBeInTheDocument()
     expect(screen.getByText('GEAR000002')).toBeInTheDocument()
-    // Every listed tool carries the static "verfügbar" label.
-    expect(screen.getAllByText('verfügbar')).toHaveLength(2)
-    // No status derivation (Story 6.1 owns it): no Green/Orange/Red chips.
+    // Story 6.1: every listed tool renders its DERIVED German label (both
+    // fixtures default green) — the static "verfügbar" is gone.
+    const list = screen.getByRole('list', { name: 'Werkzeuge' })
+    expect(within(list).getAllByText('Einsatzbereit')).toHaveLength(2)
+    expect(screen.queryByText('verfügbar')).not.toBeInTheDocument()
     expect(screen.queryByText('Keine Werkzeuge vorhanden')).not.toBeInTheDocument()
   })
 
@@ -124,7 +135,6 @@ describe('DashboardPage Werkzeugliste (Story 4-3b)', () => {
     renderPage()
 
     expect(await screen.findByText('Keine Werkzeuge vorhanden')).toBeInTheDocument()
-    expect(screen.queryAllByText('verfügbar')).toHaveLength(0)
   })
 
   it('GET_UNAUTHENTICATED: a 401 on load clears the stale auth state and redirects to /login', async () => {
@@ -329,5 +339,179 @@ describe('DashboardPage inspection start (Story 5.1, FR-11/AD-7)', () => {
     await screen.findByText('Bohrmaschine-01')
 
     expect(screen.queryByRole('alert')).not.toBeInTheDocument()
+  })
+})
+
+describe('DashboardPage color-coded status (Story 6.1, FR-16/AD-4/AD-5)', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    localStorage.setItem('gear.session_token', 'sesstoken123')
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    cleanup()
+  })
+
+  // mixedTools covers every derived code so the row/filter/count/tap matrix can
+  // be exercised against real server-returned statuses.
+  const mixedTools = [
+    dashboardToolFixture('id-green', 'Grün', 'Bohrmaschine', 'GEAR000001', { status: 'green', next_due: '2027-01-01T00:00:00Z' }),
+    dashboardToolFixture('id-orange', 'Orange', 'Bohrmaschine', 'GEAR000002', { status: 'orange', next_due: '2026-09-20T00:00:00Z' }),
+    dashboardToolFixture('id-red', 'Rot', 'Bohrmaschine', 'GEAR000003', { status: 'red', next_due: '2026-09-01T00:00:00Z' }),
+    dashboardToolFixture('id-oos', 'Oos', 'Bohrmaschine', 'GEAR000004', { status: 'oos', next_due: null }),
+  ]
+
+  it('SPA_ROW: every row shows the derived German label + color chip instead of the static "verfügbar"', async () => {
+    stubFetchTools(mixedTools)
+    renderPage()
+
+    const list = await screen.findByRole('list', { name: 'Werkzeuge' })
+    expect(within(list).getByText('Einsatzbereit')).toBeInTheDocument()
+    expect(within(list).getByText('Ausstehend')).toBeInTheDocument()
+    expect(within(list).getByText('Überfällig')).toBeInTheDocument()
+    expect(within(list).getByText('Außer Betrieb')).toBeInTheDocument()
+    expect(within(list).queryByText('verfügbar')).not.toBeInTheDocument()
+  })
+
+  it('SPA_FILTER: selecting a status chip shows only the matching tools', async () => {
+    const user = userEvent.setup()
+    stubFetchTools(mixedTools)
+    renderPage()
+    await screen.findByRole('list', { name: 'Werkzeuge' })
+
+    await user.click(screen.getByRole('button', { name: 'Überfällig' }))
+
+    const list = screen.getByRole('list', { name: 'Werkzeuge' })
+    expect(within(list).getByText('Rot')).toBeInTheDocument()
+    expect(within(list).queryByText('Grün')).not.toBeInTheDocument()
+    expect(within(list).queryByText('Orange')).not.toBeInTheDocument()
+    expect(within(list).queryByText('Oos')).not.toBeInTheDocument()
+    // The chip is active (aria-pressed).
+    expect(screen.getByRole('button', { name: 'Überfällig' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: 'Alle' })).toHaveAttribute('aria-pressed', 'false')
+  })
+
+  it('SPA_MULTI: several statuses active combine as the union', async () => {
+    const user = userEvent.setup()
+    stubFetchTools(mixedTools)
+    renderPage()
+    await screen.findByRole('list', { name: 'Werkzeuge' })
+
+    await user.click(screen.getByRole('button', { name: 'Überfällig' }))
+    await user.click(screen.getByRole('button', { name: 'Ausstehend' }))
+
+    const list = screen.getByRole('list', { name: 'Werkzeuge' })
+    expect(within(list).getByText('Rot')).toBeInTheDocument()
+    expect(within(list).getByText('Orange')).toBeInTheDocument()
+    expect(within(list).queryByText('Grün')).not.toBeInTheDocument()
+    expect(within(list).queryByText('Oos')).not.toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Überfällig' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: 'Ausstehend' })).toHaveAttribute('aria-pressed', 'true')
+    expect(screen.getByRole('button', { name: 'Alle' })).toHaveAttribute('aria-pressed', 'false')
+  })
+
+  it('SPA_ALL: no status selected (or "Alle") shows the full list', async () => {
+    const user = userEvent.setup()
+    stubFetchTools(mixedTools)
+    renderPage()
+    await screen.findByRole('list', { name: 'Werkzeuge' })
+    expect(screen.getAllByRole('listitem')).toHaveLength(4)
+
+    // Select a filter, then tap "Alle" to clear it → the full list returns.
+    await user.click(screen.getByRole('button', { name: 'Überfällig' }))
+    expect(screen.getAllByRole('listitem')).toHaveLength(1)
+    await user.click(screen.getByRole('button', { name: 'Alle' }))
+    expect(screen.getAllByRole('listitem')).toHaveLength(4)
+    expect(screen.getByRole('button', { name: 'Alle' })).toHaveAttribute('aria-pressed', 'true')
+  })
+
+  it('SPA_COUNTS: the summary grid shows the real per-status totals', async () => {
+    stubFetchTools(mixedTools)
+    renderPage()
+
+    const statusRegion = await screen.findByRole('region', { name: 'Statusübersicht' })
+    expect(within(statusRegion).getByRole('button', { name: '1 Einsatzbereit' })).toBeInTheDocument()
+    expect(within(statusRegion).getByRole('button', { name: '1 Ausstehend' })).toBeInTheDocument()
+    expect(within(statusRegion).getByRole('button', { name: '1 Überfällig' })).toBeInTheDocument()
+    expect(within(statusRegion).getByRole('button', { name: '1 Außer Betrieb' })).toBeInTheDocument()
+  })
+
+  it('SPA_TAP: tapping a summary count card activates its filter; tapping it again clears it', async () => {
+    const user = userEvent.setup()
+    stubFetchTools(mixedTools)
+    renderPage()
+    await screen.findByRole('list', { name: 'Werkzeuge' })
+
+    // Tap the Überfällig count card → only the red tool remains visible.
+    await user.click(screen.getByRole('button', { name: '1 Überfällig' }))
+    const list = screen.getByRole('list', { name: 'Werkzeuge' })
+    expect(within(list).getByText('Rot')).toBeInTheDocument()
+    expect(within(list).queryByText('Grün')).not.toBeInTheDocument()
+
+    // Tap it again → the filter clears and the full list returns.
+    await user.click(screen.getByRole('button', { name: '1 Überfällig' }))
+    expect(screen.getAllByRole('listitem')).toHaveLength(4)
+  })
+
+  it('SPA_COLOR: each row chip carries the distinct module class for its code (OOS must never render green) — patch 14', async () => {
+    stubFetchTools(mixedTools)
+    renderPage()
+
+    await screen.findByRole('list', { name: 'Werkzeuge' })
+    const cases: Array<[string, string, string]> = [
+      ['Grün', 'Einsatzbereit', styles.statusGreen],
+      ['Orange', 'Ausstehend', styles.statusOrange],
+      ['Rot', 'Überfällig', styles.statusRed],
+      ['Oos', 'Außer Betrieb', styles.statusOos],
+    ]
+    for (const [toolName, label, classKey] of cases) {
+      const row = screen.getByText(toolName).closest('li')
+      expect(row).not.toBeNull()
+      expect(within(row as HTMLElement).getByText(label)).toHaveClass(classKey)
+    }
+  })
+
+  it('FILTERED_EMPTY: a non-empty fleet filtered to nothing shows the distinct message + "Alle anzeigen", never the fleet EmptyState — patch 2', async () => {
+    const user = userEvent.setup()
+    stubFetchTools([
+      dashboardToolFixture('id-green', 'Grün', 'Bohrmaschine', 'GEAR000001', { status: 'green', next_due: '2027-01-01T00:00:00Z' }),
+    ])
+    renderPage()
+    await screen.findByRole('list', { name: 'Werkzeuge' })
+
+    await user.click(screen.getByRole('button', { name: 'Überfällig' }))
+
+    expect(screen.getByText('Keine Werkzeuge mit dem ausgewählten Status.')).toBeInTheDocument()
+    expect(screen.queryByText('Keine Werkzeuge vorhanden')).not.toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Alle anzeigen' }))
+    expect(screen.getByRole('list', { name: 'Werkzeuge' })).toBeInTheDocument()
+  })
+
+  it('REMOUNT_REFRESH: a remount refetches and renders updated statuses, counts and colors (UX-DR6) — patch 8', async () => {
+    stubFetchTools([
+      dashboardToolFixture('id-w1', 'Bohrmaschine-01', 'Bohrmaschine', 'GEAR000001', { status: 'green', next_due: '2027-01-01T00:00:00Z' }),
+    ])
+    renderPage()
+    const firstList = await screen.findByRole('list', { name: 'Werkzeuge' })
+    expect(within(firstList).getByText('Einsatzbereit')).toBeInTheDocument()
+
+    // Simulate "returning to the dashboard" after an inspection: the remount
+    // fetches a FRESH list with the tool now out of service.
+    cleanup()
+    vi.unstubAllGlobals()
+    stubFetchTools([
+      dashboardToolFixture('id-w1', 'Bohrmaschine-01', 'Bohrmaschine', 'GEAR000001', { status: 'oos', next_due: null }),
+    ])
+    renderPage()
+
+    const secondList = await screen.findByRole('list', { name: 'Werkzeuge' })
+    expect(within(secondList).getByText('Außer Betrieb')).toBeInTheDocument()
+    expect(within(secondList).queryByText('Einsatzbereit')).not.toBeInTheDocument()
+    // The counts refresh too: green drops to 0, OOS rises to 1.
+    const statusRegion = screen.getByRole('region', { name: 'Statusübersicht' })
+    expect(within(statusRegion).getByRole('button', { name: '1 Außer Betrieb' })).toBeInTheDocument()
+    expect(within(statusRegion).queryByRole('button', { name: '1 Einsatzbereit' })).not.toBeInTheDocument()
   })
 })

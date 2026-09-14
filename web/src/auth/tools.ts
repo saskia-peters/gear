@@ -239,24 +239,39 @@ function buildToolBody(input: ToolInput): Record<string, unknown> {
 }
 
 // ============================================================================
-// Dashboard tool list (Story 4-3b, dashboard.view): the minimal GEAR-module
+// Dashboard tool list (Story 4-3b + 6.1, dashboard.view): the GEAR-module
 // (non-admin) tool surface. Unlike the admin tools above (which read
 // /api/v1/admin/tools behind tools.manage), this reads /api/v1/tools — gated
 // by dashboard.view on the server (all base roles hold it). It returns ONLY
-// id, name and the type display name: no schedule/attributes/audit data and
-// no status/due-date derivation (Story 6.1 owns the color-coded dashboard —
-// every tool renders as "verfügbar" statically).
+// id, name, the type display name, the inventory number and the DERIVED
+// status (Story 6.1 — computed on read, never stored, AD-4).
 // ============================================================================
 
-// DashboardTool is the minimal GET /api/v1/tools payload (Story 4-3b): the
-// id, name, type display name and the inventory number (shown as row meta in
-// the Werkzeugliste).
+// ToolStatusCode is a derived tool status code (AD-4/AD-5,
+// server-authoritative): `oos` (Out of Service), `red` (past due / never
+// inspected), `orange` (due within the static window), `green` (current).
+export type ToolStatusCode = 'oos' | 'red' | 'orange' | 'green'
+
+// ToolStatusInfo is the SHARED derived-status shape (Story 6.1): the status
+// code + the next-due timestamp (null for `oos` and the never-inspected
+// `red`). The dashboard list (DashboardTool.status) and the inspection submit
+// response (InspectionSubmitStatus) both use it so the vocabulary never drifts.
+export interface ToolStatusInfo {
+  status: ToolStatusCode
+  next_due: string | null
+}
+
+// DashboardTool is the minimal GET /api/v1/tools payload (Story 4-3b + 6.1):
+// the id, name, type display name and the inventory number (shown as row meta
+// in the Werkzeugliste) plus the server-DERIVED status the SPA renders as the
+// German label + color chip.
 export interface DashboardTool {
   id: string
   name: string
   tool_type_id: string
   tool_type_name: string
   inventory_number: string
+  status: ToolStatusInfo
 }
 
 const DASHBOARD_TOOLS_URL = '/api/v1/tools'
@@ -368,11 +383,9 @@ export interface InspectionSubmitRecord {
 
 // InspectionSubmitStatus is the server-derived status of the response
 // (AD-4/AD-5): oos|red|orange|green plus the next-due timestamp (null for
-// `oos` and the never-inspected `red`).
-export interface InspectionSubmitStatus {
-  status: 'oos' | 'red' | 'orange' | 'green'
-  next_due: string | null
-}
+// `oos` and the never-inspected `red`). It SHARES the ToolStatusInfo shape
+// with the dashboard list (Story 6.1) so the vocabulary never drifts.
+export type InspectionSubmitStatus = ToolStatusInfo
 
 // InspectionSubmitResult is the POST /api/v1/tools/{id}/inspection payload
 // (Story 5.3 contract): the persisted record + the server-authoritative

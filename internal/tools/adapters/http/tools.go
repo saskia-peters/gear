@@ -40,18 +40,18 @@ type toolWriteDTO struct {
 	Message string `json:"message"`
 }
 
-// dashboardToolDTO is the minimal GET /api/v1/tools payload (Story 4-3b): the
-// id, name, the tool type's display name (JOIN) and the inventory number
-// (shown as row meta in the Werkzeugliste). Deliberately small — no
-// schedule/attributes/audit data on this surface (the admin surface exposes
-// the full DTO) and no status/due-date derivation (Story 6.1 owns it — the SPA
-// marks every tool "verfügbar" statically).
+// dashboardToolDTO is the minimal GET /api/v1/tools payload (Story 4-3b +
+// 6.1): the id, name, the tool type's display name (JOIN), the inventory
+// number (row meta) and the DERIVED status (FR-16/AD-4/AD-5 — computed on
+// read, never stored). Deliberately small — no schedule/attributes/audit data
+// on this surface (the admin surface exposes the full DTO).
 type dashboardToolDTO struct {
-	ID              string `json:"id"`
-	Name            string `json:"name"`
-	ToolTypeID      string `json:"tool_type_id"`
-	ToolTypeName    string `json:"tool_type_name"`
-	InventoryNumber string `json:"inventory_number"`
+	ID              string    `json:"id"`
+	Name            string    `json:"name"`
+	ToolTypeID      string    `json:"tool_type_id"`
+	ToolTypeName    string    `json:"tool_type_name"`
+	InventoryNumber string    `json:"inventory_number"`
+	Status          statusDTO `json:"status"`
 }
 
 // inspectionStartDTO is the eligible POST /api/v1/tools/{id}/inspection/start
@@ -302,11 +302,12 @@ func (h *Handler) ListTools(w http.ResponseWriter, r *http.Request) {
 }
 
 // ListDashboardTools handles GET /api/v1/tools (GET_LIST_EMPTY / GET_LIST,
-// Story 4-3b): it returns the ACTIVE tool catalog, oldest first, each with its
-// type display name, as the minimal dashboard DTO. The `dashboard.view` gate
-// lives at the composition-root mount (all base roles hold it) — the core read
-// is ungated by design, so this handler never re-checks `tools.manage`.
-// Archived tools never appear.
+// Story 4-3b + 6.1): it returns the ACTIVE tool catalog, oldest first, each
+// with its type display name AND its derived status (FR-16/AD-4/AD-5), as the
+// minimal dashboard DTO. The `dashboard.view` gate lives at the
+// composition-root mount (all base roles hold it) — the core read is ungated
+// by design, so this handler never re-checks `tools.manage`. Archived tools
+// never appear.
 //
 // Error mapping (uniform envelope):
 //   - 401 unauthorized when the caller is not authenticated
@@ -331,6 +332,7 @@ func (h *Handler) ListDashboardTools(w http.ResponseWriter, r *http.Request) {
 			ToolTypeID:      tool.ToolTypeID,
 			ToolTypeName:    tool.ToolTypeName,
 			InventoryNumber: tool.InventoryNumber,
+			Status:          toStatusDTO(tool.Status),
 		})
 	}
 	httpapi.WriteJSON(w, http.StatusOK, out)
@@ -514,6 +516,20 @@ func toChecklistItemDTOs(items []toolscore.ToolTypeChecklistItem) []toolTypeChec
 	return out
 }
 
+// toStatusDTO maps the domain derived status to the wire shape (Story 5.3 +
+// 6.1, AD-4/AD-5): `oos|red|orange|green` plus the next-due timestamp (null
+// for `oos` and the never-inspected `red`). Shared by the dashboard list and
+// the inspection submit response so the two surfaces serialize the status
+// identically.
+func toStatusDTO(status toolscore.ToolStatus) statusDTO {
+	var nextDue *string
+	if status.NextDue != nil {
+		s := status.NextDue.UTC().Format(time.RFC3339)
+		nextDue = &s
+	}
+	return statusDTO{Status: string(status.Status), NextDue: nextDue}
+}
+
 // toInspectionSubmitResponse maps the domain submit result to the wire payload
 // (Story 5.3): the persisted record + the derived status. An empty notes column
 // serializes as ""; NextDue serializes as null for `oos` and the
@@ -536,11 +552,6 @@ func toInspectionSubmitResponse(result *toolscore.SubmitInspectionResult) inspec
 			Result:   item.Result,
 		})
 	}
-	var nextDue *string
-	if result.Status.NextDue != nil {
-		s := result.Status.NextDue.UTC().Format(time.RFC3339)
-		nextDue = &s
-	}
 	return inspectionSubmitResponseDTO{
 		Inspection: inspectionDTO{
 			ID:            insp.ID,
@@ -552,9 +563,6 @@ func toInspectionSubmitResponse(result *toolscore.SubmitInspectionResult) inspec
 			SubmittedAt:   insp.SubmittedAt.UTC().Format(time.RFC3339),
 			Items:         items,
 		},
-		Status: statusDTO{
-			Status:  string(result.Status.Status),
-			NextDue: nextDue,
-		},
+		Status: toStatusDTO(result.Status),
 	}
 }

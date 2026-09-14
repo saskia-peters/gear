@@ -23,6 +23,7 @@ import (
 // handler tests.
 type fakeToolService struct {
 	tools           []*toolscore.Tool
+	dashboardTools  []*toolscore.DashboardTool
 	listErr         error
 	writeErr        error
 	archiveErr      error
@@ -59,16 +60,33 @@ func (f *fakeToolService) ListTools(_ context.Context, _ string) ([]*toolscore.T
 	return f.tools, nil
 }
 
-// ListToolsForDashboard serves the dashboard.read surface (Story 4-3b) from the
-// same in-memory catalog; the handler calls it ungated.
-func (f *fakeToolService) ListToolsForDashboard(_ context.Context) ([]*toolscore.Tool, error) {
+// ListToolsForDashboard serves the dashboard.read surface (Story 4-3b + 6.1)
+// from the same in-memory catalog; the handler calls it ungated. When
+// dashboardTools is set it is returned verbatim (status fixtures); otherwise
+// the plain tools are wrapped with a default GREEN status so the existing
+// shape assertions keep passing.
+func (f *fakeToolService) ListToolsForDashboard(_ context.Context) ([]*toolscore.DashboardTool, error) {
 	if f.listErr != nil {
 		return nil, f.listErr
 	}
-	if f.tools == nil {
-		return []*toolscore.Tool{}, nil
+	if f.dashboardTools != nil {
+		return f.dashboardTools, nil
 	}
-	return f.tools, nil
+	if f.tools == nil {
+		return []*toolscore.DashboardTool{}, nil
+	}
+	out := make([]*toolscore.DashboardTool, 0, len(f.tools))
+	// Patch 10: the default GREEN status carries a REAL next_due (the clock
+	// always produces one for a green tool) — so a UI regression that expects
+	// green rows to carry a due date can never be masked by the fake.
+	nextDue := time.Now().Add(30 * 24 * time.Hour)
+	for _, tool := range f.tools {
+		out = append(out, &toolscore.DashboardTool{
+			Tool:   *tool,
+			Status: toolscore.ToolStatus{Status: toolscore.ToolStatusCodeGreen, NextDue: &nextDue},
+		})
+	}
+	return out, nil
 }
 
 func (f *fakeToolService) CreateTool(_ context.Context, _ string, input toolscore.ToolInput) (*toolscore.Tool, error) {
@@ -355,8 +373,8 @@ func TestDashboardToolsGetListEmpty(t *testing.T) {
 func TestDashboardToolsGetList(t *testing.T) {
 	// GET_LIST (Story 4-3b): 200 with the MINIMAL dashboard DTO — id, name,
 	// tool_type_id, tool_type_name + inventory_number (shown as row meta in the
-	// Werkzeugliste). No schedule_id, no attributes, no audit timestamps, no
-	// status derivation on this surface.
+	// Werkzeugliste) + the derived status. No schedule_id, no
+	// default_schedule_id, no attributes, no audit timestamps on this surface.
 	svc := &fakeToolService{tools: []*toolscore.Tool{
 		toolFixture("id-a", "Bohrmaschine-01"),
 		toolFixture("id-b", "Bohrmaschine-02"),
@@ -382,10 +400,73 @@ func TestDashboardToolsGetList(t *testing.T) {
 	if body[0]["inventory_number"] != "GEAR00000X" {
 		t.Errorf("row 0 inventory_number = %+v, want GEAR00000X", body[0]["inventory_number"])
 	}
+	// Story 6.1: every row carries the derived status (green here — the fake
+	// wraps plain tools with a default green + a real next_due).
+	status, ok := body[0]["status"].(map[string]any)
+	if !ok || status["status"] != "green" {
+		t.Errorf("row 0 status = %+v, want {status: green, next_due: <RFC3339>}", body[0]["status"])
+	}
+	if nextDue, ok := status["next_due"].(string); !ok || nextDue == "" {
+		t.Errorf("row 0 next_due = %v, want a non-empty RFC3339 string (the clock always produces one)", status["next_due"])
+	}
 	for _, row := range body {
-		for _, leak := range []string{"schedule_id", "attributes", "archived_at", "created_at", "updated_at"} {
+		for _, leak := range []string{"schedule_id", "default_schedule_id", "attributes", "archived_at", "created_at", "updated_at"} {
 			if _, present := row[leak]; present {
 				t.Errorf("dashboard DTO leaks %q: %+v (minimal surface, Story 4-3b)", leak, row)
+			}
+		}
+	}
+}
+
+func TestDashboardToolsGetListStatus(t *testing.T) {
+	// GET_LIST status (Story 6.1, DASH_DTO): each row carries the derived
+	// `status { status, next_due }` — oos/red/orange/green with the next-due
+	// anchor (RFC3339 UTC, null for oos / never-inspected red) — and nothing
+	// else leaks on the minimal surface.
+	due := time.Date(2026, 10, 15, 8, 30, 0, 0, time.UTC)
+	svc := &fakeToolService{dashboardTools: []*toolscore.DashboardTool{
+		{Tool: *toolFixture("id-a", "Bohrmaschine-01"), Status: toolscore.ToolStatus{Status: toolscore.ToolStatusCodeGreen, NextDue: &due}},
+		{Tool: *toolFixture("id-b", "Bohrmaschine-02"), Status: toolscore.ToolStatus{Status: toolscore.ToolStatusCodeOOS}},
+		{Tool: *toolFixture("id-c", "Bohrmaschine-03"), Status: toolscore.ToolStatus{Status: toolscore.ToolStatusCodeOrange, NextDue: &due}},
+		{Tool: *toolFixture("id-d", "Bohrmaschine-04"), Status: toolscore.ToolStatus{Status: toolscore.ToolStatusCodeRed}},
+	}}
+	surface := dashboardToolGateway([]string{toolscore.DashboardViewPermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodGet, "/", "tok", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var body []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding err = %v", err)
+	}
+	if len(body) != 4 {
+		t.Fatalf("rows = %d, want 4", len(body))
+	}
+	want := []struct {
+		id     string
+		status string
+		due    any
+	}{
+		{"id-a", "green", "2026-10-15T08:30:00Z"},
+		{"id-b", "oos", nil},
+		{"id-c", "orange", "2026-10-15T08:30:00Z"},
+		{"id-d", "red", nil},
+	}
+	for i, w := range want {
+		row := body[i]
+		if row["id"] != w.id {
+			t.Errorf("row %d id = %v, want %s", i, row["id"], w.id)
+		}
+		status, ok := row["status"].(map[string]any)
+		if !ok || status["status"] != w.status {
+			t.Errorf("row %d status = %+v, want %q", i, row["status"], w.status)
+		}
+		if status["next_due"] != w.due {
+			t.Errorf("row %d next_due = %v, want %v", i, status["next_due"], w.due)
+		}
+		for _, leak := range []string{"schedule_id", "default_schedule_id", "attributes", "archived_at", "created_at", "updated_at"} {
+			if _, present := row[leak]; present {
+				t.Errorf("row %d leaks %q: %+v (minimal surface, Story 4-3b)", i, leak, row)
 			}
 		}
 	}

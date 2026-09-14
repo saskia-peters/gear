@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 	"unicode/utf8"
+
+	admcore "github.com/saskia-peters/gear/internal/admin/core"
 )
 
 // Inspection START (Story 5.1, FR-11/AD-7): the first Epic 5 surface — the
@@ -371,18 +373,32 @@ func (s *Service) SubmitInspection(ctx context.Context, actorID, toolID string, 
 // AD-8/AD-11). A nil port is a composition-root wiring defect and FAILS
 // LOUDLY; an effective schedule missing from the ACTIVE catalog (archived /
 // vanished) is the same — the clock must never silently resolve to a wrong
-// interval.
+// interval. The catalog is read here and the pure scheduleIntervalFor helper
+// resolves the effective interval against that snapshot.
 func (s *Service) resolveToolScheduleInterval(ctx context.Context, tool *ToolWithTypeQualification) (time.Duration, error) {
 	if s.schedules == nil {
 		return 0, fmt.Errorf("tools core: schedule catalog port is not wired")
 	}
-	scheduleID := tool.ScheduleID
-	if scheduleID == "" {
-		scheduleID = tool.DefaultScheduleID
-	}
 	schedules, err := s.schedules.CurrentSchedules(ctx)
 	if err != nil {
 		return 0, fmt.Errorf("tools core: failed to resolve schedule catalog: %w", err)
+	}
+	return scheduleIntervalFor(tool.ScheduleID, tool.DefaultScheduleID, schedules)
+}
+
+// scheduleIntervalFor resolves a tool's EFFECTIVE schedule interval
+// (AD-5/AD-16) against a catalog snapshot: the per-tool OVERRIDE when set,
+// else the tool type's DEFAULT — both plain FK ids. It is the PURE helper
+// shared by the inspection submit path (resolveToolScheduleInterval) and the
+// resilient dashboard read (ListToolsForDashboard, Story 6.1) — the dashboard
+// resolves the catalog ONCE per call and feeds this helper per tool (no N+1
+// catalog reads, the spec's invariant). A missing/invalid effective schedule
+// surfaces as an error: the submit path FAILS LOUDLY, while the dashboard
+// renders that single tool `red` (never falsely serviceable).
+func scheduleIntervalFor(overrideID, defaultID string, schedules []*admcore.Schedule) (time.Duration, error) {
+	scheduleID := overrideID
+	if scheduleID == "" {
+		scheduleID = defaultID
 	}
 	for _, sch := range schedules {
 		if sch.ID == scheduleID {

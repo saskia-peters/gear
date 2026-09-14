@@ -129,3 +129,8 @@ Triage output of review loops — real, non-story-blocking findings that are not
 
 - No idempotency / at-most-once guard on `POST /api/v1/tools/{id}/inspection`: a client retry after a timeout/500, or a double-click racing the SPA button guard, can persist duplicate inspection records. The SPA double-submit guard (Story 5.2) and an idempotency key on the submit endpoint would harden; revisit when the submission UX (5.4/5.5) wires the real call.
 - The core submit unit tests derive status from a canned `fakeToolService`/fake-store `GetToolInspectionStatus` fixture that never incorporates the just-inserted inspection, so they don't prove the read-after-write wiring at the unit level — the real repo read-after-write is covered by the postgres integration test (`TestPostgresInspectionStore`). Test-quality note.
+
+## Deferred from: code review (2026-09-14) of spec-6-1-color-coded-status-dashboard.md
+
+- The dashboard's derived `next_due` is serialized on the wire (green/orange/red) but not rendered on the row chip — the due date is currently dead data, available for Story 6.2 (export) / 6.3 (history) and a possible "Fällig: …" row meta later.
+- Per-tool status reads are N+1: `ListToolsForDashboard` runs `GetToolInspectionStatus` per tool (three small queries each: latest fail / latest pass / latest reinstatement), accepted at V1 fleet scale; a batched per-tool anchors query would cut a dashboard load from ~3N to ~2 queries when fleets grow. Also noted in the spec's Design Notes.

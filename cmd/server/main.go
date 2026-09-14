@@ -164,12 +164,13 @@ func main() {
 	toolToolsSurface := auth.RequireAnyPermission(sessionManager, userRepo, []string{toolscore.ToolsManagePermission, toolscore.ToolEditPermission}, "tools.manage/tool.edit access denied", log)(toolHandler.ToolRoutes())
 
 	// The dashboard tool-list surface mounts under /api/v1/tools with its OWN
-	// gate — one permission per surface (AD-6, Story 4-3b): any `dashboard.view`
-	// holder (all base roles) reaches the minimal ACTIVE tool list. The core
-	// read (ListToolsForDashboard) is UNGATED by design — the HTTP mount carries
-	// the gate — so a tools.manage-less dashboard.view holder (e.g. Helfer*in)
-	// can render the Werkzeugliste. No writes, no status/due-date derivation
-	// (Story 6.1 owns the color-coded dashboard).
+	// gate — one permission per surface (AD-6, Story 4-3b + 6.1): any
+	// `dashboard.view` holder (all base roles) reaches the ACTIVE tool list. The
+	// core read (ListToolsForDashboard) is UNGATED by design — the HTTP mount
+	// carries the gate — so a tools.manage-less dashboard.view holder (e.g.
+	// Helfer*in) can render the Werkzeugliste. No writes live here, but the
+	// surface DOES derive each tool's status on read (Story 6.1, AD-4 — the
+	// dashboard never stores a status).
 	dashboardToolsSurface := auth.RequirePermission(sessionManager, userRepo, toolscore.DashboardViewPermission)(toolHandler.DashboardToolsRoutes())
 
 	// Story 5.1 + 5.3 — the qualification-gated inspection START and SUBMIT are
