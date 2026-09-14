@@ -2,6 +2,7 @@ package smtp
 
 import (
 	"bufio"
+	"bytes"
 	"context"
 	"crypto/ecdsa"
 	"crypto/elliptic"
@@ -10,6 +11,7 @@ import (
 	"crypto/x509"
 	"crypto/x509/pkix"
 	"errors"
+	"log/slog"
 	"math/big"
 	"net"
 	"strconv"
@@ -461,5 +463,66 @@ func TestSendPasswordResetEmailDecryptFail(t *testing.T) {
 	sender := NewResetEmailSender(&fakeSettingsPort{settings: settings}, &fakeCipher{decryptErr: errors.New("bad key")}, nil)
 	if err := sender.SendPasswordResetEmail(context.Background(), "user@example.com", "http://x/reset/tok"); err == nil {
 		t.Fatal("SendPasswordResetEmail(undecryptable) err = nil, want error")
+	}
+}
+
+// logBuffer is a mutex-guarded bytes.Buffer for capturing slog output in tests.
+type logBuffer struct {
+	mu  sync.Mutex
+	buf bytes.Buffer
+}
+
+func (b *logBuffer) Write(p []byte) (int, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.Write(p)
+}
+
+func (b *logBuffer) String() string {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.buf.String()
+}
+
+func TestSendEmailLogsEnvelopeAndFailure(t *testing.T) {
+	// The send path logs the full envelope context so "the relay accepted it
+	// but the mail never arrived" cases (e.g. an unrouteable .local recipient
+	// that is accepted and then bounced) are visible: success at Info with
+	// from/to/host/bytes, every failure at Warn with the failing step.
+	srv := startSMTPTestServer(t, "none")
+	params := admcore.SmtpSendParams{
+		Host: "127.0.0.1", Port: srv.port(), Security: admcore.SmtpSecurityNone,
+		Username: "", From: "noreply@example.com", SenderName: "G.E.A.R.",
+		To: "user@example.com", Subject: "Test", Body: "Hallo",
+	}
+	var buf logBuffer
+	c := Client{Log: slog.New(slog.NewTextHandler(&buf, nil))}
+
+	if err := c.SendEmail(context.Background(), params); err != nil {
+		t.Fatalf("SendEmail err = %v", err)
+	}
+	out := buf.String()
+	if !strings.Contains(out, "smtp message accepted for delivery") {
+		t.Errorf("success log missing:\n%s", out)
+	}
+	for _, want := range []string{"to=user@example.com", "from=noreply@example.com", "host=127.0.0.1", "bytes="} {
+		if !strings.Contains(out, want) {
+			t.Errorf("success log missing %q:\n%s", want, out)
+		}
+	}
+
+	// Failure path: a refused connection logs a Warn carrying the envelope.
+	buf.buf.Reset()
+	params.Port = 1 // closed port → dial fails
+	if err := c.SendEmail(context.Background(), params); err == nil {
+		t.Fatal("SendEmail to a closed port err = nil, want error")
+	}
+	out = buf.String()
+	if !strings.Contains(out, "smtp send failed") || !strings.Contains(out, "step=dial") || !strings.Contains(out, "to=user@example.com") {
+		t.Errorf("failure log missing step/envelope context:\n%s", out)
+	}
+	// The plaintext password is never logged.
+	if strings.Contains(out, params.Password) && params.Password != "" {
+		t.Errorf("failure log leaked the password: %s", out)
 	}
 }

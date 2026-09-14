@@ -40,9 +40,39 @@ const (
 // Client is the low-level SMTP mailer implementing the Admin core's SmtpMailer
 // port. It is stateless and safe for concurrent use. TLSConfig is a test/
 // diagnostic seam: production wires nil and the ServerName is derived from the
-// settings host; tests inject a config with their own root CA.
+// settings host; tests inject a config with their own root CA. Log is the
+// structured logger for the send path (nil falls back to slog.Default()): each
+// SMTP verb is logged at Debug, the envelope + message size at Info on accept,
+// and every failure at Warn with the full context — so "login works but the
+// mail never arrives" cases (e.g. an unrouteable recipient like
+// admin.1@gear.local that the relay accepts and then bounces) are visible in
+// the logs. The password is NEVER logged.
 type Client struct {
 	TLSConfig *tls.Config
+	Log       *slog.Logger
+}
+
+// log returns the configured logger or slog.Default().
+func (c Client) log() *slog.Logger {
+	if c.Log != nil {
+		return c.Log
+	}
+	return slog.Default()
+}
+
+// smtpLogAttrs is the consistent structured context for every send log line:
+// the envelope (from/to), the transport (host/port/security), the authenticated
+// account (username — never the password) and the dial address.
+func smtpLogAttrs(params admcore.SmtpSendParams, addr string) []any {
+	return []any{
+		"host", params.Host,
+		"port", params.Port,
+		"security", params.Security,
+		"username", params.Username,
+		"from", params.From,
+		"to", params.To,
+		"addr", addr,
+	}
 }
 
 // SendEmail delivers one message through the configured server, supporting
@@ -51,17 +81,25 @@ type Client struct {
 // net/smtp has no implicit TLS). The plaintext password exists only in
 // params, in memory. After the connection is established a protocol deadline
 // is set on the underlying conn and extended before each operation, so a
-// stalled server cannot hang the send.
+// stalled server cannot hang the send. Each accepted verb is logged at Debug,
+// the final acceptance at Info with the envelope + message size, and every
+// failure at Warn with the failing step.
 func (c Client) SendEmail(ctx context.Context, params admcore.SmtpSendParams) error {
 	addr := net.JoinHostPort(params.Host, strconv.Itoa(params.Port))
+
+	c.log().Info("smtp send attempt", smtpLogAttrs(params, addr)...)
 	conn, err := c.dial(ctx, addr, params)
 	if err != nil {
+		c.log().Warn("smtp send failed", append(smtpLogAttrs(params, addr), "step", "dial", "error", err)...)
 		return err
 	}
+	c.log().Debug("smtp connected", smtpLogAttrs(params, addr)...)
 	client, err := smtp.NewClient(conn, params.Host)
 	if err != nil {
 		_ = conn.Close()
-		return fmt.Errorf("smtp: SMTP greeting from %s failed: %w", addr, err)
+		err = fmt.Errorf("smtp: SMTP greeting from %s failed: %w", addr, err)
+		c.log().Warn("smtp send failed", append(smtpLogAttrs(params, addr), "step", "greeting", "error", err)...)
+		return err
 	}
 	defer func() { _ = client.Close() }()
 	// Protocol deadline covering the whole conversation (finding: a server that
@@ -71,8 +109,11 @@ func (c Client) SendEmail(ctx context.Context, params admcore.SmtpSendParams) er
 	if params.Security == admcore.SmtpSecurityStartTLS {
 		extendDeadline(conn)
 		if err := client.StartTLS(c.tlsConfigFor(params.Host)); err != nil {
-			return fmt.Errorf("smtp: STARTTLS upgrade on %s failed: %w", addr, err)
+			err = fmt.Errorf("smtp: STARTTLS upgrade on %s failed: %w", addr, err)
+			c.log().Warn("smtp send failed", append(smtpLogAttrs(params, addr), "step", "starttls", "error", err)...)
+			return err
 		}
+		c.log().Debug("smtp STARTTLS upgrade ok", smtpLogAttrs(params, addr)...)
 	}
 
 	var auth smtp.Auth
@@ -84,34 +125,54 @@ func (c Client) SendEmail(ctx context.Context, params admcore.SmtpSendParams) er
 	if auth != nil {
 		extendDeadline(conn)
 		if err := client.Auth(auth); err != nil {
-			return fmt.Errorf("smtp: AUTH on %s failed: %w", addr, err)
+			err = fmt.Errorf("smtp: AUTH on %s failed: %w", addr, err)
+			c.log().Warn("smtp send failed", append(smtpLogAttrs(params, addr), "step", "auth", "error", err)...)
+			return err
 		}
+		c.log().Debug("smtp AUTH ok", smtpLogAttrs(params, addr)...)
 	}
 
 	extendDeadline(conn)
 	if err := client.Mail(params.From); err != nil {
-		return fmt.Errorf("smtp: MAIL FROM on %s failed: %w", addr, err)
+		err = fmt.Errorf("smtp: MAIL FROM on %s failed: %w", addr, err)
+		c.log().Warn("smtp send failed", append(smtpLogAttrs(params, addr), "step", "mail_from", "error", err)...)
+		return err
 	}
+	c.log().Debug("smtp MAIL FROM accepted", smtpLogAttrs(params, addr)...)
 	extendDeadline(conn)
 	if err := client.Rcpt(params.To); err != nil {
-		return fmt.Errorf("smtp: RCPT TO on %s failed: %w", addr, err)
+		err = fmt.Errorf("smtp: RCPT TO on %s failed: %w", addr, err)
+		c.log().Warn("smtp send failed", append(smtpLogAttrs(params, addr), "step", "rcpt_to", "error", err)...)
+		return err
 	}
+	c.log().Debug("smtp RCPT TO accepted", smtpLogAttrs(params, addr)...)
 	extendDeadline(conn)
 	w, err := client.Data()
 	if err != nil {
-		return fmt.Errorf("smtp: DATA on %s failed: %w", addr, err)
+		err = fmt.Errorf("smtp: DATA on %s failed: %w", addr, err)
+		c.log().Warn("smtp send failed", append(smtpLogAttrs(params, addr), "step", "data", "error", err)...)
+		return err
 	}
-	if _, err := w.Write([]byte(buildMessage(params.SenderName, params.From, params.To, params.Subject, params.Body))); err != nil {
+	msg := buildMessage(params.SenderName, params.From, params.To, params.Subject, params.Body)
+	if _, err := w.Write([]byte(msg)); err != nil {
 		_ = w.Close()
-		return fmt.Errorf("smtp: writing message body failed: %w", err)
+		err = fmt.Errorf("smtp: writing message body failed: %w", err)
+		c.log().Warn("smtp send failed", append(smtpLogAttrs(params, addr), "step", "write", "error", err)...)
+		return err
 	}
 	if err := w.Close(); err != nil {
-		return fmt.Errorf("smtp: finishing message body failed: %w", err)
+		err = fmt.Errorf("smtp: finishing message body failed: %w", err)
+		c.log().Warn("smtp send failed", append(smtpLogAttrs(params, addr), "step", "data_close", "error", err)...)
+		return err
 	}
+	c.log().Debug("smtp DATA accepted", append(smtpLogAttrs(params, addr), "bytes", len(msg))...)
 	extendDeadline(conn)
 	if err := client.Quit(); err != nil {
-		return fmt.Errorf("smtp: QUIT on %s failed: %w", addr, err)
+		err = fmt.Errorf("smtp: QUIT on %s failed: %w", addr, err)
+		c.log().Warn("smtp send failed", append(smtpLogAttrs(params, addr), "step", "quit", "error", err)...)
+		return err
 	}
+	c.log().Info("smtp message accepted for delivery", append(smtpLogAttrs(params, addr), "bytes", len(msg))...)
 	return nil
 }
 
@@ -262,7 +323,7 @@ type ResetEmailSender struct {
 // NewResetEmailSender constructs the real sender. settings and cipher are
 // required; log may be nil (falls back to slog.Default()).
 func NewResetEmailSender(settings adminports.SmtpSettingsPort, cipher admcore.SecretCipher, log *slog.Logger) *ResetEmailSender {
-	return &ResetEmailSender{settings: settings, cipher: cipher, log: log, client: Client{}}
+	return &ResetEmailSender{settings: settings, cipher: cipher, log: log, client: Client{Log: log}}
 }
 
 // SendPasswordResetEmail delivers a single transactional reset email carrying

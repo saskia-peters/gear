@@ -83,7 +83,7 @@ func main() {
 	// module never authors another module's SQL (AD-8/AD-11).
 	adminStore := adminpostgres.New(pool)
 	adminRepo := adminpostgres.NewRepository(adminStore)
-	adminSettingsService := admcore.NewService(adminRepo, adminRepo, adminRepo, adminRepo, secretCipher, userRepo, userRepo, admsmtp.Client{}, admbck.NewTester(), log)
+	adminSettingsService := admcore.NewService(adminRepo, adminRepo, adminRepo, adminRepo, secretCipher, userRepo, userRepo, admsmtp.Client{Log: log}, admbck.NewTester(), log)
 	adminSettingsHandler := adminhttp.NewHandler(adminSettingsService, log)
 
 	// Password reset email delivery (FR-26/AD-14): Story 3.1 wires the REAL
