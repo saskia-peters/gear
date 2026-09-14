@@ -54,6 +54,7 @@ sql:
       - "./migrations/000017_smtp_settings.up.sql"
       - "./migrations/000018_backup_destinations.up.sql"
       - "./migrations/000019_schedules.up.sql"
+      - "./migrations/000026_app_settings.up.sql"
     queries: "./internal/admin/adapters/postgres/queries.sql"
     gen:
       go:

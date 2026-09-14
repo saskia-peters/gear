@@ -114,9 +114,11 @@ func TestGatewayForbidden(t *testing.T) {
 	}
 }
 
-// basePermissionCodes is the full AD-12 base series (Story 2.2 + Spec 2.9 +
-// 000016): the 23 codes the seeded admin role resolves (migration 000013 added
-// users.qualifications.manage; 000016 added user.account.approve).
+// basePermissionCodes is the full AD-12 base series the seeded admin resolves
+// (Story 2.2 + Spec 2.9 + 000016 + 000026): the codes this package's gateway
+// tests use as the "seeded admin" permission set (migration 000013 added
+// users.qualifications.manage; 000016 added user.account.approve; 000026 added
+// admin.settings.system).
 func basePermissionCodes() []string {
 	return []string{
 		"dashboard.view",
@@ -142,6 +144,7 @@ func basePermissionCodes() []string {
 		"admin.settings.email",
 		"admin.settings.backup",
 		"schedules.manage",
+		"admin.settings.system",
 	}
 }
 

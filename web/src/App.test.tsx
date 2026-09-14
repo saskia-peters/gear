@@ -463,6 +463,40 @@ describe('App & Dashboard Foundation', () => {
     },
   )
 
+  it('ROUTE_ALLOWED_einstellungen (Story 5-2b): a system-settings-only holder is admitted to /admin/einstellungen and sees only the System tab', async () => {
+    // The holder carries ONLY admin.settings.system: the route guard must admit
+    // them (the code is in the einstellungen entry), and the page must render
+    // just the System tab (E-Mail/Backup/Zeitpläne stay hidden).
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+        if (url.includes('/me/permissions')) {
+          return Promise.resolve({ ok: true, status: 200, json: async () => ({ permissions: ['admin.settings.system'] }) })
+        }
+        if (url.includes('/settings/system')) {
+          return Promise.resolve({ ok: true, status: 200, json: async () => [] })
+        }
+        return Promise.resolve(validProfile({ permissions: ['admin.settings.system'] }))
+      }),
+    )
+    await act(async () => {
+      render(
+        <ThemeProvider>
+          <MemoryRouter initialEntries={['/admin/einstellungen']}>
+            <AppRoutes />
+          </MemoryRouter>
+        </ThemeProvider>,
+      )
+    })
+
+    expect(await screen.findByRole('heading', { level: 2, name: 'Einstellungen' })).toBeInTheDocument()
+    expect(await screen.findByRole('tab', { name: 'System' })).toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'E-Mail' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'Backup' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'Zeitpläne' })).not.toBeInTheDocument()
+  })
+
   it('NAV_FETCH_FAIL: a failed /me/permissions fetch hides the ADMIN entry (fail closed)', async () => {
     // The profile validates but the permissions fetch fails (network error).
     // No admin code is cached → no ADMIN entry anywhere (FR-19), no crash.

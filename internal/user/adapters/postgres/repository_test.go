@@ -1365,6 +1365,7 @@ func basePermissionCodes() []string {
 		"users.manage",
 		"users.qualifications.manage",
 		"users.view",
+		"admin.settings.system",
 	}
 }
 

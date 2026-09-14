@@ -13,11 +13,14 @@ import {
   createSchedule,
   updateSchedule,
   archiveSchedule,
+  getSystemSettings,
+  updateSystemSetting,
 } from './settings.ts'
 
 const SMTP_URL = '/api/v1/admin/settings/smtp'
 const BACKUP_URL = '/api/v1/admin/settings/backup'
 const SCHEDULES_URL = '/api/v1/admin/settings/schedules'
+const SYSTEM_URL = '/api/v1/admin/settings/system'
 
 function stubOk(body: unknown) {
   const mock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => body })
@@ -260,5 +263,56 @@ describe('schedule catalog client', () => {
         Authorization: 'Bearer sesstoken123',
       },
     })
+  })
+})
+
+describe('system settings client', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    localStorage.setItem('gear.session_token', 'sesstoken123')
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('getSystemSettings GETs /system with the bearer token', async () => {
+    const mock = stubOk([
+      { key: 'smtp_dial_timeout', value_type: 'duration', value: 10 },
+      { key: 'otp_length', value_type: 'integer', unit: 'Zeichen', value: 10 },
+      { key: 'inventory_prefix', value_type: 'text', value: 'GEAR' },
+    ])
+    const settings = await getSystemSettings()
+    expect(settings).toHaveLength(3)
+    expect(settings[0].value).toBe(10)
+    expect(settings[2].value).toBe('GEAR')
+    // The display unit travels on the wire (Story 5-2b) so the table can tell
+    // days from seconds.
+    expect(settings[1].unit).toBe('Zeichen')
+    expect(mock).toHaveBeenCalledWith(SYSTEM_URL, {
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer sesstoken123',
+      },
+    })
+  })
+
+  it('updateSystemSetting PUTs /system/{key} with the typed value body', async () => {
+    const mock = stubOk({ key: 'smtp_protocol_timeout', value_type: 'duration', value: 45, message: 'System-Einstellung gespeichert.' })
+    const saved = await updateSystemSetting('smtp_protocol_timeout', 45)
+    expect(saved.message).toBe('System-Einstellung gespeichert.')
+    expect(saved.value).toBe(45)
+    const [url, init] = mock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe(`${SYSTEM_URL}/smtp_protocol_timeout`)
+    expect(init.method).toBe('PUT')
+    const body = JSON.parse(init.body as string)
+    expect(body.value).toBe(45)
+  })
+
+  it('updateSystemSetting sends a string value for a text setting', async () => {
+    const mock = stubOk({ key: 'inventory_prefix', value_type: 'text', value: 'GKW', message: 'System-Einstellung gespeichert.' })
+    await updateSystemSetting('inventory_prefix', 'GKW')
+    const body = JSON.parse((mock.mock.calls[0][1] as RequestInit).body as string)
+    expect(body.value).toBe('GKW')
   })
 })

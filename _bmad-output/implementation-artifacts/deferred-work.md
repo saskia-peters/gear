@@ -97,3 +97,30 @@ Triage output of review loops — real, non-story-blocking findings that are not
   summary: Bulk CSV Import (Story 4.5) is postponed so the Epic 4 retrospective and Epic 5 (Inspection Execution) can begin.
   evidence: The user explicitly requested postponing 4.5 and moving to the retro + Story 5.1. The CSV import surface (FR-9/FR-23) is independently shippable later; its inventory-number duplicate-rejection backstop (UNIQUE on `tools.inventory_number`, case-insensitive over all rows) is already in place from Story 4-3b, so nothing about the deferred work degrades while pending.
   recommended: schedule 4.5 after Epic 5 (or whenever bulk onboarding is needed); the error-report + per-row-atomic-import requirements stay as specified in the epic. Revisit in the Epic 4 retrospective.
+
+## Deferred from: scope split (2026-09-13) of spec-5-2b-configurable-system-settings.md
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-5-2b-configurable-system-settings.md`
+  summary: Consumer adoption of the 14 configurable settings — threading each value from the new `app_settings` store into its consumers (SMTP/backup timeouts, reset/recovery/OTP/MFA TTLs, OTP length, forgot throttle, lockout policy incl. the SQL params, attribute caps, inventory prefix/width, qualification expiring-soon window).
+  evidence: The spec exceeded the 1600-token scope standard; the app_settings infrastructure + System tab UI (migration, store, port, HTTP surface, SPA table with "?" popups, seeded defaults) is independently shippable, while the cross-module adoption (user/tools/smtp/backup adapters, SQL literal→param changes) is the larger-risk half touching many consumers. The user chose [S] Split.
+  recommended: implement as a follow-up story right after the app_settings infrastructure; the proposal doc (_bmad-output/implementation-artifacts/configurable-settings-proposal-2026-09-13.md) and the original spec's I/O matrix + Design Notes already define the per-setting threading (A1–A9, B1, C1, C2, D1, D2).
+
+## Deferred from: data-loss incident (2026-09-13) during spec-5-2b verification
+
+- During the Story 5-2b implementation's test run, the pre-existing `TestPostgresSmtpSettingsStore` (which assumed an empty `smtp_settings` table and hard-`DELETE FROM smtp_settings` at the end) WIPED the real SMTP configuration the user had entered in the dev DB (host host216.alfahosting-server.de, port 465, starttls, sender gear@otctr.de, G.E.A.R., username gear@otctr.de). The encrypted password is unrecoverable (NFR-S4); the user must re-enter it. The test was fixed to snapshot-and-restore any pre-existing row (settings_test.go now captures the real row and restores it in t.Cleanup; the redundant hard DELETE was removed). Root lesson: postgres store tests over single-row/real-data tables must SNAPSHOT-AND-RESTORE, never assume an empty table. Audit the other admin postgres tests (backup_test.go still blanket-DELETEs backup_destinations — harmless today because no real rows exist, but the same hazard if real backup destinations are configured; schedules uses Test-% scoped DELETE, safe).
+
+## Deferred from: code review (2026-09-14) of spec-5-2b-configurable-system-settings.md
+
+- `findAppSetting` re-lists the whole `app_settings` table to read one key after every upsert (O(n) per write). A `GetByKey` query would be cleaner; revisit when the consumer-adoption follow-up story touches the store.
+- `updated_at` is dropped from the system-settings GET/PUT DTOs, so concurrent editors are silently last-write-wins with no staleness signal. Expose `updated_at` (or add ETag/If-Match) when edit-conflict semantics are defined.
+- The cross-key lockout-threshold invariant is a non-transactional read-then-write: two concurrent threshold edits could both pass validation and persist an inverted policy. Needs a store-level transaction (the fail-closed patch in the review is the cheap mitigation).
+- The `InfoPopup` popover uses `role="dialog"` without a focus trap / `aria-modal`, so Tab can continue into background content. Acceptable for a lightweight popover; add a trap if a11y posture matures.
+- System-tab durations are edited as raw seconds while the value column shows a friendly label ("30 Tage" → type 2592000). Acknowledged UX trade-off; a seconds/days toggle would be a follow-up.
+- Focus is not restored to the "?" trigger if the System tab unmounts while a popup is open. Minor keyboard-navigation gap.
+- A drifted/unknown `app_settings` key from the server renders an empty "?" popup (fallback label = key, empty help). Server is authoritative; only reachable via drift.
+- `TestPostgresSmtpSettingsStore`'s nil-on-empty GET_INITIAL assertion only runs when the shared dev DB has no SMTP row (it is skipped on a DB with a real config). Contract stays pinned on a pristine DB only.
+- `NewService` has grown to ten positional arguments; every settings surface threads another store. An options struct would reduce future churn (matches the standing avoid-god-constructor convention).
+- `BasePermissionCodes` is duplicated across `roles.go` and three test fixtures (gateway_test.go, repository_test.go, permission_test.go) — this review had to add `admin.settings.system` to all four by hand. Consolidate to prevent silent drift on the next permission addition.
+- Orphaned/non-catalog `app_settings` rows are only logged by `CurrentAppSettings`, never surfaced — an admin has no signal that a row is drifted.
+- Down migration 000026 removes the `admin.settings.system` permission rows while Go code keeps the codes — inherent to down migrations (code and DB cannot roll back together); no action beyond awareness.
+- The client-abort guard in `mapSystemSettingError` only covers the default (500) branch; a canceled request hitting forbidden/invalid/unknown branches still writes to a dead connection. Minor.

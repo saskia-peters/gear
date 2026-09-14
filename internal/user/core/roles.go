@@ -159,6 +159,7 @@ var BasePermissionCodes = []string{
 	"admin.settings.email",
 	"admin.settings.backup",
 	"schedules.manage",
+	"admin.settings.system",
 }
 
 // basePermissionSet is the O(1) membership check for validation.
@@ -198,6 +199,7 @@ var permissionLabels = map[string]string{
 	"admin.settings.email":    "E-Mail-Einstellungen verwalten",
 	"admin.settings.backup":   "Sicherungen verwalten",
 	"schedules.manage":        "Zeitpläne verwalten",
+	"admin.settings.system":   "System-Einstellungen verwalten",
 }
 
 // permissionLabel returns the German label for a code, falling back to the

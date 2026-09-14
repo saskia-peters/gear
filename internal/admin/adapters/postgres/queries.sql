@@ -137,3 +137,28 @@ SET archived_at = now(),
     updated_at = now()
 WHERE id = $1 AND archived_at IS NULL
 RETURNING id, name, interval_unit, interval_magnitude, weekday_set, time_of_day, archived_at, created_at, updated_at;
+
+-- Story 5-2b: the typed configurable system-settings store (AD-11). One row
+-- per atomic setting, exactly one value column set per row (duration in whole
+-- seconds / integer / text), seeded with the 14 proposal defaults.
+
+-- name: ListAppSettings :many
+-- The full typed setting list, deterministic order (key). The one value column
+-- that is set per row is the value; the other two are NULL.
+SELECT key, value_type, duration_value, int_value, text_value, updated_at
+FROM app_settings
+ORDER BY key ASC;
+
+-- name: UpsertAppSetting :exec
+-- Per-setting upsert: the core validates the value against the setting's type
+-- (the catalog) before it lands here, so exactly one value column is set and
+-- the others are NULL (the DB CHECK is the final backstop). updated_at is
+-- refreshed on every write.
+INSERT INTO app_settings (key, value_type, duration_value, int_value, text_value, updated_at)
+VALUES ($1, $2, $3, $4, $5, now())
+ON CONFLICT (key) DO UPDATE SET
+    value_type = EXCLUDED.value_type,
+    duration_value = EXCLUDED.duration_value,
+    int_value = EXCLUDED.int_value,
+    text_value = EXCLUDED.text_value,
+    updated_at = now();

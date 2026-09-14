@@ -93,7 +93,7 @@ func newScheduleService(perms ...string) (*Service, *fakeScheduleStore, *fakeAud
 	if len(perms) == 0 {
 		perms = []string{SchedulesPermission}
 	}
-	svc := NewService(nil, nil, store, &fakeCipher{}, &fakePerms{perms: perms}, audit, nil, nil, nil)
+	svc := NewService(nil, nil, store, nil, &fakeCipher{}, &fakePerms{perms: perms}, audit, nil, nil, nil)
 	return svc, store, audit
 }
 

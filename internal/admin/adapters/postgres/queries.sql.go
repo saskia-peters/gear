@@ -237,6 +237,45 @@ func (q *Queries) InsertSmtpSettings(ctx context.Context, arg InsertSmtpSettings
 	return err
 }
 
+const listAppSettings = `-- name: ListAppSettings :many
+
+SELECT key, value_type, duration_value, int_value, text_value, updated_at
+FROM app_settings
+ORDER BY key ASC
+`
+
+// Story 5-2b: the typed configurable system-settings store (AD-11). One row
+// per atomic setting, exactly one value column set per row (duration in whole
+// seconds / integer / text), seeded with the 14 proposal defaults.
+// The full typed setting list, deterministic order (key). The one value column
+// that is set per row is the value; the other two are NULL.
+func (q *Queries) ListAppSettings(ctx context.Context) ([]AppSetting, error) {
+	rows, err := q.db.Query(ctx, listAppSettings)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []AppSetting
+	for rows.Next() {
+		var i AppSetting
+		if err := rows.Scan(
+			&i.Key,
+			&i.ValueType,
+			&i.DurationValue,
+			&i.IntValue,
+			&i.TextValue,
+			&i.UpdatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listBackupDestinations = `-- name: ListBackupDestinations :many
 SELECT id, name, mechanism, endpoint, bucket_or_path, username, password_encrypted, schedule, created_at, updated_at
 FROM backup_destinations
@@ -473,4 +512,38 @@ func (q *Queries) UpdateSmtpSettings(ctx context.Context, arg UpdateSmtpSettings
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const upsertAppSetting = `-- name: UpsertAppSetting :exec
+INSERT INTO app_settings (key, value_type, duration_value, int_value, text_value, updated_at)
+VALUES ($1, $2, $3, $4, $5, now())
+ON CONFLICT (key) DO UPDATE SET
+    value_type = EXCLUDED.value_type,
+    duration_value = EXCLUDED.duration_value,
+    int_value = EXCLUDED.int_value,
+    text_value = EXCLUDED.text_value,
+    updated_at = now()
+`
+
+type UpsertAppSettingParams struct {
+	Key           string      `json:"key"`
+	ValueType     string      `json:"value_type"`
+	DurationValue pgtype.Int8 `json:"duration_value"`
+	IntValue      pgtype.Int8 `json:"int_value"`
+	TextValue     pgtype.Text `json:"text_value"`
+}
+
+// Per-setting upsert: the core validates the value against the setting's type
+// (the catalog) before it lands here, so exactly one value column is set and
+// the others are NULL (the DB CHECK is the final backstop). updated_at is
+// refreshed on every write.
+func (q *Queries) UpsertAppSetting(ctx context.Context, arg UpsertAppSettingParams) error {
+	_, err := q.db.Exec(ctx, upsertAppSetting,
+		arg.Key,
+		arg.ValueType,
+		arg.DurationValue,
+		arg.IntValue,
+		arg.TextValue,
+	)
+	return err
 }

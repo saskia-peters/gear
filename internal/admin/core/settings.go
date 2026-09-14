@@ -56,6 +56,24 @@ const (
 	AuditOperationScheduleArchive = "schedule.archive"
 )
 
+// AppSettingsPermission is the server-authoritative gate code for the whole
+// configurable system-settings surface (Story 5-2b/AD-6). One Go const so the
+// route mount, the core re-check and the SPA-facing documentation never drift.
+const AppSettingsPermission = "admin.settings.system"
+
+// Value types of the typed app_settings store (Story 5-2b). Stored verbatim in
+// app_settings.value_type; exactly one value column is set per row. Durations
+// are stored as whole SECONDS.
+const (
+	ValueTypeDuration = "duration"
+	ValueTypeInteger  = "integer"
+	ValueTypeText     = "text"
+)
+
+// Audit-operation tag for the app_settings surface (NFR-O1/NFR-O2): every
+// per-setting update is audited with actor, timestamp, key and operation.
+const AuditOperationAppSettingsUpdate = "admin.settings.system.update"
+
 // AuditSeverityNormal is the standard audit severity for settings events.
 const AuditSeverityNormal = "normal"
 
@@ -263,30 +281,32 @@ type SmtpMailer interface {
 }
 
 // Service is the Admin module's settings domain service (Story 3.1 SMTP +
-// Story 3.2 backup destinations + Story 4.1 schedule catalog). It consumes the
-// Admin-owned settings tables through their stores and the User module's
-// repository READ-ONLY for the permission re-check (AD-12) and the audit trail
-// (NFR-O1/NFR-O2).
+// Story 3.2 backup destinations + Story 4.1 schedule catalog + Story 5-2b
+// system settings). It consumes the Admin-owned settings tables through their
+// stores and the User module's repository READ-ONLY for the permission
+// re-check (AD-12) and the audit trail (NFR-O1/NFR-O2).
 type Service struct {
-	store          SmtpSettingsStore
-	backupStore    BackupDestinationsStore
-	schedulesStore SchedulesStore
-	cipher         SecretCipher
-	perms          PermissionResolver
-	audit          AuditWriter
-	mailer         SmtpMailer
-	tester         BackupDestinationTester
-	logger         *slog.Logger
+	store           SmtpSettingsStore
+	backupStore     BackupDestinationsStore
+	schedulesStore  SchedulesStore
+	appSettingsStore AppSettingsStore
+	cipher          SecretCipher
+	perms           PermissionResolver
+	audit           AuditWriter
+	mailer          SmtpMailer
+	tester          BackupDestinationTester
+	logger          *slog.Logger
 }
 
 // NewService constructs the settings service. backupStore/tester are used only
-// by the backup-destination methods (Story 3.2) and schedulesStore only by the
-// schedule-catalog methods (Story 4.1); they may be nil for a service that does
+// by the backup-destination methods (Story 3.2), schedulesStore only by the
+// schedule-catalog methods (Story 4.1) and appSettingsStore only by the
+// system-settings methods (Story 5-2b); they may be nil for a service that does
 // not exercise those surfaces. logger may be nil (falls back to slog.Default());
 // it is used for structured logging of audit-write failures and test outcomes
 // (NFR-O1).
-func NewService(store SmtpSettingsStore, backupStore BackupDestinationsStore, schedulesStore SchedulesStore, cipher SecretCipher, perms PermissionResolver, audit AuditWriter, mailer SmtpMailer, tester BackupDestinationTester, logger *slog.Logger) *Service {
-	return &Service{store: store, backupStore: backupStore, schedulesStore: schedulesStore, cipher: cipher, perms: perms, audit: audit, mailer: mailer, tester: tester, logger: logger}
+func NewService(store SmtpSettingsStore, backupStore BackupDestinationsStore, schedulesStore SchedulesStore, appSettingsStore AppSettingsStore, cipher SecretCipher, perms PermissionResolver, audit AuditWriter, mailer SmtpMailer, tester BackupDestinationTester, logger *slog.Logger) *Service {
+	return &Service{store: store, backupStore: backupStore, schedulesStore: schedulesStore, appSettingsStore: appSettingsStore, cipher: cipher, perms: perms, audit: audit, mailer: mailer, tester: tester, logger: logger}
 }
 
 // log returns the configured logger or slog.Default().

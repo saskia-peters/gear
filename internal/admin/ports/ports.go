@@ -1,9 +1,10 @@
 // Package ports declares the port interfaces of the Admin hexagon (AD-1):
 // the inbound settings service consumed by the Admin HTTP router, and the
-// read-only settings ports other modules consume (AD-14/AD-15/AD-16) — the
-// User module's reset-email sender reads the live SMTP row here, the future
-// backup job reads destinations here, and the future Tool module reads the
-// schedule catalog here, never a copy.
+// read-only settings ports other modules consume (AD-14/AD-15/AD-16/Story 5-2b) —
+// the User module's reset-email sender reads the live SMTP row here, the future
+// backup job reads destinations here, the future Tool module reads the
+// schedule catalog here, and the follow-up story's consumers read the typed
+// app_settings here, never a copy.
 package ports
 
 import (
@@ -70,6 +71,15 @@ type Service interface {
 	// leaves the active list. Audited. Archiving an already-archived schedule
 	// answers ErrScheduleNotFound.
 	ArchiveSchedule(ctx context.Context, actorID, id string) (*core.Schedule, error)
+
+	// GetAppSettings returns every configurable system setting typed (Story
+	// 5-2b, GET_ALL). The caller is re-checked against admin.settings.system
+	// defense-in-depth (AD-6).
+	GetAppSettings(ctx context.Context, actorID string) (*core.AppSettings, error)
+	// UpdateAppSettings persists one setting's value (per-key upsert,
+	// audited). Unknown key / type mismatch / negative / empty-text answer the
+	// 400-class sentinels.
+	UpdateAppSettings(ctx context.Context, actorID, key string, input core.UpdateAppSettingInput) (*core.AppSetting, error)
 }
 
 // SmtpSettingsPort is the read-only settings port consumed by other modules
@@ -102,3 +112,19 @@ type SchedulesPort interface {
 	// (archived rows are filtered out).
 	CurrentSchedules(ctx context.Context) ([]*core.Schedule, error)
 }
+
+// AppSettingsPort is the read-only configurable system-settings consumer port
+// (Story 5-2b) — the seam the follow-up consumer-adoption story threads the
+// values into (SMTP/backup/user/tools read here instead of their static
+// constants). This story only declares the port; NO consumer is wired to it
+// yet (deferred-work.md). Implemented by the Admin core.
+type AppSettingsPort interface {
+	// CurrentAppSettings returns the live typed settings (durations as
+	// time.Duration, integers as int, text as string).
+	CurrentAppSettings(ctx context.Context) (*core.AppSettings, error)
+}
+
+// Compile-time pin: the Admin core Service implements the AppSettingsPort seam
+// the follow-up consumer-adoption story depends on (finding 7). If the seam
+// drifts, this fails the build at the port boundary.
+var _ AppSettingsPort = (*core.Service)(nil)

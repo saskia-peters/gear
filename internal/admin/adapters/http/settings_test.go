@@ -3,12 +3,14 @@ package http
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/saskia-peters/gear/internal/admin/core"
 	"github.com/saskia-peters/gear/internal/platform/auth"
@@ -41,6 +43,12 @@ type fakeService struct {
 	scheduleWriteErr   error
 	scheduleArchiveErr error
 	lastScheduleInput  core.ScheduleInput
+
+	appSettings       *core.AppSettings
+	appSettingsGetErr error
+	appSettingsPutErr error
+	lastAppSettingKey string
+	lastAppSettingVal core.UpdateAppSettingInput
 }
 
 func (f *fakeService) GetSmtpSettings(_ context.Context, _ string) (*core.SmtpSettings, error) {
@@ -75,6 +83,101 @@ func (f *fakeService) TestSmtpSettings(_ context.Context, _, _ string) (*core.Sm
 		return &core.SmtpTestResult{Ok: true, Message: core.MsgSmtpTestSent}, nil
 	}
 	return f.testRes, nil
+}
+
+func (f *fakeService) GetAppSettings(_ context.Context, _ string) (*core.AppSettings, error) {
+	if f.appSettingsGetErr != nil {
+		return nil, f.appSettingsGetErr
+	}
+	if f.appSettings == nil {
+		return &core.AppSettings{}, nil
+	}
+	return f.appSettings, nil
+}
+
+func (f *fakeService) UpdateAppSettings(_ context.Context, _, key string, input core.UpdateAppSettingInput) (*core.AppSetting, error) {
+	if f.appSettingsPutErr != nil {
+		return nil, f.appSettingsPutErr
+	}
+	f.lastAppSettingKey = key
+	f.lastAppSettingVal = input
+	base := core.AppSettingFor(f.appSettings, key)
+	if base == nil {
+		// The typed fixture is unset — the fake must answer a clean error, not
+		// nil-deref (finding 10).
+		return nil, errors.New("fakeService: app settings fixture not seeded")
+	}
+	// Echo a row that reflects the submitted value with the setting's real
+	// value_type (looked up from the typed fixture) so a PUT response proves
+	// the edit value really reached the service.
+	row := &core.AppSetting{Key: key, ValueType: base.ValueType}
+	switch v := input.Value.(type) {
+	case float64:
+		n := int64(v)
+		if base.ValueType == core.ValueTypeDuration {
+			d := time.Duration(n) * time.Second
+			row.DurationValue = &d
+		} else {
+			row.IntValue = &n
+		}
+	case string:
+		s := v
+		row.TextValue = &s
+	}
+	// Persist the edit into the typed fixture so the fake is stateful — a PUT
+	// is reflected by a later GET through the same service (round-trip tests).
+	applyAppSettingToStruct(f.appSettings, row)
+	return row, nil
+}
+
+// applyAppSettingToStruct writes a row's value into the typed fixture field
+// matching its key (mirrors the core catalog's setters) so the fake's GET
+// reflects persisted PUTs.
+func applyAppSettingToStruct(s *core.AppSettings, row *core.AppSetting) {
+	switch row.Key {
+	case "smtp_dial_timeout":
+		s.SmtpDialTimeout = row.Duration()
+	case "smtp_protocol_timeout":
+		s.SmtpProtocolTimeout = row.Duration()
+	case "backup_dial_timeout":
+		s.BackupDialTimeout = row.Duration()
+	case "backup_protocol_timeout":
+		s.BackupProtocolTimeout = row.Duration()
+	case "password_reset_ttl":
+		s.PasswordResetTTL = row.Duration()
+	case "admin_recovery_ttl":
+		s.AdminRecoveryTTL = row.Duration()
+	case "forgot_throttle_interval":
+		s.ForgotThrottleInterval = row.Duration()
+	case "otp_ttl":
+		s.OtpTTL = row.Duration()
+	case "otp_length":
+		s.OtpLength = int(row.Int())
+	case "mfa_enrollment_window":
+		s.MfaEnrollmentWindow = row.Duration()
+	case "lockout_threshold_short":
+		s.LockoutThresholdShort = int(row.Int())
+	case "lockout_threshold_long":
+		s.LockoutThresholdLong = int(row.Int())
+	case "lockout_duration_short":
+		s.LockoutDurationShort = row.Duration()
+	case "lockout_duration_long":
+		s.LockoutDurationLong = row.Duration()
+	case "lockout_max_failed_count":
+		s.LockoutMaxFailedCount = int(row.Int())
+	case "attribute_key_max_runes":
+		s.AttributeKeyMaxRunes = int(row.Int())
+	case "attributes_max_size":
+		s.AttributesMaxSize = int(row.Int())
+	case "inventory_prefix":
+		s.InventoryPrefix = row.Text()
+	case "inventory_width":
+		s.InventoryWidth = int(row.Int())
+	case "inspection_orange_window_days":
+		s.InspectionOrangeWindowDays = int(row.Int())
+	case "qualification_expiring_soon_window":
+		s.QualificationExpiringSoonWindow = row.Duration()
+	}
 }
 
 // gateway wraps the REAL Routes() behind the same RequireAnyPermission gate the

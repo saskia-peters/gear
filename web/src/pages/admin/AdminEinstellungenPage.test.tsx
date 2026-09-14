@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { render, screen, cleanup } from '@testing-library/react'
+import { render, screen, within, cleanup } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { MemoryRouter, Routes, Route } from 'react-router-dom'
@@ -10,6 +10,7 @@ const SMTP_URL = '/api/v1/admin/settings/smtp'
 const SMTP_TEST_URL = '/api/v1/admin/settings/smtp/test'
 const BACKUP_URL = '/api/v1/admin/settings/backup'
 const SCHEDULES_URL = '/api/v1/admin/settings/schedules'
+const SYSTEM_URL = '/api/v1/admin/settings/system'
 
 function scheduleFixture() {
   return {
@@ -695,6 +696,252 @@ describe('AdminEinstellungenPage Zeitpläne tab', () => {
     localStorage.setItem('gear.is_admin', 'true')
     stubFetchRoutes([
       { matcher: (url) => url === SCHEDULES_URL, response: { ok: false, status: 401, body: { error: { code: 'unauthorized', message: 'Authentifizierung erforderlich.' } } } },
+    ])
+    renderPage()
+
+    expect(await screen.findByText('Anmeldung')).toBeInTheDocument()
+    expect(localStorage.getItem('gear.session_token')).toBeNull()
+  })
+})
+
+describe('AdminEinstellungenPage System tab', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    localStorage.setItem('gear.session_token', 'sesstoken123')
+    localStorage.setItem('gear.permissions', JSON.stringify(['admin.settings.system']))
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    cleanup()
+  })
+
+  // The 21 seeded atomic settings exactly as the server GET answers them
+  // (durations as whole seconds; integer/text rows carry the display unit).
+  function systemSettingsFixture() {
+    return [
+      { key: 'smtp_dial_timeout', value_type: 'duration', value: 10 },
+      { key: 'smtp_protocol_timeout', value_type: 'duration', value: 30 },
+      { key: 'backup_dial_timeout', value_type: 'duration', value: 10 },
+      { key: 'backup_protocol_timeout', value_type: 'duration', value: 10 },
+      { key: 'password_reset_ttl', value_type: 'duration', value: 1800 },
+      { key: 'admin_recovery_ttl', value_type: 'duration', value: 1800 },
+      { key: 'forgot_throttle_interval', value_type: 'duration', value: 60 },
+      { key: 'otp_ttl', value_type: 'duration', value: 900 },
+      { key: 'otp_length', value_type: 'integer', unit: 'Zeichen', value: 10 },
+      { key: 'mfa_enrollment_window', value_type: 'duration', value: 600 },
+      { key: 'lockout_threshold_short', value_type: 'integer', unit: 'Fehlversuche', value: 3 },
+      { key: 'lockout_threshold_long', value_type: 'integer', unit: 'Fehlversuche', value: 4 },
+      { key: 'lockout_duration_short', value_type: 'duration', value: 30 },
+      { key: 'lockout_duration_long', value_type: 'duration', value: 60 },
+      { key: 'lockout_max_failed_count', value_type: 'integer', unit: 'Fehlversuche', value: 10 },
+      { key: 'attribute_key_max_runes', value_type: 'integer', unit: 'Zeichen', value: 64 },
+      { key: 'attributes_max_size', value_type: 'integer', unit: 'Bytes', value: 16384 },
+      { key: 'inventory_prefix', value_type: 'text', value: 'GEAR' },
+      { key: 'inventory_width', value_type: 'integer', unit: 'Ziffern', value: 6 },
+      { key: 'inspection_orange_window_days', value_type: 'integer', unit: 'Tage', value: 14 },
+      { key: 'qualification_expiring_soon_window', value_type: 'duration', value: 2592000 },
+    ]
+  }
+
+  const stubSystemList = (body: unknown) => ({
+    matcher: (url: string, init?: RequestInit) => url === SYSTEM_URL && !init?.method,
+    response: { ok: true, status: 200, body },
+  })
+
+  it('TAB_GATING_SYSTEM: with only admin.settings.system the other tabs are hidden and the System table renders', async () => {
+    stubFetchRoutes([stubSystemList(systemSettingsFixture())])
+    renderPage()
+
+    expect(await screen.findByRole('table', { name: 'System-Einstellungen' })).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'System' })).toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'E-Mail' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'Backup' })).not.toBeInTheDocument()
+    expect(screen.queryByRole('tab', { name: 'Zeitpläne' })).not.toBeInTheDocument()
+  })
+
+  it('SPA_TABLE: every setting row renders German name, formatted value, typed input and a "?" button', async () => {
+    stubFetchRoutes([stubSystemList(systemSettingsFixture())])
+    renderPage()
+
+    expect(await screen.findByText('SMTP-Verbindungsaufbau-Timeout')).toBeInTheDocument()
+    expect(screen.getByText('OTP-Länge')).toBeInTheDocument()
+    expect(screen.getByText('Präfix Inventarnummer')).toBeInTheDocument()
+    // Durations render a friendly German label (10s, 30min, 30 days).
+    expect(screen.getAllByText('10 Sekunden').length).toBeGreaterThanOrEqual(3)
+    expect(screen.getAllByText('30 Minuten').length).toBeGreaterThanOrEqual(2)
+    expect(screen.getByText('30 Tage')).toBeInTheDocument()
+    // Integer/text values render raw with the server's display unit so days and
+    // seconds never look alike.
+    expect(screen.getByText('GEAR')).toBeInTheDocument()
+    expect(screen.getByText('16384 Bytes')).toBeInTheDocument()
+    expect(screen.getByText('14 Tage')).toBeInTheDocument()
+    expect(screen.getByText('10 Zeichen')).toBeInTheDocument()
+    expect(screen.getByText('6 Ziffern')).toBeInTheDocument()
+    // 21 rows: one input + one save + one "?" per row.
+    expect(screen.getAllByRole('spinbutton')).toHaveLength(20)
+    expect(screen.getAllByRole('textbox')).toHaveLength(1)
+    expect(screen.getAllByRole('button', { name: 'Speichern' })).toHaveLength(21)
+    expect(screen.getAllByRole('button', { name: /Erklärung zu/ })).toHaveLength(21)
+  })
+
+  it('SPA_POPUP: clicking the "?" opens a labelled help popup; Escape closes it', async () => {
+    const user = userEvent.setup()
+    stubFetchRoutes([stubSystemList(systemSettingsFixture())])
+    renderPage()
+
+    const trigger = await screen.findByRole('button', { name: 'Erklärung zu OTP-Länge' })
+    await user.click(trigger)
+
+    const dialog = screen.getByRole('dialog')
+    expect(dialog).toHaveAccessibleName('OTP-Länge')
+    expect(dialog).toHaveAccessibleDescription(expect.stringContaining('Einmalpasswort'))
+    await user.keyboard('{Escape}')
+    expect(screen.queryByRole('dialog')).not.toBeInTheDocument()
+  })
+
+  it('SPA_EDIT: editing a value and saving PUTs the typed value and shows the inline confirmation', async () => {
+    const fetchMock = stubFetchRoutes([
+      stubSystemList(systemSettingsFixture()),
+      {
+        matcher: (url, init) => url === `${SYSTEM_URL}/otp_length` && init?.method === 'PUT',
+        response: { ok: true, status: 200, body: { key: 'otp_length', value_type: 'integer', value: 8, message: 'System-Einstellung gespeichert.' } },
+      },
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    const row = (await screen.findByText('OTP-Länge')).closest('tr')!
+    const input = within(row).getByLabelText('OTP-Länge bearbeiten') as HTMLInputElement
+    await user.clear(input)
+    await user.type(input, '8')
+    await user.click(within(row).getByRole('button', { name: 'Speichern' }))
+
+    expect(await screen.findByText('System-Einstellung gespeichert.')).toBeInTheDocument()
+    const putCall = fetchMock.mock.calls.find(([url, init]) => url === `${SYSTEM_URL}/otp_length` && init?.method === 'PUT')
+    expect(putCall).toBeTruthy()
+    const body = JSON.parse((putCall![1] as RequestInit).body as string)
+    expect(body.value).toBe(8)
+  })
+
+  it('SPA_EDIT_TEXT: a text setting PUTs the typed value and the row value updates (the server trims)', async () => {
+    const fetchMock = stubFetchRoutes([
+      stubSystemList(systemSettingsFixture()),
+      {
+        matcher: (url, init) => url === `${SYSTEM_URL}/inventory_prefix` && init?.method === 'PUT',
+        response: { ok: true, status: 200, body: { key: 'inventory_prefix', value_type: 'text', value: 'GKW', message: 'System-Einstellung gespeichert.' } },
+      },
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    const row = (await screen.findByText('Präfix Inventarnummer')).closest('tr')!
+    const input = within(row).getByLabelText('Präfix Inventarnummer bearbeiten') as HTMLInputElement
+    await user.clear(input)
+    await user.type(input, 'GKW')
+    await user.click(within(row).getByRole('button', { name: 'Speichern' }))
+
+    expect(await screen.findByText('System-Einstellung gespeichert.')).toBeInTheDocument()
+    const putCall = fetchMock.mock.calls.find(([url, init]) => url === `${SYSTEM_URL}/inventory_prefix` && init?.method === 'PUT')
+    expect(putCall).toBeTruthy()
+    const body = JSON.parse((putCall![1] as RequestInit).body as string)
+    expect(body.value).toBe('GKW')
+    expect(await screen.findByText('GKW')).toBeInTheDocument()
+  })
+
+  it('SPA_EDIT_ERROR: a server 400 surfaces its German message inline', async () => {
+    stubFetchRoutes([
+      stubSystemList(systemSettingsFixture()),
+      {
+        matcher: (url, init) => url === `${SYSTEM_URL}/otp_length` && init?.method === 'PUT',
+        response: { ok: false, status: 400, body: { error: { code: 'invalid_request', message: 'Der Wert darf nicht negativ sein.' } } },
+      },
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    const row = (await screen.findByText('OTP-Länge')).closest('tr')!
+    const input = within(row).getByLabelText('OTP-Länge bearbeiten') as HTMLInputElement
+    await user.clear(input)
+    await user.type(input, '-1')
+    await user.click(within(row).getByRole('button', { name: 'Speichern' }))
+
+    expect(await screen.findByRole('alert')).toHaveTextContent('Der Wert darf nicht negativ sein.')
+  })
+
+  it('SPA_EDIT_DURATION: saving a duration row PUTs whole seconds and the value column shows the friendly label', async () => {
+    const fetchMock = stubFetchRoutes([
+      stubSystemList(systemSettingsFixture()),
+      {
+        matcher: (url, init) => url === `${SYSTEM_URL}/otp_ttl` && init?.method === 'PUT',
+        response: { ok: true, status: 200, body: { key: 'otp_ttl', value_type: 'duration', value: 1200, message: 'System-Einstellung gespeichert.' } },
+      },
+    ])
+    const user = userEvent.setup()
+    renderPage()
+
+    const row = (await screen.findByText('Gültigkeit Einmalpasswort (OTP)')).closest('tr')!
+    const input = within(row).getByLabelText('Gültigkeit Einmalpasswort (OTP) bearbeiten') as HTMLInputElement
+    await user.clear(input)
+    await user.type(input, '1200')
+    await user.click(within(row).getByRole('button', { name: 'Speichern' }))
+
+    expect(await screen.findByText('System-Einstellung gespeichert.')).toBeInTheDocument()
+    const putCall = fetchMock.mock.calls.find(([url, init]) => url === `${SYSTEM_URL}/otp_ttl` && init?.method === 'PUT')
+    expect(putCall).toBeTruthy()
+    const body = JSON.parse((putCall![1] as RequestInit).body as string)
+    expect(body.value).toBe(1200)
+    // 1200 seconds renders the friendly label "20 Minuten".
+    expect(await screen.findByText('20 Minuten')).toBeInTheDocument()
+  })
+
+  it('SPA_EDIT_EMPTY: clearing a numeric field and saving is blocked client-side with an inline error and never issues a PUT', async () => {
+    const fetchMock = stubFetchRoutes([stubSystemList(systemSettingsFixture())])
+    const user = userEvent.setup()
+    renderPage()
+
+    const row = (await screen.findByText('OTP-Länge')).closest('tr')!
+    const input = within(row).getByLabelText('OTP-Länge bearbeiten') as HTMLInputElement
+    await user.clear(input)
+    await user.click(within(row).getByRole('button', { name: 'Speichern' }))
+
+    expect(await screen.findByText('Bitte gib einen Wert für diese Einstellung ein.')).toBeInTheDocument()
+    const putCalls = fetchMock.mock.calls.filter(([url, init]) => url.startsWith(`${SYSTEM_URL}/`) && init?.method === 'PUT')
+    expect(putCalls).toHaveLength(0)
+  })
+
+  it('SPA_EDIT_NONFINITE: a non-finite server value is rejected inline, never re-sent', async () => {
+    // JSON cannot carry Infinity, but a huge literal like 1e309 parses to it —
+    // the fixture models that drifted server value, and saving it must be
+    // blocked inline (never serialized as JSON null).
+    const fixture = systemSettingsFixture().map((s) => (s.key === 'otp_length' ? { ...s, value: Infinity } : s))
+    const fetchMock = stubFetchRoutes([stubSystemList(fixture)])
+    const user = userEvent.setup()
+    renderPage()
+
+    const row = (await screen.findByText('OTP-Länge')).closest('tr')!
+    await user.click(within(row).getByRole('button', { name: 'Speichern' }))
+
+    expect(await screen.findByText('Ungültiger Wert.')).toBeInTheDocument()
+    const putCalls = fetchMock.mock.calls.filter(([url, init]) => url.startsWith(`${SYSTEM_URL}/`) && init?.method === 'PUT')
+    expect(putCalls).toHaveLength(0)
+  })
+
+  it('FORBIDDEN: a 403 on load clears the admin flag and leaves the module', async () => {
+    localStorage.setItem('gear.is_admin', 'true')
+    stubFetchRoutes([
+      { matcher: (url) => url === SYSTEM_URL, response: { ok: false, status: 403, body: { error: { code: 'forbidden', message: 'Keine Berechtigung.' } } } },
+    ])
+    renderPage()
+
+    expect(await screen.findByText('Dashboard')).toBeInTheDocument()
+    expect(localStorage.getItem('gear.is_admin')).toBeNull()
+  })
+
+  it('UNAUTHORIZED: a 401 on load clears auth state and redirects to /login', async () => {
+    localStorage.setItem('gear.is_admin', 'true')
+    stubFetchRoutes([
+      { matcher: (url) => url === SYSTEM_URL, response: { ok: false, status: 401, body: { error: { code: 'unauthorized', message: 'Authentifizierung erforderlich.' } } } },
     ])
     renderPage()
 

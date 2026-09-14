@@ -83,7 +83,7 @@ func main() {
 	// module never authors another module's SQL (AD-8/AD-11).
 	adminStore := adminpostgres.New(pool)
 	adminRepo := adminpostgres.NewRepository(adminStore)
-	adminSettingsService := admcore.NewService(adminRepo, adminRepo, adminRepo, secretCipher, userRepo, userRepo, admsmtp.Client{}, admbck.NewTester(), log)
+	adminSettingsService := admcore.NewService(adminRepo, adminRepo, adminRepo, adminRepo, secretCipher, userRepo, userRepo, admsmtp.Client{}, admbck.NewTester(), log)
 	adminSettingsHandler := adminhttp.NewHandler(adminSettingsService, log)
 
 	// Password reset email delivery (FR-26/AD-14): Story 3.1 wires the REAL
@@ -125,6 +125,13 @@ func main() {
 	// core re-checks the same code defense-in-depth. It deliberately does NOT
 	// widen the SMTP/backup gates above.
 	schedulesSurface := auth.RequireAnyPermission(sessionManager, userRepo, []string{admcore.SchedulesPermission}, "schedules.manage access denied", log)(adminSettingsHandler.ScheduleRoutes())
+
+	// The configurable system-settings surface (Story 5-2b) mounts under
+	// /api/v1/admin/settings/system with its OWN gate — one permission per
+	// surface (AD-6): only holders of `admin.settings.system` reach it. The
+	// core re-checks the same code defense-in-depth. It deliberately does NOT
+	// widen the SMTP/backup/schedules gates above.
+	systemSettingsSurface := auth.RequireAnyPermission(sessionManager, userRepo, []string{admcore.AppSettingsPermission}, "admin.settings.system access denied", log)(adminSettingsHandler.SystemRoutes())
 
 	// Story 4.2 — materialized Tool hexagon for the tool-type surface
 	// (FR-8/FR-10/FR-23/AD-1/AD-10): the Tool-owned tool_types store, the tools
@@ -200,6 +207,7 @@ func main() {
 		router.WithMount("/api/v1/admin/settings", settingsSurface),
 		router.WithMount("/api/v1/admin/settings/backup", backupSurface),
 		router.WithMount("/api/v1/admin/settings/schedules", schedulesSurface),
+		router.WithMount("/api/v1/admin/settings/system", systemSettingsSurface),
 		router.WithMount("/api/v1/admin/tool-types", toolTypesSurface),
 		router.WithMount("/api/v1/admin/tools", toolToolsSurface),
 		router.WithMount("/api/v1/tools", toolsSurface),

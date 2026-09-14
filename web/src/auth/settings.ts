@@ -13,12 +13,13 @@ import { ApiError, request, authTokenHeaders } from './http.ts'
 
 export type SmtpSecurity = 'none' | 'starttls' | 'tls'
 
-// Permission codes gating the three Einstellungen surfaces (AD-6, server-side
+// Permission codes gating the Einstellungen surfaces (AD-6, server-side
 // source of truth). Kept here so the per-tab gating cannot drift from the
 // server codes.
 export const SMTP_SETTINGS_PERMISSION = 'admin.settings.email'
 export const BACKUP_SETTINGS_PERMISSION = 'admin.settings.backup'
 export const SCHEDULES_PERMISSION = 'schedules.manage'
+export const SYSTEM_SETTINGS_PERMISSION = 'admin.settings.system'
 
 // SmtpSettings is the GET payload — never a password (only password_configured).
 export interface SmtpSettings {
@@ -278,6 +279,48 @@ function buildScheduleBody(input: ScheduleInput): Record<string, unknown> {
     interval_unit: input.interval_unit,
     interval_magnitude: input.interval_magnitude,
   }
+}
+
+// --- Configurable system settings (Story 5-2b) --------------------------------
+
+// SystemSettingValueType is the typed-store value type of a setting. Durations
+// are whole SECONDS on the wire (the store stores seconds; the SPA renders a
+// friendly German label from the seconds value).
+export type SystemSettingValueType = 'duration' | 'integer' | 'text'
+
+// SystemSetting is one GET payload row: the typed scalar `value` (duration →
+// seconds as number, integer → number, text → string) plus the setting's
+// display unit (e.g. "Sekunden", "Tage", "Zeichen", "Bytes") so the table can
+// tell days from seconds.
+export interface SystemSetting {
+  key: string
+  value_type: SystemSettingValueType
+  unit?: string
+  value: number | string
+}
+
+// SystemSettingWriteResult is the PUT payload: the updated setting plus the
+// server-authoritative German confirmation.
+export interface SystemSettingWriteResult extends SystemSetting {
+  message: string
+}
+
+const SYSTEM_URL = '/api/v1/admin/settings/system'
+
+// getSystemSettings fetches every seeded setting typed (GET_ALL).
+export async function getSystemSettings(): Promise<SystemSetting[]> {
+  return (await request(SYSTEM_URL, { headers: authTokenHeaders() })) as SystemSetting[]
+}
+
+// updateSystemSetting persists one setting's value (PUT_SETTING). The server
+// rejects unknown keys, type mismatches, negative values and empty text with a
+// German 400 that surfaces inline.
+export async function updateSystemSetting(key: string, value: number | string): Promise<SystemSettingWriteResult> {
+  return (await request(`${SYSTEM_URL}/${key}`, {
+    method: 'PUT',
+    headers: authTokenHeaders(),
+    body: JSON.stringify({ value }),
+  })) as SystemSettingWriteResult
 }
 
 export { ApiError }

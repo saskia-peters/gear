@@ -42,16 +42,52 @@ func TestPostgresSmtpSettingsStore(t *testing.T) {
 	queries := New(pool)
 	repo := NewRepository(queries)
 
-	// GET_INITIAL: no row yet → nil (the core maps it to zero defaults).
-	got, err := repo.GetSmtpSettings(ctx)
-	if err != nil {
-		t.Fatalf("GetSmtpSettings(fresh) err = %v", err)
+	// SNAPSHOT for restore: the smtp_settings table is single-row and may hold
+	// REAL user data in the shared dev DB. Capture any pre-existing row so the
+	// test can restore it afterwards instead of destroying a real SMTP config.
+	type snapRow struct {
+		host, senderAddress, senderName, username, passwordEncrypted string
+		port                                                         int
+		security                                                     string
 	}
-	if got != nil {
-		t.Fatalf("fresh GetSmtpSettings = %+v, want nil", got)
+	var existing *snapRow
+	orig, err := repo.GetSmtpSettings(ctx)
+	if err != nil {
+		t.Fatalf("GetSmtpSettings(snapshot) err = %v", err)
+	}
+	if orig != nil {
+		existing = &snapRow{
+			host: orig.Host, senderAddress: orig.SenderAddress, senderName: orig.SenderName,
+			username: orig.Username, passwordEncrypted: orig.PasswordEncrypted,
+			port: orig.Port, security: orig.Security,
+		}
+	}
+	t.Cleanup(func() {
+		if existing != nil {
+			_, _ = pool.Exec(ctx, `UPDATE smtp_settings SET host=$1, port=$2, security=$3,
+				sender_address=$4, sender_name=$5, username=$6, password_encrypted=$7`,
+				existing.host, existing.port, existing.security, existing.senderAddress,
+				existing.senderName, existing.username, existing.passwordEncrypted)
+		} else {
+			_, _ = pool.Exec(ctx, "DELETE FROM smtp_settings")
+		}
+	})
+
+	// GET_INITIAL: no row yet → nil (the core maps it to zero defaults). When a
+	// real row exists in the shared dev DB this assertion is skipped — the
+	// upsert semantics below still verify the store.
+	if existing == nil {
+		got, err := repo.GetSmtpSettings(ctx)
+		if err != nil {
+			t.Fatalf("GetSmtpSettings(fresh) err = %v", err)
+		}
+		if got != nil {
+			t.Fatalf("fresh GetSmtpSettings = %+v, want nil", got)
+		}
 	}
 
 	// PUT_VALID: first upsert creates the row and returns the resulting row.
+	var got *core.SmtpSettings
 	first := &core.SmtpSettings{
 		Host: "smtp.example.com", Port: 587, Security: core.SmtpSecurityStartTLS,
 		SenderAddress: "noreply@example.com", SenderName: "G.E.A.R.",
@@ -131,9 +167,6 @@ func TestPostgresSmtpSettingsStore(t *testing.T) {
 	if count != 1 {
 		t.Errorf("row count = %d, want 1 (single-row settings table)", count)
 	}
-
-	// Cleanup so the dev database stays pristine for other test runs.
-	if _, err := pool.Exec(ctx, "DELETE FROM smtp_settings"); err != nil {
-		t.Fatalf("cleanup err = %v", err)
-	}
+	// Restore of any pre-existing real row (or removal of the test row) is
+	// handled by the snapshot t.Cleanup at the top of the test.
 }

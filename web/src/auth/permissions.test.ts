@@ -80,4 +80,10 @@ describe('permissions admin-nav model', () => {
     expect(got.map((e) => e.key)).toEqual(['werkzeuge'])
     expect(hasAnyAdminCode(['tool.edit'])).toBe(true)
   })
+
+  it('admin.settings.system (Story 5-2b): a system-settings-only holder sees Übersicht + Einstellungen and opens the admin module', () => {
+    const got = filteredAdminNav(['admin.settings.system'])
+    expect(got.map((e) => e.key)).toEqual(['uebersicht', 'einstellungen'])
+    expect(hasAnyAdminCode(['admin.settings.system'])).toBe(true)
+  })
 })

@@ -175,6 +175,57 @@ func (s *compSettingsService) ArchiveSchedule(_ context.Context, _, _ string) (*
 	return &admcore.Schedule{ID: "id", Name: "x"}, nil
 }
 
+func (s *compSettingsService) GetAppSettings(_ context.Context, _ string) (*admcore.AppSettings, error) {
+	return &admcore.AppSettings{
+		SmtpDialTimeout:                 10 * time.Second,
+		SmtpProtocolTimeout:             30 * time.Second,
+		BackupDialTimeout:               10 * time.Second,
+		BackupProtocolTimeout:           10 * time.Second,
+		PasswordResetTTL:                1800 * time.Second,
+		AdminRecoveryTTL:                1800 * time.Second,
+		ForgotThrottleInterval:          60 * time.Second,
+		OtpTTL:                          900 * time.Second,
+		OtpLength:                       10,
+		MfaEnrollmentWindow:             600 * time.Second,
+		LockoutThresholdShort:           3,
+		LockoutThresholdLong:            4,
+		LockoutDurationShort:            30 * time.Second,
+		LockoutDurationLong:             60 * time.Second,
+		LockoutMaxFailedCount:           10,
+		AttributeKeyMaxRunes:            64,
+		AttributesMaxSize:               16384,
+		InventoryPrefix:                 "GEAR",
+		InventoryWidth:                  6,
+		InspectionOrangeWindowDays:      14,
+		QualificationExpiringSoonWindow: 2592000 * time.Second,
+	}, nil
+}
+
+func (s *compSettingsService) UpdateAppSettings(_ context.Context, _, key string, input admcore.UpdateAppSettingInput) (*admcore.AppSetting, error) {
+	settings, _ := s.GetAppSettings(context.Background(), "")
+	row := admcore.AppSettingFor(settings, key)
+	if row == nil {
+		return nil, admcore.ErrAppSettingUnknown
+	}
+	// Echo the submitted value into the matching value column so the composed
+	// PUT test proves the edit really reached the service (a silently-dropped
+	// value would surface as the pre-update row and fail).
+	switch v := input.Value.(type) {
+	case float64:
+		switch row.ValueType {
+		case admcore.ValueTypeDuration:
+			d := time.Duration(int64(v)) * time.Second
+			row.DurationValue = &d
+		case admcore.ValueTypeInteger:
+			n := int64(v)
+			row.IntValue = &n
+		}
+	case string:
+		row.TextValue = &v
+	}
+	return row, nil
+}
+
 var _ adminports.Service = (*compSettingsService)(nil)
 
 // activeUser builds a session carrying an active user.
@@ -467,6 +518,119 @@ func TestCompositionScheduleMountGating(t *testing.T) {
 	}
 }
 
+// newCompositionSystemRouter mirrors the main() mounts exactly for the Story
+// 5-2b system-settings surface: /api/v1/admin, /api/v1/admin/settings (SMTP
+// gate), /api/v1/admin/settings/backup (backup gate),
+// /api/v1/admin/settings/schedules (schedules gate) and
+// /api/v1/admin/settings/system (its OWN admin.settings.system gate), all
+// through the REAL RequireAnyPermission middleware and router.New. This pins
+// the one-permission-per-surface mount ordering (AD-6): the more-specific
+// system sub-mount must win for /api/v1/admin/settings/system/*, a caller
+// holding only admin.settings.email must NOT reach it, and a caller holding
+// ONLY admin.settings.system reaches it (no existing gate is widened).
+func newCompositionSystemRouter(perms []string, session *usercore.Session) http.Handler {
+	log := discardLogger()
+	validator := &compValidator{session: session}
+	resolver := &compResolver{perms: perms}
+
+	settingsHandler := adminhttp.NewHandler(&compSettingsService{}, log)
+	settingsSurface := auth.RequireAnyPermission(validator, resolver, []string{admcore.SmtpSettingsPermission}, "admin.settings.email access denied", log)(settingsHandler.Routes())
+	backupSurface := auth.RequireAnyPermission(validator, resolver, []string{admcore.BackupSettingsPermission}, "admin.settings.backup access denied", log)(settingsHandler.BackupRoutes())
+	schedulesSurface := auth.RequireAnyPermission(validator, resolver, []string{admcore.SchedulesPermission}, "schedules.manage access denied", log)(settingsHandler.ScheduleRoutes())
+	systemSurface := auth.RequireAnyPermission(validator, resolver, []string{admcore.AppSettingsPermission}, "admin.settings.system access denied", log)(settingsHandler.SystemRoutes())
+
+	outer := chi.NewRouter()
+	outer.Get("/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"module":"admin","status":"ok"}`))
+	})
+	outerSurface := auth.RequireAnyPermission(validator, resolver, usercore.AdminModuleAccessCodes(), "admin access denied", log)(outer)
+
+	return router.New(stubPinger{}, log,
+		router.WithMount("/api/v1/admin", outerSurface),
+		router.WithMount("/api/v1/admin/settings", settingsSurface),
+		router.WithMount("/api/v1/admin/settings/backup", backupSurface),
+		router.WithMount("/api/v1/admin/settings/schedules", schedulesSurface),
+		router.WithMount("/api/v1/admin/settings/system", systemSurface),
+	)
+}
+
+func doSystemComposedRequest(h http.Handler, token string) *httptest.ResponseRecorder {
+	return doComposedJSONRequest(h, token, http.MethodGet, "/api/v1/admin/settings/system", "")
+}
+
+// TestCompositionSystemMountGating verifies the Story 5-2b composition-root
+// wiring: /api/v1/admin/settings/system is gated by ITS OWN admin.settings.system
+// permission (AD-6) — a caller holding only admin.settings.email gets the
+// uniform 403 (the SMTP gate is NOT widened), while a admin.settings.system
+// holder reaches the surface (and, via the outer gate, the admin module root).
+// The reverse is also pinned: a system-only holder is denied the SMTP surface
+// (its code opens only the system mount, not the sibling gates).
+func TestCompositionSystemMountGating(t *testing.T) {
+	// 401: no token.
+	if rec := doSystemComposedRequest(newCompositionSystemRouter([]string{}, nil), ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no token: status = %d, want 401", rec.Code)
+	}
+
+	// 403: a caller holding ONLY admin.settings.email must NOT reach the system
+	// surface — the gates are separate (one permission per surface).
+	rec := doSystemComposedRequest(newCompositionSystemRouter([]string{admcore.SmtpSettingsPermission}, activeUser("u-mail", "mail@gear.local")), "tok")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("admin.settings.email holder: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// 403: a caller holding an unrelated admin code is denied with no setting
+	// data exposed.
+	rec = doSystemComposedRequest(newCompositionSystemRouter([]string{"dashboard.view"}, activeUser("u-vol", "vol@gear.local")), "tok")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("non-admin holder: status = %d, want 403", rec.Code)
+	}
+	if strings.Contains(strings.ToLower(rec.Body.String()), "einstellung") || strings.Contains(rec.Body.String(), "GEAR") {
+		t.Errorf("403 body leaks setting data: %s", rec.Body.String())
+	}
+
+	// 200: a caller holding ONLY admin.settings.system reaches the system
+	// surface (the 21-row typed list from the in-memory service) — proves the
+	// system sub-mount is chosen over the outer admin-module mount (mount
+	// ordering correct).
+	systemRouter := newCompositionSystemRouter([]string{admcore.AppSettingsPermission}, activeUser("u-sys", "sys@gear.local"))
+	rec = doSystemComposedRequest(systemRouter, "tok")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin.settings.system holder: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var body []map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding system response err = %v", err)
+	}
+	if len(body) != 21 {
+		t.Errorf("system response rows = %d, want 21", len(body))
+	}
+	var hasOtp bool
+	for _, row := range body {
+		if row["key"] == "otp_length" && row["value"] == float64(10) {
+			hasOtp = true
+		}
+	}
+	if !hasOtp {
+		t.Errorf("system response = %s, want the typed otp_length row", rec.Body.String())
+	}
+
+	// REVERSE: the system-only holder must NOT reach the SMTP surface (the
+	// system gate does not widen the admin.settings.email gate).
+	if rec := doComposedJSONRequest(systemRouter, "tok", http.MethodGet, "/api/v1/admin/settings/smtp", ""); rec.Code != http.StatusForbidden {
+		t.Errorf("system-only holder on SMTP: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// 200: the same holder reaches the outer admin-module root
+	// (admin.settings.system is part of AdminModuleAccessCodes).
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rootRec := httptest.NewRecorder()
+	newCompositionSystemRouter([]string{admcore.AppSettingsPermission}, activeUser("u-sys", "sys@gear.local")).ServeHTTP(rootRec, req)
+	if rootRec.Code != http.StatusOK {
+		t.Errorf("admin root: status = %d, want 200", rootRec.Code)
+	}
+}
+
 // TestCompositionScheduleWriteVerbs verifies the Story 4.1 write verbs through
 // the REAL RequireAnyPermission mount: a schedules.manage holder can POST
 // (create) and POST /{id}/archive on the composed schedules surface, while a
@@ -512,6 +676,36 @@ func TestCompositionScheduleWriteVerbs(t *testing.T) {
 		t.Errorf("email-only POST archive: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
 	}
 }
+// TestCompositionSystemWriteVerbs verifies the Story 5-2b write verb through
+// the REAL RequireAnyPermission mount: a admin.settings.system holder can PUT
+// a per-setting update on the composed system surface (200 + German
+// confirmation), while an email-only holder is denied with the uniform 403 —
+// the gates are separate (one permission per surface, AD-6).
+func TestCompositionSystemWriteVerbs(t *testing.T) {
+	holder := newCompositionSystemRouter([]string{admcore.AppSettingsPermission}, activeUser("u-sys", "sys@gear.local"))
+	rec := doComposedJSONRequest(holder, "tok", http.MethodPut, "/api/v1/admin/settings/system/otp_length", `{"value":8}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("holder PUT: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding PUT response err = %v", err)
+	}
+	if body["message"] != admcore.MsgAppSettingSaved {
+		t.Errorf("PUT message = %v, want %q", body["message"], admcore.MsgAppSettingSaved)
+	}
+	if body["key"] != "otp_length" {
+		t.Errorf("PUT response key = %v, want otp_length", body["key"])
+	}
+
+	// Non-holder (email-only) is denied the write with the uniform 403.
+	nonHolder := newCompositionSystemRouter([]string{admcore.SmtpSettingsPermission}, activeUser("u-mail", "mail@gear.local"))
+	rec = doComposedJSONRequest(nonHolder, "tok", http.MethodPut, "/api/v1/admin/settings/system/otp_length", `{"value":8}`)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("email-only PUT: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+}
+
 // compToolTypeService is an in-memory toolports.Service for the tool-type
 // surface. It implements the same inbound port main.go wires (the real core).
 type compToolTypeService struct{}

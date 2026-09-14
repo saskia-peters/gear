@@ -8,6 +8,15 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 )
 
+type AppSetting struct {
+	Key           string             `json:"key"`
+	ValueType     string             `json:"value_type"`
+	DurationValue pgtype.Int8        `json:"duration_value"`
+	IntValue      pgtype.Int8        `json:"int_value"`
+	TextValue     pgtype.Text        `json:"text_value"`
+	UpdatedAt     pgtype.Timestamptz `json:"updated_at"`
+}
+
 type BackupDestination struct {
 	ID                pgtype.UUID        `json:"id"`
 	Name              string             `json:"name"`

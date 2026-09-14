@@ -8,6 +8,7 @@ import {
   BACKUP_SETTINGS_PERMISSION,
   SMTP_SETTINGS_PERMISSION,
   SCHEDULES_PERMISSION,
+  SYSTEM_SETTINGS_PERMISSION,
   getSmtpSettings,
   testSmtpEmail,
   updateSmtpSettings,
@@ -20,6 +21,8 @@ import {
   createSchedule,
   updateSchedule,
   archiveSchedule,
+  getSystemSettings,
+  updateSystemSetting,
 } from '../../auth/settings.ts'
 import type {
   SmtpSecurity,
@@ -30,7 +33,9 @@ import type {
   Schedule,
   ScheduleInput,
   ScheduleIntervalUnit,
+  SystemSetting,
 } from '../../auth/settings.ts'
+import { InfoPopup } from '../../components/InfoPopup.tsx'
 import styles from './AdminEinstellungenPage.module.css'
 
 const SECURITY_OPTIONS: ReadonlyArray<{ value: SmtpSecurity; label: string }> = [
@@ -60,7 +65,7 @@ const INTERVAL_OPTIONS: ReadonlyArray<{ value: ScheduleIntervalUnit; label: stri
 ]
 
 type Feedback = { kind: 'success' | 'error'; message: string } | null
-type Tab = 'email' | 'backup' | 'schedules'
+type Tab = 'email' | 'backup' | 'schedules' | 'system'
 
 function mechanismLabel(m: BackupMechanism): string {
   return MECHANISM_OPTIONS.find((o) => o.value === m)?.label ?? m
@@ -73,23 +78,27 @@ function scheduleDisplay(s: Schedule): string {
   return `${option.display} − ${s.interval_magnitude} ${unit}`
 }
 
-// AdminEinstellungenPage is the Einstellungen surface (Story 3.1 + 3.2 + 4.1,
-// FR-28/FR-29/FR-30/UX-DR6/UX-DR8/UX-DR9): a tab bar over the E-Mail, Backup
-// and Zeitpläne settings surfaces. Each tab is gated by its OWN permission code
-// (AD-6) — E-Mail by admin.settings.email, Backup by admin.settings.backup,
-// Zeitpläne by schedules.manage — so a holder of only one code sees only that
-// surface. Credentials are write-only: GET exposes only *configured booleans
-// and saving with an empty credential omits it so the server keeps the existing
-// encrypted one (NFR-S4). Inline German feedback, sticky actions, ≥48px
-// targets, 401→login, 403→leave the admin module. The server remains the
-// source of truth.
+// AdminEinstellungenPage is the Einstellungen surface (Story 3.1 + 3.2 + 4.1 +
+// 5-2b, FR-28/FR-29/FR-30/UX-DR6/UX-DR8/UX-DR9): a tab bar over the E-Mail,
+// Backup, Zeitpläne and System settings surfaces. Each tab is gated by its OWN
+// permission code (AD-6) — E-Mail by admin.settings.email, Backup by
+// admin.settings.backup, Zeitpläne by schedules.manage, System by
+// admin.settings.system — so a holder of only one code sees only that surface.
+// Credentials are write-only: GET exposes only *configured booleans and saving
+// with an empty credential omits it so the server keeps the existing encrypted
+// one (NFR-S4). Inline German feedback, sticky actions, ≥48px targets,
+// 401→login, 403→leave the admin module. The server remains the source of
+// truth.
 export function AdminEinstellungenPage() {
   const navigate = useNavigate()
   const perms = getPermissions()
   const canEmail = perms.includes(SMTP_SETTINGS_PERMISSION)
   const canBackup = perms.includes(BACKUP_SETTINGS_PERMISSION)
   const canSchedules = perms.includes(SCHEDULES_PERMISSION)
-  const [activeTab, setActiveTab] = useState<Tab>(canEmail ? 'email' : canBackup ? 'backup' : 'schedules')
+  const canSystem = perms.includes(SYSTEM_SETTINGS_PERMISSION)
+  const [activeTab, setActiveTab] = useState<Tab>(
+    canEmail ? 'email' : canBackup ? 'backup' : canSchedules ? 'schedules' : 'system',
+  )
 
   // handleApiError inspects an API error: a 403 clears the cached admin flag
   // and leaves the admin module; a 401 (expired/revoked session) clears the
@@ -121,7 +130,7 @@ export function AdminEinstellungenPage() {
         <main className={styles.main}>
           <h2 className={styles.title}>Einstellungen</h2>
           <p className={styles.description}>
-            E-Mail-Versand, Backup-Ziele und Zeitpläne. Änderungen gelten sofort, ohne Neubereitstellung.
+            E-Mail-Versand, Backup-Ziele, Zeitpläne und System-Einstellungen. Änderungen gelten sofort, ohne Neubereitstellung.
           </p>
 
           <div className={styles.tabs} role="tablist" aria-label="Einstellungen">
@@ -158,6 +167,17 @@ export function AdminEinstellungenPage() {
                 Zeitpläne
               </button>
             )}
+            {canSystem && (
+              <button
+                type="button"
+                role="tab"
+                aria-selected={activeTab === 'system'}
+                className={activeTab === 'system' ? styles.tabActive : styles.tab}
+                onClick={() => setActiveTab('system')}
+              >
+                System
+              </button>
+            )}
           </div>
 
           {activeTab === 'email' && canEmail ? (
@@ -166,6 +186,8 @@ export function AdminEinstellungenPage() {
             <BackupSettingsTab onApiError={handleApiError} />
           ) : activeTab === 'schedules' && canSchedules ? (
             <ScheduleSettingsTab onApiError={handleApiError} />
+          ) : activeTab === 'system' && canSystem ? (
+            <SystemSettingsTab onApiError={handleApiError} />
           ) : null}
         </main>
       </div>
@@ -1104,6 +1126,356 @@ function ScheduleSettingsTab({ onApiError }: { onApiError: (err: unknown) => boo
             </ul>
           )}
         </>
+      )}
+    </>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// System tab (Story 5-2b): the configurable system settings table. Each of the
+// 21 atomic settings renders as one row: German name, formatted current value,
+// a value-typed editable input (duration → whole seconds, integer → number,
+// text → string) and a "?" InfoPopup explaining the setting. Saving is per-row
+// with inline German feedback — the server is authoritative, so its 400s (and
+// its German message) surface inline. Durations are STORED and EDITED in whole
+// seconds; the current-value column shows a friendly German label derived from
+// the seconds value.
+// ---------------------------------------------------------------------------
+
+interface SystemSettingMeta {
+  label: string
+  help: string
+}
+
+// SYSTEM_SETTING_META is the SPA-side catalog of the 21 seeded settings: German
+// label + read-only help text for the "?" popup (UX-DR8). Keys mirror the
+// server's seeded keys; the server remains authoritative for the value and the
+// value type.
+const SYSTEM_SETTING_META: Record<string, SystemSettingMeta> = {
+  smtp_dial_timeout: {
+    label: 'SMTP-Verbindungsaufbau-Timeout',
+    help: 'Zeit in Sekunden, bis ein SMTP-Server den Verbindungsaufbau beantwortet haben muss. Erhöhe den Wert, wenn ein langsames Relay fälschlich als Fehler erscheint.',
+  },
+  smtp_protocol_timeout: {
+    label: 'SMTP-Protokoll-Timeout',
+    help: 'Maximale Dauer der gesamten SMTP-Unterhaltung in Sekunden. Das ist der größte Hebel gegen hängende E-Mail-Versuche.',
+  },
+  backup_dial_timeout: {
+    label: 'Backup-Verbindungsaufbau-Timeout',
+    help: 'Zeit in Sekunden für den TCP-Verbindungsaufbau zu einem Backup-Ziel. Entfernte Endpunkte variieren stark.',
+  },
+  backup_protocol_timeout: {
+    label: 'Backup-Protokoll-Timeout',
+    help: 'Zeit in Sekunden für die FTP-/SFTP-/S3-Unterhaltung mit einem Backup-Ziel während des Verbindungstests.',
+  },
+  password_reset_ttl: {
+    label: 'Gültigkeit Passwort-Reset-Link',
+    help: 'Gültigkeitsdauer des Links zum Zurücksetzen des Passworts in Sekunden (Standard 30 Minuten). Auch der Zeitraum, in dem die E-Mail noch als „30 Minuten gültig“ angezeigt wird.',
+  },
+  admin_recovery_ttl: {
+    label: 'Gültigkeit Dual-Admin-Wiederherstellung',
+    help: 'Gültigkeitsdauer eines Wiederherstellungstokens für die Kontowiederherstellung in Sekunden (Standard 30 Minuten).',
+  },
+  forgot_throttle_interval: {
+    label: 'Sperrintervall „Passwort vergessen“',
+    help: 'Mindestabstand in Sekunden zwischen zwei „Passwort vergessen“-Anfragen für dieselbe E-Mail-Adresse (Standard 60).',
+  },
+  otp_ttl: {
+    label: 'Gültigkeit Einmalpasswort (OTP)',
+    help: 'Gültigkeitsdauer eines Einmalpassworts in Sekunden (Standard 15 Minuten). Bestimmt das operative Zeitfenster für die Eingabe.',
+  },
+  otp_length: {
+    label: 'OTP-Länge',
+    help: 'Anzahl der Zeichen eines Einmalpassworts (Standard 10). Längere Codes erhöhen die Entropie, erschweren aber die Eingabe.',
+  },
+  mfa_enrollment_window: {
+    label: 'Gültigkeit MFA-Anmeldung',
+    help: 'Zeitfenster in Sekunden, in dem ein frisch angelegter MFA-Schlüssel bestätigt werden muss (Standard 10 Minuten).',
+  },
+  lockout_threshold_short: {
+    label: 'Sperrschwelle (kurz)',
+    help: 'Anzahl der Fehlversuche, ab denen die kurze Sperre greift (Standard 3).',
+  },
+  lockout_threshold_long: {
+    label: 'Sperrschwelle (lang)',
+    help: 'Anzahl der Fehlversuche, ab denen die lange Sperre greift (Standard 4).',
+  },
+  lockout_duration_short: {
+    label: 'Sperrdauer (kurz)',
+    help: 'Dauer der kurzen Anmeldesperre in Sekunden (Standard 30).',
+  },
+  lockout_duration_long: {
+    label: 'Sperrdauer (lang)',
+    help: 'Dauer der langen Anmeldesperre in Sekunden (Standard 60).',
+  },
+  lockout_max_failed_count: {
+    label: 'Max. Fehlversuche gesamt',
+    help: 'Obergrenze der erfassten Fehlversuche pro Konto (Standard 10). Schützt vor übermäßigem Sperr-Datenwachstum.',
+  },
+  attribute_key_max_runes: {
+    label: 'Max. Länge Attributschlüssel',
+    help: 'Maximale Zeichenzahl eines benutzerdefinierten Attributschlüssels (Standard 64). Gilt einheitlich für Benutzer- und Geräteattribute.',
+  },
+  attributes_max_size: {
+    label: 'Max. Größe Attribute',
+    help: 'Maximale Gesamtgröße der Attributsammlung eines Datensatzes in Bytes (Standard 16 KB).',
+  },
+  inventory_prefix: {
+    label: 'Präfix Inventarnummer',
+    help: 'Buchstaben-Präfix der automatisch vergebenen Inventarnummern (Standard „GEAR“).',
+  },
+  inventory_width: {
+    label: 'Breite Inventarnummer',
+    help: 'Breite des numerischen Teils der Inventarnummer (Standard 6). Zusammen mit dem Präfix ergibt sich z. B. „GEAR000001“.',
+  },
+  inspection_orange_window_days: {
+    label: 'Orange-Fenster Prüfung',
+    help: 'Tage vor der Fälligkeit, ab denen ein Gerät auf dem Dashboard orange dargestellt wird (Standard 14).',
+  },
+  qualification_expiring_soon_window: {
+    label: 'Qualifikation „bald ablaufend“',
+    help: 'Zeitfenster in Sekunden vor dem Ablauf, ab dem eine Qualifikation als „bald ablaufend“ gilt (Standard 30 Tage).',
+  },
+}
+
+// formatDuration renders a whole-second duration as a friendly German label
+// (e.g. "30 Minuten", "15 Minuten", "30 Tage", "10 Sekunden").
+function formatDuration(totalSeconds: number): string {
+  const minute = 60
+  const hour = 60 * minute
+  const day = 24 * hour
+  if (totalSeconds % day === 0 && totalSeconds >= day) {
+    const d = totalSeconds / day
+    return `${d} ${d === 1 ? 'Tag' : 'Tage'}`
+  }
+  if (totalSeconds % hour === 0 && totalSeconds >= hour) {
+    const h = totalSeconds / hour
+    return `${h} ${h === 1 ? 'Stunde' : 'Stunden'}`
+  }
+  if (totalSeconds % minute === 0 && totalSeconds >= minute) {
+    const m = totalSeconds / minute
+    return `${m} ${m === 1 ? 'Minute' : 'Minuten'}`
+  }
+  return `${totalSeconds} ${totalSeconds === 1 ? 'Sekunde' : 'Sekunden'}`
+}
+
+// formatCurrentValue renders the current-value cell per value_type: durations
+// as a friendly German label, integers/text with the setting's unit appended
+// (e.g. "10 Zeichen", "14 Tage", "16384 Bytes") so days and seconds never look
+// alike. unit is the server-authoritative display unit.
+function formatCurrentValue(setting: SystemSetting): string {
+  if (setting.value_type === 'duration') {
+    return formatDuration(Number(setting.value))
+  }
+  const unit = setting.unit ?? ''
+  return `${String(setting.value)}${unit !== '' ? ` ${unit}` : ''}`
+}
+
+// SystemSettingsTab is the System surface (Story 5-2b): a table of the 21
+// seeded settings — German name, formatted current value, a value-typed input
+// (duration in whole seconds, integer, text) and a "?" InfoPopup per row.
+// Saving is per-row with inline German feedback; the server is authoritative
+// (its 400s surface inline). Skeleton loading, 403 → leave the admin module,
+// 401 → login.
+function SystemSettingsTab({ onApiError }: { onApiError: (err: unknown) => boolean }) {
+  const [loaded, setLoaded] = useState(false)
+  const [loadError, setLoadError] = useState('')
+  const [settings, setSettings] = useState<SystemSetting[]>([])
+  const [drafts, setDrafts] = useState<Record<string, string>>({})
+  const [feedback, setFeedback] = useState<Record<string, Feedback>>({})
+  const [busyKeys, setBusyKeys] = useState<ReadonlySet<string>>(new Set())
+
+  useEffect(() => {
+    let cancelled = false
+    async function run() {
+      try {
+        const rows = await getSystemSettings()
+        if (cancelled) return
+        setSettings(rows)
+        const next: Record<string, string> = {}
+        for (const row of rows) {
+          next[row.key] = String(row.value)
+        }
+        setDrafts(next)
+      } catch (err) {
+        if (cancelled) return
+        if (!onApiError(err)) {
+          setLoadError('Die System-Einstellungen konnten nicht geladen werden.')
+        }
+      } finally {
+        if (!cancelled) setLoaded(true)
+      }
+    }
+    void run()
+    return () => {
+      cancelled = true
+    }
+  }, [onApiError])
+
+  function setRowFeedback(key: string, fb: Feedback) {
+    setFeedback((prev) => {
+      const next = { ...prev }
+      if (fb) {
+        next[key] = fb
+      } else {
+        delete next[key]
+      }
+      return next
+    })
+  }
+
+  async function saveRow(setting: SystemSetting) {
+    const raw = drafts[setting.key] ?? String(setting.value)
+    // An emptied numeric field must NOT become Number('') = 0 and silently
+    // persist 0 — block the empty raw input client-side with inline feedback
+    // (the server is never reached).
+    if (setting.value_type !== 'text' && raw.trim() === '') {
+      setRowFeedback(setting.key, { kind: 'error', message: 'Bitte gib einen Wert für diese Einstellung ein.' })
+      return
+    }
+    const numeric = Number(raw)
+    // A non-finite number (e.g. 1e309) would serialize as JSON null and hit
+    // the server as a type mismatch — reject it inline instead.
+    if (setting.value_type !== 'text' && !Number.isFinite(numeric)) {
+      setRowFeedback(setting.key, { kind: 'error', message: 'Ungültiger Wert.' })
+      return
+    }
+    const value: number | string = setting.value_type === 'text' ? raw : numeric
+    setBusyKeys((prev) => new Set(prev).add(setting.key))
+    setRowFeedback(setting.key, null)
+    try {
+      const saved = await updateSystemSetting(setting.key, value)
+      setSettings((prev) => prev.map((s) => (s.key === setting.key ? saved : s)))
+      setDrafts((prev) => ({ ...prev, [setting.key]: String(saved.value) }))
+      setRowFeedback(setting.key, { kind: 'success', message: saved.message })
+    } catch (err) {
+      if (onApiError(err)) return
+      setRowFeedback(setting.key, {
+        kind: 'error',
+        message: err instanceof Error ? err.message : 'Die System-Einstellung konnte nicht gespeichert werden.',
+      })
+    } finally {
+      setBusyKeys((prev) => {
+        const next = new Set(prev)
+        next.delete(setting.key)
+        return next
+      })
+    }
+  }
+
+  return (
+    <>
+      {loadError && (
+        <p role="alert" className={styles.feedbackError}>
+          {loadError}
+        </p>
+      )}
+
+      {!loaded ? (
+        <div className={styles.skeleton} aria-busy="true" aria-label="System-Einstellungen werden geladen">
+          <div className={styles.skeletonRow} aria-hidden="true" />
+          <div className={styles.skeletonRow} aria-hidden="true" />
+        </div>
+      ) : settings.length === 0 ? (
+        <p role="status" className={styles.warning}>
+          Keine System-Einstellungen vorhanden.
+        </p>
+      ) : (
+        <table className={styles.systemTable} aria-label="System-Einstellungen">
+          <thead>
+            <tr>
+              <th scope="col" className={styles.systemTh}>
+                Einstellung
+              </th>
+              <th scope="col" className={styles.systemTh}>
+                Aktueller Wert
+              </th>
+              <th scope="col" className={styles.systemTh}>
+                Neuer Wert
+              </th>
+              <th scope="col" className={styles.systemTh}>
+                <span className={styles.visuallyHidden}>Info</span>
+              </th>
+            </tr>
+          </thead>
+          <tbody>
+            {settings.map((setting) => {
+              const meta = SYSTEM_SETTING_META[setting.key] ?? { label: setting.key, help: '' }
+              const busy = busyKeys.has(setting.key)
+              const rowFeedback = feedback[setting.key]
+              return (
+                <tr key={setting.key} className={styles.systemRow}>
+                  <td className={styles.systemCell}>
+                    <span className={styles.systemName}>{meta.label}</span>
+                    <span className={styles.systemKey}>{setting.key}</span>
+                  </td>
+                  <td className={styles.systemCell}>
+                    <span className={styles.systemValue}>{formatCurrentValue(setting)}</span>
+                  </td>
+                  <td className={styles.systemCell}>
+                    <div className={styles.systemEdit}>
+                      <label className={styles.visuallyHidden} htmlFor={`setting-${setting.key}`}>
+                        {meta.label} bearbeiten
+                      </label>
+                      {setting.value_type === 'text' ? (
+                        <input
+                          id={`setting-${setting.key}`}
+                          className={styles.input}
+                          value={drafts[setting.key] ?? String(setting.value)}
+                          disabled={busy}
+                          onChange={(e) => {
+                            setDrafts((prev) => ({ ...prev, [setting.key]: e.target.value }))
+                            setRowFeedback(setting.key, null)
+                          }}
+                          maxLength={64}
+                          autoComplete="off"
+                        />
+                      ) : (
+                        <input
+                          id={`setting-${setting.key}`}
+                          className={styles.input}
+                          type="number"
+                          min={0}
+                          step={1}
+                          value={drafts[setting.key] ?? String(setting.value)}
+                          disabled={busy}
+                          onChange={(e) => {
+                            setDrafts((prev) => ({ ...prev, [setting.key]: e.target.value }))
+                            setRowFeedback(setting.key, null)
+                          }}
+                        />
+                      )}
+                      {setting.value_type === 'duration' && (
+                        <span className={styles.hint}>in Sekunden</span>
+                      )}
+                      {rowFeedback && (
+                        <p
+                          role={rowFeedback.kind === 'error' ? 'alert' : 'status'}
+                          className={rowFeedback.kind === 'error' ? styles.systemFeedbackError : styles.systemFeedbackSuccess}
+                        >
+                          {rowFeedback.message}
+                        </p>
+                      )}
+                    </div>
+                  </td>
+                  <td className={styles.systemCell}>
+                    <div className={styles.systemActions}>
+                      <InfoPopup title={meta.label} description={meta.help} />
+                      <button
+                        type="button"
+                        className={styles.rowButton}
+                        disabled={busy}
+                        onClick={() => void saveRow(setting)}
+                      >
+                        {busy ? 'Speichert...' : 'Speichern'}
+                      </button>
+                    </div>
+                  </td>
+                </tr>
+              )
+            })}
+          </tbody>
+        </table>
       )}
     </>
   )
