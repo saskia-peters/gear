@@ -105,6 +105,42 @@ function submitErrorResponse(status: number, message: string) {
   return { ok: false, status, json: async () => ({ error: { code: 'error', message } }) }
 }
 
+// checklistSubmitOkResponse is a server-authoritative 200 CHECKLIST submit
+// response (Story 5.5 contract, consumed by the confirmation): the persisted
+// record carries the per-item snapshot (label/position/results) plus the
+// overall result, and the derived status drives the OOS consequence.
+// overall_result and status.status are INDEPENDENT — the confirmation must
+// follow the response, not the local chips.
+function checklistSubmitOkResponse(
+  overallResult: 'pass' | 'fail',
+  status: 'oos' | 'red' | 'orange' | 'green',
+  items: Array<{ item_id: string; label: string; result: 'pass' | 'fail' }>,
+) {
+  return {
+    ok: true,
+    status: 200,
+    json: async () => ({
+      inspection: {
+        id: 'insp-1',
+        tool_id: 'id-w1',
+        inspector_id: 'user-1',
+        mode: 'checklist',
+        overall_result: overallResult,
+        notes: '',
+        submitted_at: '2026-09-14T10:00:00Z',
+        items: items.map((item, index) => ({
+          id: `insp-item-${index + 1}`,
+          item_id: item.item_id,
+          label: item.label,
+          position: index + 1,
+          result: item.result,
+        })),
+      },
+      status: { status, next_due: status === 'oos' || status === 'red' ? null : '2027-09-14T10:00:00Z' },
+    }),
+  }
+}
+
 describe('InspectionPage data loading (Story 5.1)', () => {
   beforeEach(() => {
     localStorage.clear()
@@ -265,6 +301,18 @@ describe('InspectionPage UX foundation (Story 5.2)', () => {
       inspection_mode: 'checklist',
       checklist_items: checklistItemsFixture(),
     },
+  }
+
+  // answerAllPass marks every checklist item as passed via the per-item chips
+  // (the fixture is the 3-item checklist; state-path render is synchronous, so
+  // getByRole works without awaiting).
+  function answerAllPass() {
+    const kabel = within(screen.getByRole('group', { name: 'Kabel' }))
+    const bohrfutter = within(screen.getByRole('group', { name: 'Bohrfutter' }))
+    const schalter = within(screen.getByRole('group', { name: 'Sicherheitsschalter' }))
+    fireEvent.click(kabel.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    fireEvent.click(bohrfutter.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    fireEvent.click(schalter.getByRole('radio', { name: 'OK/BESTANDEN' }))
   }
 
   it('RENDER: shows the single-screen content — header (name + identifier + type + mode), chips and submit', async () => {
@@ -586,8 +634,18 @@ describe('InspectionPage UX foundation (Story 5.2)', () => {
     expect(button).toBeDisabled()
   })
 
-  it('CHECKLIST_SUBMIT_ALL_PASS: one submit with every item passed → "BESTANDEN" confirmation, then auto-return', async () => {
+  it('CHECKLIST_SUBMIT_ALL_PASS: one submit with every item passed posts the real checklist payload and confirms "BESTANDEN" from the server, then auto-returns', async () => {
     vi.useFakeTimers()
+    // Story 5.5: the checklist submit POSTs the per-item results + the derived
+    // overall result to the real endpoint; the server returns the derived
+    // status that drives the confirmation.
+    const fetchMock = stubFetch(
+      checklistSubmitOkResponse('pass', 'green', [
+        { item_id: 'item-1', label: 'Kabel', result: 'pass' },
+        { item_id: 'item-2', label: 'Bohrfutter', result: 'pass' },
+        { item_id: 'item-3', label: 'Sicherheitsschalter', result: 'pass' },
+      ]),
+    )
     renderLoaded(CHECKLIST_ENTRY)
     // State-path render is synchronous — the per-item groups exist immediately
     // (findBy* would poll on a fake timer and hang, so getBy* is used here).
@@ -602,10 +660,28 @@ describe('InspectionPage UX foundation (Story 5.2)', () => {
     fireEvent.click(button)
     await act(async () => {})
 
+    // The real client POSTs { mode: 'checklist', result, notes, items: the
+    // type's checklist with each item's result } to
+    // /api/v1/tools/{id}/inspection (FR-12: per-item + overall result persisted).
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/v1/tools/id-w1/inspection')
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(init.body as string)).toEqual({
+      mode: 'checklist',
+      result: 'pass',
+      notes: '',
+      items: [
+        { item_id: 'item-1', result: 'pass' },
+        { item_id: 'item-2', result: 'pass' },
+        { item_id: 'item-3', result: 'pass' },
+      ],
+    })
+
     const status = screen.getByRole('status')
     expect(status).toHaveTextContent(/Bohrmaschine-01/)
     expect(status).toHaveTextContent(/BESTANDEN/)
     expect(status).not.toHaveTextContent(/NICHT BESTANDEN/)
+    expect(status).not.toHaveTextContent(/Außer Betrieb/)
     expect(status).toHaveTextContent(/gespeichert/)
 
     await act(async () => {
@@ -614,8 +690,18 @@ describe('InspectionPage UX foundation (Story 5.2)', () => {
     expect(screen.getByText('Dashboard')).toBeInTheDocument()
   })
 
-  it('CHECKLIST_SUBMIT_SOME_FAILED: a checklist with failed items confirms the failure COUNT ("2 von 3 Punkten NICHT BESTANDEN")', async () => {
+  it('CHECKLIST_SUBMIT_SOME_FAILED: a checklist with failed items posts result fail and confirms the SERVER failure count + the OOS consequence', async () => {
     vi.useFakeTimers()
+    // Story 5.5: the server persists the per-item results, derives oos from the
+    // failed items (FR-14/AD-4) and returns it — the confirmation names the
+    // SERVER count + consequence, not the local chips.
+    const fetchMock = stubFetch(
+      checklistSubmitOkResponse('fail', 'oos', [
+        { item_id: 'item-1', label: 'Kabel', result: 'pass' },
+        { item_id: 'item-2', label: 'Bohrfutter', result: 'fail' },
+        { item_id: 'item-3', label: 'Sicherheitsschalter', result: 'fail' },
+      ]),
+    )
     renderLoaded(CHECKLIST_ENTRY)
     // State-path render is synchronous — see CHECKLIST_SUBMIT_ALL_PASS.
     const kabel = within(screen.getByRole('group', { name: 'Kabel' }))
@@ -628,10 +714,286 @@ describe('InspectionPage UX foundation (Story 5.2)', () => {
     fireEvent.click(screen.getByRole('button', { name: 'Prüfung speichern' }))
     await act(async () => {})
 
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/v1/tools/id-w1/inspection')
+    const body = JSON.parse(init.body as string)
+    expect(body.mode).toBe('checklist')
+    expect(body.result).toBe('fail')
+    expect(body.items).toEqual([
+      { item_id: 'item-1', result: 'pass' },
+      { item_id: 'item-2', result: 'fail' },
+      { item_id: 'item-3', result: 'fail' },
+    ])
+
     const status = screen.getByRole('status')
     expect(status).toHaveTextContent(/2 von 3 Punkten NICHT BESTANDEN/)
+    expect(status).toHaveTextContent(/⛔ Wird als Außer Betrieb gesperrt/)
     expect(status).toHaveTextContent(/Bohrmaschine-01/)
     expect(status).toHaveTextContent(/gespeichert/)
+  })
+
+  it('CHECK_SUBMIT_INCOMPLETE: an unanswered item blocks the submit — the real client is never called (FR-12)', async () => {
+    const fetchMock = stubFetch({ ok: true, status: 200, json: async () => ({}) })
+    renderLoaded(CHECKLIST_ENTRY)
+    await screen.findByRole('group', { name: 'Kabel' })
+    const kabel = within(screen.getByRole('group', { name: 'Kabel' }))
+    const bohrfutter = within(screen.getByRole('group', { name: 'Bohrfutter' }))
+    // 2 of 3 answered → the button is disabled, a click is a no-op.
+    fireEvent.click(kabel.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    fireEvent.click(bohrfutter.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    const button = screen.getByRole('button', { name: 'Prüfung speichern' })
+    expect(button).toBeDisabled()
+    fireEvent.click(button)
+    await act(async () => {})
+    // Nothing is persisted: the real endpoint was never hit.
+    expect(fetchMock).not.toHaveBeenCalled()
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+  })
+
+  it('CHECK_ALLE_BESTANDEN: the "Alle bestanden" shortcut sets EVERY item to pass, enables the submit, stays per-item editable, and submits an all-pass payload (FR-12/UX-DR7)', async () => {
+    const fetchMock = stubFetch(
+      checklistSubmitOkResponse('pass', 'green', [
+        { item_id: 'item-1', label: 'Kabel', result: 'pass' },
+        { item_id: 'item-2', label: 'Bohrfutter', result: 'pass' },
+        { item_id: 'item-3', label: 'Sicherheitsschalter', result: 'pass' },
+      ]),
+    )
+    renderLoaded(CHECKLIST_ENTRY)
+    await screen.findByRole('group', { name: 'Kabel' })
+    const kabel = within(screen.getByRole('group', { name: 'Kabel' }))
+    const bohrfutter = within(screen.getByRole('group', { name: 'Bohrfutter' }))
+    const schalter = within(screen.getByRole('group', { name: 'Sicherheitsschalter' }))
+    const button = screen.getByRole('button', { name: 'Prüfung speichern' })
+    expect(button).toBeDisabled()
+
+    fireEvent.click(screen.getByRole('button', { name: 'Alle bestanden' }))
+
+    // Every item is now marked passed → the submit enables (all-items rule).
+    expect(kabel.getByRole('radio', { name: 'OK/BESTANDEN' })).toBeChecked()
+    expect(bohrfutter.getByRole('radio', { name: 'OK/BESTANDEN' })).toBeChecked()
+    expect(schalter.getByRole('radio', { name: 'OK/BESTANDEN' })).toBeChecked()
+    expect(button).toBeEnabled()
+
+    // It is a convenience, not a gate: per-item answers stay editable.
+    fireEvent.click(bohrfutter.getByRole('radio', { name: 'FEHLER/NICHT BESTANDEN' }))
+    expect(bohrfutter.getByRole('radio', { name: 'FEHLER/NICHT BESTANDEN' })).toBeChecked()
+    expect(kabel.getByRole('radio', { name: 'OK/BESTANDEN' })).toBeChecked()
+
+    // Re-mark everything passed and submit → the posted payload is the
+    // all-pass checklist (mode checklist, result pass, every item pass).
+    fireEvent.click(bohrfutter.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    fireEvent.click(button)
+    await act(async () => {})
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/v1/tools/id-w1/inspection')
+    expect(JSON.parse(init.body as string)).toEqual({
+      mode: 'checklist',
+      result: 'pass',
+      notes: '',
+      items: [
+        { item_id: 'item-1', result: 'pass' },
+        { item_id: 'item-2', result: 'pass' },
+        { item_id: 'item-3', result: 'pass' },
+      ],
+    })
+    expect(screen.getByRole('status')).toHaveTextContent(/BESTANDEN/)
+  })
+
+  it('CHECK_ALLE_BESTANDEN_HIDDEN: the "Alle bestanden" shortcut renders ONLY in checklist mode', async () => {
+    renderLoaded() // pass_fail entry
+    await screen.findByRole('group', { name: 'Ergebnis' })
+    expect(screen.queryByRole('button', { name: 'Alle bestanden' })).not.toBeInTheDocument()
+  })
+
+  it('CHECK_SUBMIT_400: a checklist validation 400 shows the German reason inline (role=alert) with NO confirmation and NO navigation', async () => {
+    stubFetch({
+      ok: false,
+      status: 400,
+      json: async () => ({ error: { code: 'invalid_request', message: 'Die Prüfpunkte stimmen nicht mit dem Gerätetyp überein.' } }),
+    })
+    renderLoaded(CHECKLIST_ENTRY)
+    await screen.findByRole('group', { name: 'Kabel' })
+    answerAllPass()
+    const button = screen.getByRole('button', { name: 'Prüfung speichern' })
+    fireEvent.click(button)
+    await act(async () => {})
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Die Prüfpunkte stimmen nicht mit dem Gerätetyp überein.')
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(screen.queryByText('Dashboard')).not.toBeInTheDocument()
+    expect(button).toBeEnabled()
+  })
+
+  it('CHECK_SUBMIT_401: a 401 on a checklist submit clears auth state and redirects to /login', async () => {
+    stubFetch({
+      ok: false,
+      status: 401,
+      json: async () => ({ error: { code: 'unauthorized', message: 'Authentifizierung erforderlich.' } }),
+    })
+    renderLoaded(CHECKLIST_ENTRY)
+    await screen.findByRole('group', { name: 'Kabel' })
+    answerAllPass()
+    fireEvent.click(screen.getByRole('button', { name: 'Prüfung speichern' }))
+    await act(async () => {})
+
+    expect(await screen.findByText('Anmeldung')).toBeInTheDocument()
+    expect(localStorage.getItem('gear.session_token')).toBeNull()
+  })
+
+  it('CHECK_SUBMIT_403_OOS_TOOL: a checklist submit on an OOS tool answers 403 with nothing persisted (Story 5.6)', async () => {
+    stubFetch({
+      ok: false,
+      status: 403,
+      json: async () => ({ error: { code: 'forbidden', message: 'Das Werkzeug ist außer Betrieb und kann nicht geprüft werden.' } }),
+    })
+    renderLoaded(CHECKLIST_ENTRY)
+    await screen.findByRole('group', { name: 'Kabel' })
+    answerAllPass()
+    const button = screen.getByRole('button', { name: 'Prüfung speichern' })
+    fireEvent.click(button)
+    await act(async () => {})
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Das Werkzeug ist außer Betrieb und kann nicht geprüft werden.')
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(screen.queryByText('Dashboard')).not.toBeInTheDocument()
+    expect(button).toBeEnabled()
+  })
+
+  it('CHECK_SUBMIT_500: a 500 on a checklist submit shows the German inline error with no confirmation, and the controls re-enable', async () => {
+    stubFetch(submitErrorResponse(500, 'Ein interner Fehler ist aufgetreten.'))
+    renderLoaded(CHECKLIST_ENTRY)
+    await screen.findByRole('group', { name: 'Kabel' })
+    answerAllPass()
+    const button = screen.getByRole('button', { name: 'Prüfung speichern' })
+    fireEvent.click(button)
+    await act(async () => {})
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Ein interner Fehler ist aufgetreten.')
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(screen.queryByText('Dashboard')).not.toBeInTheDocument()
+    expect(button).toBeEnabled()
+  })
+
+  it('CHECKLIST_OUTCOME_FROM_SERVER_RECORD: the checklist confirmation names the SERVER-persisted count, not the local chips (Story 5.5)', async () => {
+    vi.useFakeTimers()
+    // The user tapped ALL PASS locally, but the server persisted a FAIL (the
+    // record is authoritative) → the confirmation must name the server count.
+    stubFetch(
+      checklistSubmitOkResponse('fail', 'oos', [
+        { item_id: 'item-1', label: 'Kabel', result: 'pass' },
+        { item_id: 'item-2', label: 'Bohrfutter', result: 'fail' },
+        { item_id: 'item-3', label: 'Sicherheitsschalter', result: 'fail' },
+      ]),
+    )
+    renderLoaded(CHECKLIST_ENTRY)
+    // State-path render is synchronous — see CHECKLIST_SUBMIT_ALL_PASS.
+    answerAllPass()
+    fireEvent.click(screen.getByRole('button', { name: 'Prüfung speichern' }))
+    await act(async () => {})
+
+    const status = screen.getByRole('status')
+    expect(status).toHaveTextContent(/Ergebnis: 2 von 3 Punkten NICHT BESTANDEN/)
+    expect(status).not.toHaveTextContent(/Ergebnis: BESTANDEN/)
+  })
+
+  it('OOS_CONSEQUENCE_CHECKLIST_SERVER_DRIVEN: the checklist consequence follows the SERVER status, never the local chips — a failed checklist whose response says green names the failure count but NO OOS copy (AD-4/AD-5)', async () => {
+    vi.useFakeTimers()
+    // The user marked an item FAIL locally, but the response status is green
+    // (the server is authoritative — a naive client guess must never gate the
+    // consequence). The confirmation still names the server failure count but
+    // omits the OOS sentence.
+    stubFetch(
+      checklistSubmitOkResponse('fail', 'green', [
+        { item_id: 'item-1', label: 'Kabel', result: 'pass' },
+        { item_id: 'item-2', label: 'Bohrfutter', result: 'fail' },
+        { item_id: 'item-3', label: 'Sicherheitsschalter', result: 'pass' },
+      ]),
+    )
+    renderLoaded(CHECKLIST_ENTRY)
+    // State-path render is synchronous — see CHECKLIST_SUBMIT_ALL_PASS.
+    const kabel = within(screen.getByRole('group', { name: 'Kabel' }))
+    const bohrfutter = within(screen.getByRole('group', { name: 'Bohrfutter' }))
+    const schalter = within(screen.getByRole('group', { name: 'Sicherheitsschalter' }))
+    fireEvent.click(kabel.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    fireEvent.click(bohrfutter.getByRole('radio', { name: 'FEHLER/NICHT BESTANDEN' }))
+    fireEvent.click(schalter.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Prüfung speichern' }))
+    await act(async () => {})
+
+    const status = screen.getByRole('status')
+    expect(status).toHaveTextContent(/1 von 3 Punkten NICHT BESTANDEN/)
+    expect(status).not.toHaveTextContent(/Außer Betrieb/)
+  })
+
+  it('CHECKLIST_CONTROLS_DISABLED: after a successful checklist submit every per-item chip and the "Alle bestanden" button are disabled, so the recorded results cannot diverge from the confirmation', async () => {
+    stubFetch(
+      checklistSubmitOkResponse('pass', 'green', [
+        { item_id: 'item-1', label: 'Kabel', result: 'pass' },
+        { item_id: 'item-2', label: 'Bohrfutter', result: 'pass' },
+        { item_id: 'item-3', label: 'Sicherheitsschalter', result: 'pass' },
+      ]),
+    )
+    renderLoaded(CHECKLIST_ENTRY)
+    await screen.findByRole('group', { name: 'Kabel' })
+    answerAllPass()
+    fireEvent.click(screen.getByRole('button', { name: 'Prüfung speichern' }))
+    await act(async () => {})
+
+    // All per-item radios (pass + fail for each of the 3 items) are locked.
+    const radios = screen.getAllByRole('radio')
+    expect(radios).toHaveLength(6)
+    for (const radio of radios) {
+      expect(radio).toBeDisabled()
+    }
+    // The "Alle bestanden" shortcut locks too (the submit button lock is
+    // already asserted by the checklist submit tests).
+    expect(screen.getByRole('button', { name: 'Alle bestanden' })).toBeDisabled()
+  })
+
+  it('CHECK_SUBMIT_NOTES: a non-empty Anmerkung travels in the checklist POST body as notes', async () => {
+    const fetchMock = stubFetch(
+      checklistSubmitOkResponse('pass', 'green', [
+        { item_id: 'item-1', label: 'Kabel', result: 'pass' },
+        { item_id: 'item-2', label: 'Bohrfutter', result: 'pass' },
+        { item_id: 'item-3', label: 'Sicherheitsschalter', result: 'pass' },
+      ]),
+    )
+    renderLoaded(CHECKLIST_ENTRY)
+    await screen.findByRole('group', { name: 'Kabel' })
+    fireEvent.change(screen.getByLabelText('Anmerkung (optional)'), {
+      target: { value: 'Ölstand geprüft, auffällige Geräusche.' },
+    })
+    answerAllPass()
+    fireEvent.click(screen.getByRole('button', { name: 'Prüfung speichern' }))
+    await act(async () => {})
+
+    const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe('/api/v1/tools/id-w1/inspection')
+    const body = JSON.parse(init.body as string)
+    expect(body.mode).toBe('checklist')
+    expect(body.notes).toBe('Ölstand geprüft, auffällige Geräusche.')
+    // The submit succeeded → the confirmation renders.
+    expect(screen.getByRole('status')).toHaveTextContent(/gespeichert/)
+  })
+
+  it('CHECK_SUBMIT_INVALID_SERVER_RESPONSE: a 200 whose record lacks the consumed fields (no items) shows "Ungültige Serverantwort." instead of confirming', async () => {
+    stubFetch({
+      ok: true,
+      status: 200,
+      json: async () => ({ inspection: { id: 'x', overall_result: 'fail' }, status: { status: 'oos' } }),
+    })
+    renderLoaded(CHECKLIST_ENTRY)
+    await screen.findByRole('group', { name: 'Kabel' })
+    answerAllPass()
+    const button = screen.getByRole('button', { name: 'Prüfung speichern' })
+    fireEvent.click(button)
+    await act(async () => {})
+
+    expect(screen.getByRole('alert')).toHaveTextContent('Ungültige Serverantwort.')
+    expect(screen.queryByRole('status')).not.toBeInTheDocument()
+    expect(screen.queryByText('Dashboard')).not.toBeInTheDocument()
+    expect(button).toBeEnabled()
   })
 
   it('OOS_CONSEQUENCE_FAIL: a failing pass_fail submit names the OOS consequence from the SERVER-derived status (Story 5.4, UX-DR6/DR8)', async () => {
@@ -915,26 +1277,44 @@ describe('InspectionPage UX foundation (Story 5.2)', () => {
     expect(button).toBeEnabled()
   })
 
-  it('OOS_CONSEQUENCE_CHECKLIST_FAIL: a checklist with a failed item names the OOS consequence; an all-pass checklist does not', async () => {
+  it('OOS_CONSEQUENCE_CHECKLIST: the checklist consequence follows the SERVER-derived status — a failed submit names "⛔ Wird als Außer Betrieb gesperrt.", an all-pass submit does not (FR-14/AD-4)', async () => {
     vi.useFakeTimers()
+    // Story 5.5: the consequence comes from the RESPONSE status (the server
+    // derives OOS from the failed items + the full history), never a local
+    // guess.
+    stubFetch(
+      checklistSubmitOkResponse('fail', 'oos', [
+        { item_id: 'item-1', label: 'Kabel', result: 'pass' },
+        { item_id: 'item-2', label: 'Bohrfutter', result: 'fail' },
+        { item_id: 'item-3', label: 'Sicherheitsschalter', result: 'pass' },
+      ]),
+    )
     renderLoaded(CHECKLIST_ENTRY)
     // State-path render is synchronous — see CHECKLIST_SUBMIT_ALL_PASS.
     const kabel = within(screen.getByRole('group', { name: 'Kabel' }))
     const bohrfutter = within(screen.getByRole('group', { name: 'Bohrfutter' }))
     const schalter = within(screen.getByRole('group', { name: 'Sicherheitsschalter' }))
 
-    // One failed item → the consequence is named (FR-14: any failed item
-    // flips the tool OOS).
+    // One failed item → the server derives oos and the consequence is named
+    // (FR-14: any failed item flips the tool OOS).
     fireEvent.click(kabel.getByRole('radio', { name: 'OK/BESTANDEN' }))
     fireEvent.click(bohrfutter.getByRole('radio', { name: 'FEHLER/NICHT BESTANDEN' }))
     fireEvent.click(schalter.getByRole('radio', { name: 'OK/BESTANDEN' }))
     fireEvent.click(screen.getByRole('button', { name: 'Prüfung speichern' }))
     await act(async () => {})
+    expect(screen.getByRole('status')).toHaveTextContent(/1 von 3 Punkten NICHT BESTANDEN/)
     expect(screen.getByRole('status')).toHaveTextContent(/⛔ Wird als Außer Betrieb gesperrt/)
 
-    // All items pass → no consequence (the tool stays in service).
+    // All items pass → the server returns green → no consequence.
     cleanup()
     vi.clearAllTimers()
+    stubFetch(
+      checklistSubmitOkResponse('pass', 'green', [
+        { item_id: 'item-1', label: 'Kabel', result: 'pass' },
+        { item_id: 'item-2', label: 'Bohrfutter', result: 'pass' },
+        { item_id: 'item-3', label: 'Sicherheitsschalter', result: 'pass' },
+      ]),
+    )
     renderLoaded(CHECKLIST_ENTRY)
     const kabel2 = within(screen.getByRole('group', { name: 'Kabel' }))
     const bohrfutter2 = within(screen.getByRole('group', { name: 'Bohrfutter' }))

@@ -327,24 +327,24 @@ export async function startInspection(toolId: string): Promise<InspectionStart> 
 }
 
 // ============================================================================
-// Inspection submit (Story 5.4, FR-13/AD-4): the real pass_fail record call.
-// The server persists identity/timestamp/result/notes (FR-13/AD-4) and derives
-// the status from the full inspection + reinstatement history (AD-4/AD-5) — the
-// confirmation names the OOS consequence ONLY from the returned status, never a
-// client guess: a passing inspection does NOT clear OOS (reinstatement is the
-// sole exit, FR-15), so the server's derived status is authoritative. Checklist
-// mode stays on the placeholder seam until Story 5.5 (the `items` contract
-// exists now so 5.5 wires it without a type change).
+// Inspection submit (Story 5.4 + 5.5, FR-12/FR-13/AD-4): the real inspection
+// record call. A pass_fail submit (5.4) posts the overall result + optional
+// notes; a checklist submit (5.5) posts the per-item results + the DERIVED
+// overall result. The server persists identity/timestamp/result/notes and the
+// per-item snapshot (FR-12/FR-13/AD-4) and derives the status from the full
+// inspection + reinstatement history (AD-4/AD-5) — the confirmation names the
+// OOS consequence ONLY from the returned status, never a client guess: a
+// passing inspection does NOT clear OOS (reinstatement is the sole exit,
+// FR-15), so the server's derived status is authoritative.
 // ============================================================================
 
 // InspectionResult is an inspection outcome (FR-12/FR-13), mirroring the
 // server's pass|fail values verbatim.
 export type InspectionResult = 'pass' | 'fail'
 
-// InspectionItemSubmitInput is one checklist item of the submit body (Story 5.4
-// contract; checklist wiring is Story 5.5): the type checklist item's id + the
-// per-item result. The label/position SNAPSHOT is server-side only — the client
-// never carries the item text.
+// InspectionItemSubmitInput is one checklist item of the submit body: the type
+// checklist item's id + the per-item result. The label/position SNAPSHOT is
+// server-side only — the client never carries the item text.
 export interface InspectionItemSubmitInput {
   item_id: string
   result: InspectionResult
@@ -353,7 +353,7 @@ export interface InspectionItemSubmitInput {
 // InspectionSubmitInput is the POST /api/v1/tools/{id}/inspection body
 // (mirrors the server DTO). A pass_fail inspection carries the overall result +
 // optional notes and an EMPTY items array (the server rejects provided items);
-// a checklist inspection (5.5) carries one entry PER type checklist item.
+// a checklist inspection (Story 5.5) carries one entry PER type checklist item.
 export interface InspectionSubmitInput {
   mode: InspectionMode
   result: InspectionResult
@@ -413,18 +413,6 @@ export async function submitInspection(toolId: string, input: InspectionSubmitIn
     headers: authTokenHeaders(),
     body: JSON.stringify(input),
   })) as InspectionSubmitResult
-}
-
-// submitInspectionPlaceholder is the Story 5.2 UX PLACEHOLDER seam. Story 5.4
-// wired the pass_fail submit to the real submitInspection; the checklist
-// surface keeps this placeholder until Story 5.5 wires it (+ "Alle bestanden").
-// Story 5.5 must also derive the checklist OVERALL result before calling the
-// client — `failedCount > 0 ? 'fail' : 'pass'` — the `result` field of the
-// body is already mandatory, so no type change is needed.
-// Deliberately NO fetch to a nonexistent endpoint. Kept async so the submit
-// button has a real in-flight window for the double-submit guard.
-export async function submitInspectionPlaceholder(): Promise<void> {
-  await Promise.resolve()
 }
 
 // ============================================================================

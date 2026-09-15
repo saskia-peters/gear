@@ -4,10 +4,12 @@ import { Header } from '../components/Header.tsx'
 import { PassFailChips } from '../components/PassFailChips.tsx'
 import type { PassFailValue } from '../components/PassFailChips.tsx'
 import { clearAuthState } from '../auth/authState.ts'
-import { startInspection, submitInspection, submitInspectionPlaceholder } from '../auth/tools.ts'
+import { startInspection, submitInspection } from '../auth/tools.ts'
 import type {
   InspectionResult,
   InspectionStart,
+  InspectionSubmitInput,
+  InspectionSubmitItem,
   InspectionSubmitStatus,
   ToolTypeChecklistItem,
 } from '../auth/tools.ts'
@@ -76,15 +78,18 @@ interface InspectionState {
 // failed submit (400/403/404/500/network) shows an inline German role=alert
 // with NO navigation/confirmation; 401 clears auth and redirects to /login.
 //
-// MODE-AWARE (user decision — the checklist surface ships NOW, not in 5.5): a
-// checklist-mode type renders ONE PassFailChips group PER checklist item; the
-// submit requires EVERY item answered (FR-12) and the confirmation names the
-// count of failed items ("2 von 3 Punkten NICHT BESTANDEN") or overall
-// BESTANDEN when all pass. In 5.4 the checklist submit stays on the UX
-// PLACEHOLDER seam (no fetch — the consequence is locally derived); Story 5.5
-// wires it to the same endpoint (+ "Alle bestanden"). Every other mode —
-// pass_fail, a missing or unknown one — renders the SINGLE pass/fail toggle
-// (the safe default).
+// MODE-AWARE (user decision — the checklist surface ships with the 5.2
+// foundation, wired in Story 5.5): a checklist-mode type renders ONE
+// PassFailChips group PER checklist item; the submit requires EVERY item
+// answered (FR-12) and posts the per-item results + the derived overall result
+// to the SAME endpoint (FR-12, 5.5). The "Alle bestanden" shortcut (FR-12/
+// UX-DR7) marks every item passed in one tap — a convenience, not a gate:
+// per-item chips stay editable. The checklist confirmation names the
+// SERVER-persisted outcome — the failure count from the returned per-item
+// snapshot ("2 von 3 Punkten NICHT BESTANDEN") or BESTANDEN — and the OOS
+// consequence ONLY from the returned status (a failed item → OOS, FR-14/AD-4).
+// Every other mode — pass_fail, a missing or unknown one — renders the SINGLE
+// pass/fail toggle (the safe default).
 //
 // Data comes from the eligible /start response, which the dashboard navigates
 // here with as router state. On a refresh / deep link the state is GONE, so the
@@ -123,18 +128,22 @@ export function InspectionPage() {
   const [submitting, setSubmitting] = useState(false)
   const [submitted, setSubmitted] = useState(false)
   // serverStatus is the SERVER-authoritative derived status of the last
-  // successful pass_fail submit (Story 5.4, AD-4/AD-5): the confirmation names
-  // the OOS consequence ONLY from status.status === 'oos'. A passing inspection
+  // successful submit (Story 5.4/5.5, AD-4/AD-5): the confirmation names the
+  // OOS consequence ONLY from status.status === 'oos'. A passing inspection
   // does NOT clear OOS — reinstatement is the sole exit (FR-15), so the
   // server's derived status (which sees the full history) is authoritative,
-  // never a local result guess. Checklist mode keeps the local consequence
-  // until Story 5.5.
+  // never a local result guess. Both modes consume it (5.5 wired checklist).
   const [serverStatus, setServerStatus] = useState<InspectionSubmitStatus | null>(null)
   // serverOutcome is the server-PERSISTED overall result of the last successful
-  // pass_fail submit (Story 5.4, FR-13): the confirmation names the outcome
-  // from inspection.overall_result, not the local chip — the confirmation must
+  // submit (Story 5.4/5.5, FR-12/FR-13): the confirmation names the outcome
+  // from inspection.overall_result, not the local chips — the confirmation must
   // name what was actually recorded.
   const [serverOutcome, setServerOutcome] = useState<InspectionResult | null>(null)
+  // serverChecklistItems is the server-PERSISTED per-item snapshot of the last
+  // successful CHECKLIST submit (Story 5.5, FR-12): the confirmation names the
+  // failure COUNT from the returned items ("N von M Punkten NICHT BESTANDEN") —
+  // never the local pre-submit count.
+  const [serverChecklistItems, setServerChecklistItems] = useState<InspectionSubmitItem[]>([])
   // submitError is the inline German role=alert for a failed submit (Story
   // 5.4): 400/403/404/500/network surface here with NO navigation and NO
   // confirmation — the controls stay enabled for a retry.
@@ -216,16 +225,21 @@ export function InspectionPage() {
   // a meaningless BESTANDEN).
   const canSubmit = modeValue === 'checklist' ? isChecklistComplete : result !== null
   // The confirmation names the recorded outcome (UX-DR7) — always set by the
-  // time submit is possible. A checklist inspection names the count of failed
-  // items ("2 von 3 Punkten NICHT BESTANDEN") or overall BESTANDEN when all
-  // items pass (FR-12). For pass_fail the outcome is the SERVER-PERSISTED
-  // overall_result (Story 5.4): the confirmation names what was recorded, with
-  // the local chip only as the pre-submit fallback.
+  // time submit is possible. After a successful submit the outcome is the
+  // SERVER-PERSISTED record (Story 5.4/5.5): for a checklist the confirmation
+  // names the failure count from the RETURNED per-item snapshot ("2 von 3
+  // Punkten NICHT BESTANDEN") or BESTANDEN; for pass_fail it names the
+  // server-persisted overall_result. The local result/count is only the
+  // pre-submit fallback (it is the blocking signal, never the authority).
   const outcomeLabel =
     modeValue === 'checklist'
-      ? failedCount > 0
-        ? `${failedCount} von ${checklistItems.length} Punkten NICHT BESTANDEN`
-        : 'BESTANDEN'
+      ? serverOutcome !== null
+        ? serverOutcome === 'pass'
+          ? 'BESTANDEN'
+          : `${serverChecklistItems.filter((item) => item.result === 'fail').length} von ${serverChecklistItems.length} Punkten NICHT BESTANDEN`
+        : failedCount > 0
+          ? `${failedCount} von ${checklistItems.length} Punkten NICHT BESTANDEN`
+          : 'BESTANDEN'
       : serverOutcome === 'pass'
         ? 'BESTANDEN'
         : serverOutcome === 'fail'
@@ -235,27 +249,16 @@ export function InspectionPage() {
             : result === 'fail'
               ? 'NICHT BESTANDEN'
               : null
-  // isFailure is the Story 5.3 consequence trigger for CHECKLIST mode (the 5.4
-  // placeholder seam): any failed checklist item makes the tool unsafe. For
-  // PASS_FAIL the consequence is SERVER-driven (serverStatus), so isFailure is
-  // checklist-only — a local result guess is never the OOS authority (AD-4).
-  const isFailure = modeValue === 'checklist' ? failedCount > 0 : false
-  // oosConsequence is the confirmation consequence. Checklist mode (5.4
-  // placeholder) stays locally derived from isFailure; pass_fail uses the
-  // SERVER-authoritative derived status from the submit response — the
-  // confirmation names the OOS consequence ONLY when the server returned
-  // status.status === 'oos'. A passing inspection does NOT clear OOS
-  // (reinstatement is the sole exit, FR-15), so the server's derived status —
-  // which sees the full inspection + reinstatement history — is authoritative,
-  // never a local result guess (AD-4/AD-5).
+  // oosConsequence is the confirmation consequence (Story 5.4/5.5, UX-DR8):
+  // for BOTH modes it is driven by the SERVER-authoritative derived status from
+  // the submit response — the confirmation names the OOS consequence ONLY when
+  // the server returned status.status === 'oos' (a failed checklist item → OOS,
+  // FR-14/AD-4). A passing inspection does NOT clear OOS (reinstatement is the
+  // sole exit, FR-15), so the server's derived status — which sees the full
+  // inspection + reinstatement history — is authoritative, never a local result
+  // guess (AD-4/AD-5).
   const oosConsequence =
-    modeValue === 'checklist'
-      ? isFailure
-        ? `⛔ Wird als ${OOS_STATUS} gesperrt. `
-        : ''
-      : serverStatus?.status === 'oos'
-        ? `⛔ Wird als ${OOS_STATUS} gesperrt. `
-        : ''
+    serverStatus?.status === 'oos' ? `⛔ Wird als ${OOS_STATUS} gesperrt. ` : ''
 
   // handleItemSelect records one checklist item's per-item result (keyed by the
   // item id); re-tapping the selected chip deselects it (null → the key leaves
@@ -272,16 +275,33 @@ export function InspectionPage() {
     })
   }
 
-  // handleSubmit executes the inspection submit (Story 5.4, UX-DR7/DR8):
+  // handleAlleBestanden is the "Alle bestanden" shortcut (Story 5.5, FR-12/
+  // UX-DR7): ONE tap marks EVERY checklist item passed — the fewest-taps path
+  // for a clean tool. It is a convenience, not a gate: per-item chips stay
+  // editable (a re-tap on a chip still deselects it) and the all-items-required
+  // submit rule is unchanged.
+  const handleAlleBestanden = (): void => {
+    if (submitting || submitted) return
+    setItemResults((prev) => {
+      const next = { ...prev }
+      for (const item of checklistItems) {
+        next[item.id] = 'pass'
+      }
+      return next
+    })
+  }
+
+  // handleSubmit executes the inspection submit (Story 5.4/5.5, UX-DR7/DR8):
   //   PASS_FAIL builds the real payload { mode: 'pass_fail', result, notes,
-  //   items: [] } and POSTs it via the real client bound to the URL toolId. A
-  //   200 stores the server-authoritative status + the server-persisted outcome
-  //   and confirms (a malformed body answers an inline error instead); any
-  //   error (400/403/404/500/network) shows an inline German role=alert and does
-  //   NOT navigate or confirm — 401 clears auth + redirects to /login (the
-  //   load-path pattern). CHECKLIST mode (5.4) stays on the UX placeholder: no
-  //   fetch, local consequence — Story 5.5 wires it. The button is disabled
-  //   while it runs AND during the auto-return delay (double-submit guard).
+  //   items: [] }; CHECKLIST builds { mode: 'checklist', result (derived from
+  //   failedCount), notes, items: the type's checklist with each item's result }
+  //   and both POST via the real client bound to the URL toolId. A 200 stores
+  //   the server-authoritative status + the server-persisted outcome and
+  //   confirms (a malformed body answers an inline error instead); any error
+  //   (400/403/404/500/network) shows an inline German role=alert and does NOT
+  //   navigate or confirm — 401 clears auth + redirects to /login (the load-path
+  //   pattern). The button is disabled while it runs AND during the auto-return
+  //   delay (double-submit guard).
   const handleSubmit = async (): Promise<void> => {
     // Defense-in-depth: an incomplete result set can never be submitted (the
     // button is also disabled), keeping an outcome-less save impossible in a
@@ -297,33 +317,55 @@ export function InspectionPage() {
     setSubmitting(true)
     setSubmitError('')
     try {
+      // The route always carries a toolId; the guard is defensive (an
+      // unmappable route never confirms).
+      if (!toolId) {
+        setSubmitError('Die Prüfung konnte nicht gespeichert werden.')
+        return
+      }
+      // The payload mirrors the server contract (FR-12/FR-13): a checklist
+      // inspection carries the per-item results (exactly the type's checklist,
+      // every item answered) plus the DERIVED overall result; a pass_fail
+      // inspection carries the overall result + an EMPTY items array (the
+      // server rejects provided items). The guards above guarantee every field
+      // is set.
+      const input: InspectionSubmitInput =
+        modeValue === 'checklist'
+          ? {
+              mode: 'checklist',
+              result: failedCount > 0 ? 'fail' : 'pass',
+              notes: comment,
+              items: checklistItems.map((item) => ({ item_id: item.id, result: itemResults[item.id] })),
+            }
+          : { mode: 'pass_fail', result: result!, notes: comment, items: [] }
+      const serverResult = await submitInspection(toolId, input)
+      // Response-shape guard: a 200 whose body lacks the record/status — OR
+      // the fields the confirmation consumes (overall_result / status.status) —
+      // must NOT confirm a success; surface the inline error instead. Object
+      // truthiness alone is not enough: a body with only the enclosing objects
+      // must never render a wrong confirmation.
+      if (
+        !serverResult ||
+        !serverResult.status ||
+        !serverResult.inspection ||
+        !serverResult.inspection.overall_result ||
+        !serverResult.status.status
+      ) {
+        setSubmitError('Ungültige Serverantwort.')
+        return
+      }
+      setServerStatus(serverResult.status)
+      setServerOutcome(serverResult.inspection.overall_result)
+      // The checklist confirmation names the failure COUNT from the
+      // server-persisted per-item snapshot (Story 5.5) — never the local
+      // pre-submit count. A non-array items would crash the outcomeLabel
+      // `.filter`, so it must be rejected up front.
       if (modeValue === 'checklist') {
-        // Story 5.4 checklist placeholder: no fetch, no server status — the
-        // local isFailure consequence drives the confirmation (5.5 wires it).
-        await submitInspectionPlaceholder()
-      } else {
-        // The route always carries a toolId; the guard is defensive (an
-        // unmappable route never confirms).
-        if (!toolId) {
-          setSubmitError('Die Prüfung konnte nicht gespeichert werden.')
-          return
-        }
-        // The guard above guarantees a selected result here; TS cannot narrow
-        // `result` through the checklist disjunction, so assert it explicitly.
-        const serverResult = await submitInspection(toolId, {
-          mode: 'pass_fail',
-          result: result!,
-          notes: comment,
-          items: [],
-        })
-        // Response-shape guard: a 200 whose body lacks the record/status must
-        // NOT confirm a success — surface the inline error instead.
-        if (!serverResult || !serverResult.status || !serverResult.inspection) {
+        if (!Array.isArray(serverResult.inspection.items)) {
           setSubmitError('Ungültige Serverantwort.')
           return
         }
-        setServerStatus(serverResult.status)
-        setServerOutcome(serverResult.inspection.overall_result)
+        setServerChecklistItems(serverResult.inspection.items)
       }
       setSubmitted(true)
     } catch (err) {
@@ -399,16 +441,30 @@ export function InspectionPage() {
                     Für diesen Gerätetyp sind keine Prüfpunkte hinterlegt.
                   </p>
                 ) : (
-                  checklistItems.map((item) => (
-                    <PassFailChips
-                      key={item.id}
-                      name={`inspection-item-${item.id}`}
-                      legend={item.label}
-                      selected={itemResults[item.id] ?? null}
-                      onSelect={(value) => handleItemSelect(item.id, value)}
+                  <>
+                    {checklistItems.map((item) => (
+                      <PassFailChips
+                        key={item.id}
+                        name={`inspection-item-${item.id}`}
+                        legend={item.label}
+                        selected={itemResults[item.id] ?? null}
+                        onSelect={(value) => handleItemSelect(item.id, value)}
+                        disabled={submitting || submitted}
+                      />
+                    ))}
+                    {/* The "Alle bestanden" shortcut (Story 5.5, FR-12/UX-DR7):
+                        ONE tap marks EVERY item passed — the fewest-taps path
+                        for a clean tool. A convenience, not a gate: per-item
+                        chips stay editable. */}
+                    <button
+                      type="button"
+                      className={styles.alleBestandenButton}
+                      onClick={handleAlleBestanden}
                       disabled={submitting || submitted}
-                    />
-                  ))
+                    >
+                      Alle bestanden
+                    </button>
+                  </>
                 )
               ) : (
                 <PassFailChips

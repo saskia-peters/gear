@@ -194,6 +194,36 @@
   cursor: not-allowed;
 }
 
+/* The "Alle bestanden" shortcut (Story 5.5, FR-12/UX-DR7): a ≥48px secondary
+   target that marks EVERY checklist item passed in one tap — the fewest-taps
+   path for a clean tool. Disabled while the submit is in flight AND during the
+   auto-return delay (the chips lock at the same time). */
+.alleBestandenButton {
+  min-height: 48px;
+  align-self: flex-start;
+  padding: var(--gear-space-2) var(--gear-space-4);
+  background-color: transparent;
+  color: var(--gear-color-brand);
+  border: 1px solid var(--gear-color-border-hairline);
+  border-radius: var(--gear-radius-md);
+  font-family: var(--gear-font-family);
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  line-height: var(--gear-font-label-line-height);
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.alleBestandenButton:hover:not(:disabled) {
+  background-color: var(--gear-color-surface-base);
+  border-color: var(--gear-color-brand);
+}
+
+.alleBestandenButton:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
 /* The inline post-submit confirmation (Story 5.2, UX-DR7): role="status" so
    screen readers announce it; names the tool + a generic saved consequence. */
 .confirmation {
