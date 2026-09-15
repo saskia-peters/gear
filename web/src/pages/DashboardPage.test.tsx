@@ -1,5 +1,5 @@
 // @vitest-environment jsdom
-import { render, screen, within, cleanup } from '@testing-library/react'
+import { render, screen, within, cleanup, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
 import { MemoryRouter, Routes, Route, useParams, useLocation } from 'react-router-dom'
@@ -514,4 +514,321 @@ describe('DashboardPage color-coded status (Story 6.1, FR-16/AD-4/AD-5)', () => 
     expect(within(statusRegion).getByRole('button', { name: '1 Außer Betrieb' })).toBeInTheDocument()
     expect(within(statusRegion).queryByRole('button', { name: '1 Einsatzbereit' })).not.toBeInTheDocument()
   })
+})
+
+describe('DashboardPage out-of-service reinstatement (Story 5.6, FR-14/AD-4 + FR-15/AD-9)', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    localStorage.setItem('gear.session_token', 'sesstoken123')
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    cleanup()
+  })
+
+  // stubFetchReinstate serves the Werkzeugliste list AND the Story 5.6
+  // reinstatement POST. It records the request bodies so the SPA_DIALOG test
+  // can assert the exact { reason } the dialog collects.
+  function stubFetchReinstate(listBody: unknown, reinstateStatus: number, reinstateBody: unknown = null) {
+    const ok = reinstateStatus >= 200 && reinstateStatus < 300
+    const bodies: Array<{ url: string; body?: Record<string, unknown> }> = []
+    const mock = vi.fn().mockImplementation(async (url: string, init?: RequestInit) => {
+      if (url === DASHBOARD_TOOLS_URL) {
+        return { ok: true, status: 200, json: async () => listBody }
+      }
+      if (url.startsWith(`${DASHBOARD_TOOLS_URL}/`) && url.endsWith('/reinstatement')) {
+        bodies.push({ url, body: init?.body ? (JSON.parse(String(init.body)) as Record<string, unknown>) : undefined })
+        return { ok, status: reinstateStatus, json: async () => reinstateBody }
+      }
+      return { ok: false, status: 404, json: async () => ({ error: { code: 'not_found', message: 'nope' } }) }
+    })
+    vi.stubGlobal('fetch', mock)
+    return { mock, bodies }
+  }
+
+  const oosTool = dashboardToolFixture('id-oos', 'Bohrmaschine-01', 'Bohrmaschine', 'GEAR000001', {
+    status: 'oos',
+    next_due: null,
+  })
+
+  it('SPA_START_DISABLED: an OOS row shows "Außer Betrieb" and its "Prüfung starten" button is DISABLED (OOS is not inspectable)', async () => {
+    stubFetchReinstate([oosTool], 200)
+    renderPage()
+
+    const list = await screen.findByRole('list', { name: 'Werkzeuge' })
+    expect(within(list).getByText('Außer Betrieb')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Prüfung starten für Bohrmaschine-01' })).toBeDisabled()
+  })
+
+  it('SPA_REINSTATE_HOLDER: a tool.reinstate holder sees "Wiederherstellen" on the OOS row', async () => {
+    localStorage.setItem('gear.permissions', JSON.stringify(['dashboard.view', 'inspection.submit', 'tool.reinstate']))
+    stubFetchReinstate([oosTool], 200)
+    renderPage()
+
+    await screen.findByRole('list', { name: 'Werkzeuge' })
+    expect(screen.getByRole('button', { name: 'Wiederherstellen für Bohrmaschine-01' })).toBeInTheDocument()
+    // The start button is still disabled on the OOS row.
+    expect(screen.getByRole('button', { name: 'Prüfung starten für Bohrmaschine-01' })).toBeDisabled()
+  })
+
+  it('SPA_REINSTATE_NONHOLDER: a caller without tool.reinstate never sees the button (the 403 IS the gate, AD-6)', async () => {
+    localStorage.setItem('gear.permissions', JSON.stringify(['dashboard.view', 'inspection.submit']))
+    stubFetchReinstate([oosTool], 200)
+    renderPage()
+
+    const list = await screen.findByRole('list', { name: 'Werkzeuge' })
+    expect(screen.queryByRole('button', { name: /Wiederherstellen/ })).not.toBeInTheDocument()
+    // The row still shows the OOS state chip.
+    expect(within(list).getByText('Außer Betrieb')).toBeInTheDocument()
+  })
+
+  it('SPA_DIALOG: clicking "Wiederherstellen" opens the PromptDialog and the submit carries the TRIMMED reason in the POST body', async () => {
+    const user = userEvent.setup()
+    localStorage.setItem('gear.permissions', JSON.stringify(['tool.reinstate']))
+    const { bodies } = stubFetchReinstate(
+      [oosTool],
+      200,
+      { status: { status: 'green', next_due: '2027-01-01T00:00:00Z' }, message: 'Das Gerät wurde wiederhergestellt.' },
+    )
+    renderPage()
+    await screen.findByRole('list', { name: 'Werkzeuge' })
+
+    await user.click(screen.getByRole('button', { name: 'Wiederherstellen für Bohrmaschine-01' }))
+
+    // The PromptDialog asks for the mandatory reason.
+    const dialog = screen.getByRole('dialog')
+    const input = within(dialog).getByLabelText('Grund für die Wiederherstellung von Bohrmaschine-01')
+    await user.type(input, '  Ersatzteil eingetroffen  ')
+    await user.click(within(dialog).getByRole('button', { name: 'Wiederherstellen' }))
+
+    // The POST body carries the trimmed { reason } to the reinstate endpoint.
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0].url).toBe(`${DASHBOARD_TOOLS_URL}/id-oos/reinstatement`)
+    expect(bodies[0].body).toEqual({ reason: 'Ersatzteil eingetroffen' })
+  })
+
+  it('SPA_DIALOG_EMPTY: submitting the dialog without a reason shows the empty-reason message and sends nothing', async () => {
+    const user = userEvent.setup()
+    localStorage.setItem('gear.permissions', JSON.stringify(['tool.reinstate']))
+    const { bodies } = stubFetchReinstate([oosTool], 200)
+    renderPage()
+    await screen.findByRole('list', { name: 'Werkzeuge' })
+
+    await user.click(screen.getByRole('button', { name: 'Wiederherstellen für Bohrmaschine-01' }))
+    const dialog = screen.getByRole('dialog')
+    await user.click(within(dialog).getByRole('button', { name: 'Wiederherstellen' }))
+
+    expect(within(dialog).getByRole('alert')).toHaveTextContent('Bitte gib einen Grund für die Wiederherstellung an.')
+    expect(bodies).toHaveLength(0)
+  })
+
+  it('SPA_REFRESH: after a successful reinstatement the list refetches and the tool leaves OOS (confirmation shows)', async () => {
+    const user = userEvent.setup()
+    localStorage.setItem('gear.permissions', JSON.stringify(['tool.reinstate']))
+    // The first list fetch shows the tool OOS; the refetch after the reinstate
+    // shows it green (the server derived the new status).
+    let listCall = 0
+    const mock = vi.fn().mockImplementation(async (url: string) => {
+      if (url === DASHBOARD_TOOLS_URL) {
+        listCall += 1
+        if (listCall === 1) {
+          return { ok: true, status: 200, json: async () => [oosTool] }
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [
+            dashboardToolFixture('id-oos', 'Bohrmaschine-01', 'Bohrmaschine', 'GEAR000001', {
+              status: 'green',
+              next_due: '2027-01-01T00:00:00Z',
+            }),
+          ],
+        }
+      }
+      if (url.startsWith(`${DASHBOARD_TOOLS_URL}/`) && url.endsWith('/reinstatement')) {
+        return {
+          ok: true,
+          status: 200,
+          json: async () => ({ status: { status: 'green', next_due: '2027-01-01T00:00:00Z' }, message: 'Das Gerät wurde wiederhergestellt.' }),
+        }
+      }
+      return { ok: false, status: 404, json: async () => ({ error: { code: 'not_found', message: 'nope' } }) }
+    })
+    vi.stubGlobal('fetch', mock)
+    renderPage()
+    const list = await screen.findByRole('list', { name: 'Werkzeuge' })
+    expect(within(list).getByText('Außer Betrieb')).toBeInTheDocument()
+
+    await user.click(screen.getByRole('button', { name: 'Wiederherstellen für Bohrmaschine-01' }))
+    const dialog = screen.getByRole('dialog')
+    await user.type(within(dialog).getByLabelText('Grund für die Wiederherstellung von Bohrmaschine-01'), 'Ersatzteil eingetroffen')
+    await user.click(within(dialog).getByRole('button', { name: 'Wiederherstellen' }))
+
+    // The list refetches: the tool leaves OOS, the confirmation shows and the
+    // reinstate action is gone (the row is serviceable again).
+    expect(await screen.findByText('Das Gerät wurde wiederhergestellt.')).toBeInTheDocument()
+    expect(within(screen.getByRole('list', { name: 'Werkzeuge' })).queryByText('Außer Betrieb')).not.toBeInTheDocument()
+    expect(within(screen.getByRole('list', { name: 'Werkzeuge' })).getByText('Einsatzbereit')).toBeInTheDocument()
+    expect(screen.queryByRole('button', { name: /Wiederherstellen/ })).not.toBeInTheDocument()
+  })
+
+  it('SPA_ERROR: a failed reinstate closes the dialog and shows the server German message inline', async () => {
+    const user = userEvent.setup()
+    localStorage.setItem('gear.permissions', JSON.stringify(['tool.reinstate']))
+    stubFetchReinstate([oosTool], 400, { error: { code: 'invalid_request', message: 'Der Grund ist zu lang (maximal 2000 Zeichen).' } })
+    renderPage()
+    await screen.findByRole('list', { name: 'Werkzeuge' })
+
+    await user.click(screen.getByRole('button', { name: 'Wiederherstellen für Bohrmaschine-01' }))
+    const dialog = screen.getByRole('dialog')
+    await user.type(within(dialog).getByLabelText('Grund für die Wiederherstellung von Bohrmaschine-01'), 'x'.repeat(2001))
+    await user.click(within(dialog).getByRole('button', { name: 'Wiederherstellen' }))
+
+    // The dialog closes and the server's German message shows inline on the row.
+    await waitFor(() => expect(screen.queryByRole('dialog')).not.toBeInTheDocument())
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Der Grund ist zu lang (maximal 2000 Zeichen).')
+    // The tool stays OOS (nothing was persisted client-side).
+    expect(within(screen.getByRole('list', { name: 'Werkzeuge' })).getByText('Außer Betrieb')).toBeInTheDocument()
+  })
+
+  it('SPA_DIALOG_CAPTURED: the dialog target is captured at open time — the label and the POST use the captured tool, not a live list lookup', async () => {
+    const user = userEvent.setup()
+    localStorage.setItem('gear.permissions', JSON.stringify(['tool.reinstate']))
+    const { bodies } = stubFetchReinstate(
+      [oosTool],
+      200,
+      { status: { status: 'green', next_due: '2027-01-01T00:00:00Z' }, message: 'Das Gerät wurde wiederhergestellt.' },
+    )
+    renderPage()
+    await screen.findByRole('list', { name: 'Werkzeuge' })
+
+    await user.click(screen.getByRole('button', { name: 'Wiederherstellen für Bohrmaschine-01' }))
+
+    // The dialog is driven by the CAPTURED target (tool id + name at open
+    // time) — a later list change can never resolve it to null mid-input.
+    const dialog = screen.getByRole('dialog')
+    const input = within(dialog).getByLabelText('Grund für die Wiederherstellung von Bohrmaschine-01')
+    expect(input).toBeInTheDocument()
+    await user.type(input, 'Ersatzteil')
+    await user.click(within(dialog).getByRole('button', { name: 'Wiederherstellen' }))
+
+    // The POST goes to the captured tool id.
+    await waitFor(() => expect(bodies).toHaveLength(1))
+    expect(bodies[0].url).toBe(`${DASHBOARD_TOOLS_URL}/id-oos/reinstatement`)
+  })
+
+  it('SPA_REINSTATE_BUSY: while a reinstatement is in flight the row reinstate buttons are disabled (no second dialog mid-flight)', async () => {
+    const user = userEvent.setup()
+    localStorage.setItem('gear.permissions', JSON.stringify(['tool.reinstate']))
+    const oosTool2 = dashboardToolFixture('id-oos-2', 'Schleifmaschine-02', 'Schleifmaschine', 'GEAR000002', {
+      status: 'oos',
+      next_due: null,
+    })
+    let resolveReinstate: (r: unknown) => void = () => {}
+    const reinstatePromise = new Promise<unknown>((resolve) => {
+      resolveReinstate = resolve
+    })
+    const mock = vi.fn().mockImplementation(async (url: string) => {
+      if (url === DASHBOARD_TOOLS_URL) {
+        return { ok: true, status: 200, json: async () => [oosTool, oosTool2] }
+      }
+      if (url.startsWith(`${DASHBOARD_TOOLS_URL}/`) && url.endsWith('/reinstatement')) {
+        return reinstatePromise
+      }
+      return { ok: false, status: 404, json: async () => ({ error: { code: 'not_found', message: 'nope' } }) }
+    })
+    vi.stubGlobal('fetch', mock)
+    renderPage()
+    await screen.findByRole('list', { name: 'Werkzeuge' })
+
+    const buttons = screen.getAllByRole('button', { name: /^Wiederherstellen für / })
+    expect(buttons).toHaveLength(2)
+    expect(buttons[0]).not.toBeDisabled()
+    expect(buttons[1]).not.toBeDisabled()
+
+    await user.click(buttons[0])
+    const dialog = screen.getByRole('dialog')
+    await user.type(within(dialog).getByLabelText(/Grund für die Wiederherstellung von/), 'Ersatzteil')
+    await user.click(within(dialog).getByRole('button', { name: 'Wiederherstellen' }))
+
+    // The POST is in flight: every row reinstate button is disabled so a second
+    // dialog can't be opened mid-flight via another row.
+    const busyButtons = screen.getAllByRole('button', { name: /^Wiederherstellen für / })
+    expect(busyButtons[0]).toBeDisabled()
+    expect(busyButtons[1]).toBeDisabled()
+
+    resolveReinstate({
+      ok: true,
+      status: 200,
+      json: async () => ({ status: { status: 'green', next_due: null }, message: 'Das Gerät wurde wiederhergestellt.' }),
+    })
+    expect(await screen.findByText('Das Gerät wurde wiederhergestellt.')).toBeInTheDocument()
+  })
+
+  it('SPA_CONFIRM_CLEARED: a stale success confirmation is cleared when a newer reinstate attempt errors (no stale success next to a newer error)', async () => {
+    const user = userEvent.setup()
+    localStorage.setItem('gear.permissions', JSON.stringify(['tool.reinstate']))
+    const oosTool2 = dashboardToolFixture('id-oos-2', 'Schleifmaschine-02', 'Schleifmaschine', 'GEAR000002', {
+      status: 'oos',
+      next_due: null,
+    })
+    // Two full dialog flows (a success + a 2001-rune typed failure) exceed the
+    // default 5s budget — run with a generous timeout.
+    let listCall = 0
+    let reinstateCall = 0
+    const mock = vi.fn().mockImplementation(async (url: string) => {
+      if (url === DASHBOARD_TOOLS_URL) {
+        listCall += 1
+        if (listCall === 1) {
+          return { ok: true, status: 200, json: async () => [oosTool, oosTool2] }
+        }
+        return {
+          ok: true,
+          status: 200,
+          json: async () => [
+            dashboardToolFixture('id-oos', 'Bohrmaschine-01', 'Bohrmaschine', 'GEAR000001', {
+              status: 'green',
+              next_due: '2027-01-01T00:00:00Z',
+            }),
+            oosTool2,
+          ],
+        }
+      }
+      if (url.startsWith(`${DASHBOARD_TOOLS_URL}/`) && url.endsWith('/reinstatement')) {
+        reinstateCall += 1
+        if (reinstateCall === 1) {
+          return {
+            ok: true,
+            status: 200,
+            json: async () => ({ status: { status: 'green', next_due: null }, message: 'Das Gerät wurde wiederhergestellt.' }),
+          }
+        }
+        return { ok: false, status: 400, json: async () => ({ error: { code: 'invalid_request', message: 'Der Grund ist zu lang (maximal 2000 Zeichen).' } }) }
+      }
+      return { ok: false, status: 404, json: async () => ({ error: { code: 'not_found', message: 'nope' } }) }
+    })
+    vi.stubGlobal('fetch', mock)
+    renderPage()
+    await screen.findByRole('list', { name: 'Werkzeuge' })
+
+    // 1. Reinstate tool 1 → confirmation shows.
+    await user.click(screen.getByRole('button', { name: 'Wiederherstellen für Bohrmaschine-01' }))
+    let dialog = screen.getByRole('dialog')
+    await user.type(within(dialog).getByLabelText('Grund für die Wiederherstellung von Bohrmaschine-01'), 'Ersatzteil')
+    await user.click(within(dialog).getByRole('button', { name: 'Wiederherstellen' }))
+    expect(await screen.findByText('Das Gerät wurde wiederhergestellt.')).toBeInTheDocument()
+
+    // 2. A NEW reinstate attempt (tool 2) fails → the stale success is gone,
+    //    the newer error shows inline.
+    await user.click(screen.getByRole('button', { name: 'Wiederherstellen für Schleifmaschine-02' }))
+    dialog = screen.getByRole('dialog')
+    await user.type(within(dialog).getByLabelText('Grund für die Wiederherstellung von Schleifmaschine-02'), 'x'.repeat(2001))
+    await user.click(within(dialog).getByRole('button', { name: 'Wiederherstellen' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Der Grund ist zu lang (maximal 2000 Zeichen).')
+    expect(screen.queryByText('Das Gerät wurde wiederhergestellt.')).not.toBeInTheDocument()
+  }, 20000)
 })

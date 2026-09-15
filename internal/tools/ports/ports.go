@@ -90,4 +90,12 @@ type Service interface {
 	// `inspection.submit` and returns the persisted record + the shared derived
 	// status (AD-4/AD-5: `oos` on a failed inspection — never stored).
 	SubmitInspection(ctx context.Context, actorID, toolID string, input core.InspectionInput) (*core.SubmitInspectionResult, error)
+	// ReinstateTool reinstates an OOS tool (Story 5.6, FR-15/AD-9): it re-checks
+	// `tool.reinstate` defense-in-depth (AD-6), loads the tool (unknown/archived
+	// → ErrToolNotFound 404), validates the MANDATORY reason (empty or > 2000
+	// runes → ErrInspectionInvalid 400, German), persists the reinstatement,
+	// audits `tool.reinstate` and returns the newly derived not-OOS status
+	// (next_due = reinstatement + resolved interval, AD-5). Reinstatement is the
+	// SOLE exit from OOS (FR-15).
+	ReinstateTool(ctx context.Context, actorID, toolID, reason string) (*core.ReinstateResult, error)
 }

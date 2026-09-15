@@ -454,6 +454,36 @@ func (q *Queries) InsertInspectionItem(ctx context.Context, arg InsertInspection
 	return err
 }
 
+const insertReinstatement = `-- name: InsertReinstatement :one
+INSERT INTO reinstatements (tool_id, actor_id, reason)
+VALUES ($1, $2, $3)
+RETURNING id, tool_id, actor_id, reason, created_at
+`
+
+type InsertReinstatementParams struct {
+	ToolID  pgtype.UUID `json:"tool_id"`
+	ActorID pgtype.UUID `json:"actor_id"`
+	Reason  string      `json:"reason"`
+}
+
+// Persist one reinstatement (Story 5.6, FR-15/AD-9): tool, actor and the
+// MANDATORY reason, created_at = DB now(). The reason was validated by the
+// core (non-empty, ≤ 2000 runes); actor_id is a plain uuid (no FK, AD-8/3.4).
+// The row immediately flips the derived status — a fail before the latest
+// reinstatement is not OOS (AD-4).
+func (q *Queries) InsertReinstatement(ctx context.Context, arg InsertReinstatementParams) (Reinstatement, error) {
+	row := q.db.QueryRow(ctx, insertReinstatement, arg.ToolID, arg.ActorID, arg.Reason)
+	var i Reinstatement
+	err := row.Scan(
+		&i.ID,
+		&i.ToolID,
+		&i.ActorID,
+		&i.Reason,
+		&i.CreatedAt,
+	)
+	return i, err
+}
+
 const insertToolTypeChecklistItem = `-- name: InsertToolTypeChecklistItem :exec
 INSERT INTO tool_type_checklist_items (tool_type_id, position, label)
 VALUES ($1, $2, $3)

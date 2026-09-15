@@ -29,6 +29,13 @@ type fakeToolStore struct {
 	inspections []*Inspection
 	status      *ToolInspectionStatus
 	statusErr   error
+	// statusErrFromRead makes GetToolInspectionStatus fail ONLY from the Nth
+	// read onward (1-based; 0 = never). Story 5.6: the submit OOS gate reads the
+	// status BEFORE the write, the post-commit status read AFTER — a test can
+	// let the gate read succeed and the post-commit read fail (the best-effort
+	// path).
+	statusErrFromRead int
+	statusReads       int
 	// statusNilResult makes GetToolInspectionStatus return (nil, nil) — the
 	// dashboard read must treat it as never-inspected (red), never panic.
 	statusNilResult bool
@@ -37,11 +44,29 @@ type fakeToolStore struct {
 	// fields above.
 	statusByTool    map[string]*ToolInspectionStatus
 	statusErrByTool map[string]error
+	// reinstatements / reinstateErr back the Story 5.6 InsertReinstatement
+	// write: tests assert the persisted actor + reason; an error simulates a
+	// storage failure.
+	reinstatements []reinstatementRecord
+	reinstateErr   error
+}
+
+// reinstatementRecord is the in-memory reinstatement row (Story 5.6). CreatedAt
+// mirrors the DB created_at = now() so tests can pin the derived clock anchor.
+type reinstatementRecord struct {
+	ToolID    string
+	ActorID   string
+	Reason    string
+	CreatedAt time.Time
 }
 
 // InsertInspection emulates the repository's transactional insert (Story 5.3):
 // the record is assigned an id + submitted_at (the DB uuidv7 + now()) and kept
-// so tests can assert the persisted shape.
+// so tests can assert the persisted shape. It ALSO mirrors the real DB read
+// semantics: a committed inspection anchors the status fixture — a fail becomes
+// the latest fail (the OOS anchor), a pass the latest success (the clock
+// anchor) — so a post-submit GetToolInspectionStatus reflects the new record,
+// exactly like the repository's read-after-write.
 func (f *fakeToolStore) InsertInspection(_ context.Context, inspection *Inspection) (*Inspection, error) {
 	persisted := *inspection
 	if persisted.ID == "" {
@@ -51,6 +76,15 @@ func (f *fakeToolStore) InsertInspection(_ context.Context, inspection *Inspecti
 		persisted.SubmittedAt = time.Now()
 	}
 	f.inspections = append(f.inspections, &persisted)
+	if f.status == nil {
+		f.status = &ToolInspectionStatus{}
+	}
+	t := persisted.SubmittedAt
+	if persisted.OverallResult == InspectionResultFail {
+		f.status.LatestFailAt = &t
+	} else if f.status.LastSuccessAt == nil || t.After(*f.status.LastSuccessAt) {
+		f.status.LastSuccessAt = &t
+	}
 	return &persisted, nil
 }
 
@@ -61,6 +95,7 @@ func (f *fakeToolStore) InsertInspection(_ context.Context, inspection *Inspecti
 // DIFFERENT statuses per tool in one call (Story 6.1), with the shared fields
 // as the fallback.
 func (f *fakeToolStore) GetToolInspectionStatus(_ context.Context, toolID string) (*ToolInspectionStatus, error) {
+	f.statusReads++
 	if f.statusNilResult {
 		return nil, nil
 	}
@@ -74,13 +109,33 @@ func (f *fakeToolStore) GetToolInspectionStatus(_ context.Context, toolID string
 			return status, nil
 		}
 	}
-	if f.statusErr != nil {
+	if f.statusErr != nil && (f.statusErrFromRead == 0 || f.statusReads >= f.statusErrFromRead) {
 		return nil, f.statusErr
 	}
 	if f.status != nil {
 		return f.status, nil
 	}
 	return &ToolInspectionStatus{}, nil
+}
+
+// InsertReinstatement emulates the repository's single-row insert (Story 5.6):
+// the row is kept (actor + reason + created_at = now) so tests can assert the
+// persisted shape. It ALSO mirrors the real DB read semantics: the row becomes
+// the clock's "latest reinstatement" anchor (LastReinstatedAt), so a post-write
+// GetToolInspectionStatus reflects the new row — exactly like InsertInspection's
+// read-after-write upgrade — and the tool leaves OOS.
+func (f *fakeToolStore) InsertReinstatement(_ context.Context, toolID, actorID, reason string) error {
+	if f.reinstateErr != nil {
+		return f.reinstateErr
+	}
+	createdAt := time.Now()
+	f.reinstatements = append(f.reinstatements, reinstatementRecord{ToolID: toolID, ActorID: actorID, Reason: reason, CreatedAt: createdAt})
+	if f.status == nil {
+		f.status = &ToolInspectionStatus{}
+	}
+	t := createdAt
+	f.status.LastReinstatedAt = &t
+	return nil
 }
 
 func (f *fakeToolStore) ListTools(context.Context) ([]*Tool, error) {

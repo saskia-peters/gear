@@ -157,6 +157,9 @@ func (f *fakeToolTypeStore) InsertInspection(_ context.Context, _ *Inspection) (
 func (f *fakeToolTypeStore) GetToolInspectionStatus(_ context.Context, _ string) (*ToolInspectionStatus, error) {
 	return nil, ErrToolNotFound
 }
+func (f *fakeToolTypeStore) InsertReinstatement(_ context.Context, _, _, _ string) error {
+	return ErrToolNotFound
+}
 
 // fakeSchedulesPort is an adminports.SchedulesPort over a fixed ACTIVE catalog.
 // err lets tests simulate a resolution failure (the submit interval path).

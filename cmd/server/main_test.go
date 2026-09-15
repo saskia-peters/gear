@@ -773,6 +773,13 @@ func (s *compToolTypeService) SubmitInspection(_ context.Context, _, toolID stri
 	}, nil
 }
 
+func (s *compToolTypeService) ReinstateTool(_ context.Context, _, toolID, _ string) (*toolscore.ReinstateResult, error) {
+	// Echo the {id} path param + a green status, so the composed reinstate test
+	// proves the path param reaches the service AND the reinstate response DTO
+	// round-trips (Story 5.6).
+	return &toolscore.ReinstateResult{Status: toolscore.ToolStatus{Status: toolscore.ToolStatusCodeGreen}}, nil
+}
+
 var _ toolports.Service = (*compToolTypeService)(nil)
 
 // newCompositionToolTypeRouter mirrors the main() mounts exactly for the Story
@@ -1151,14 +1158,16 @@ func TestCompositionToolsEditOnlyGate(t *testing.T) {
 
 // newCompositionToolsRouter mirrors the main() mounts exactly for the combined
 // /api/v1/tools surface (Story 4-3b dashboard list + Story 5.1/5.3 inspection
-// start + submit): the dashboard list is mounted with its OWN `dashboard.view`
-// gate and the inspection start/submit with its OWN `inspection.submit` gate
-// (RequirePermission — the single-code gateway, NOT the admin
+// start + submit + Story 5.6 reinstatement): the dashboard list is mounted with
+// its OWN `dashboard.view` gate, the inspection start/submit with its OWN
+// `inspection.submit` gate and the reinstatement with its OWN `tool.reinstate`
+// gate (RequirePermission — the single-code gateway, NOT the admin
 // RequireAnyPermission), combined via exact-match Handle + prefix Mount. This
 // pins that each /api/v1/tools surface is a separate GEAR-module surface behind
 // ONE permission per surface (AD-6): the dashboard list is reachable by ANY
-// dashboard.view holder regardless of tools.manage, and the inspection
-// start/submit only by inspection.submit holders.
+// dashboard.view holder regardless of tools.manage, the inspection
+// start/submit only by inspection.submit holders and the reinstatement only by
+// tool.reinstate holders.
 func newCompositionToolsRouter(perms []string, session *usercore.Session) http.Handler {
 	log := discardLogger()
 	validator := &compValidator{session: session}
@@ -1174,11 +1183,13 @@ func newCompositionToolsRouter(perms []string, session *usercore.Session) http.H
 	toolToolsSurface := auth.RequireAnyPermission(validator, resolver, []string{toolscore.ToolsManagePermission, toolscore.ToolEditPermission}, "tools.manage/tool.edit access denied", log)(toolHandler.ToolRoutes())
 	dashboardToolsSurface := auth.RequirePermission(validator, resolver, toolscore.DashboardViewPermission)(toolHandler.DashboardToolsRoutes())
 	inspectionSurface := auth.RequirePermission(validator, resolver, toolscore.InspectionSubmitPermission)(toolHandler.InspectionRoutes())
+	reinstateSurface := auth.RequirePermission(validator, resolver, toolscore.ToolReinstatePermission)(toolHandler.ReinstateRoutes())
 	toolsSurface := chi.NewRouter()
 	toolsSurface.NotFound(httpapi.NotFoundHandler())
 	toolsSurface.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
 	toolsSurface.Handle("/", dashboardToolsSurface)
 	toolsSurface.Mount("/{id}/inspection", inspectionSurface)
+	toolsSurface.Mount("/{id}/reinstatement", reinstateSurface)
 
 	outer := chi.NewRouter()
 	outer.Get("/", func(w http.ResponseWriter, _ *http.Request) {
@@ -1350,6 +1361,57 @@ func TestCompositionInspectionSubmitMountGating(t *testing.T) {
 	}
 	if rec := doComposedJSONRequest(dashboardOnly, "tok", http.MethodGet, "/api/v1/tools", ""); rec.Code != http.StatusOK {
 		t.Errorf("dashboard.view-only list: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+}
+
+// TestCompositionReinstateMountGating verifies the Story 5.6 composition-root
+// wiring: the reinstatement is a SIBLING sub-path of the SAME /api/v1/tools
+// router mounted at /{id}/reinstatement with ITS OWN `tool.reinstate` gate (one
+// permission per surface, AD-6) — it is NOT inherited from the inspection
+// surface. An inspection.submit-but-not-tool.reinstate caller can start/submit
+// but the reinstatement answers 403 (no tool data); a tool.reinstate holder
+// reaches it and the {id} path param round-trips through the composed router.
+func TestCompositionReinstateMountGating(t *testing.T) {
+	reinstateBody := `{"reason":"Ersatzteil eingetroffen"}`
+
+	// 401: no token.
+	if rec := doComposedJSONRequest(newCompositionToolsRouter([]string{}, nil), "", http.MethodPost, "/api/v1/tools/id-a/reinstatement", reinstateBody); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no token: status = %d, want 401", rec.Code)
+	}
+
+	// 200: a tool.reinstate holder reaches the reinstatement — the fake echoes
+	// the {id} path param + a green status (a real round-trip through the
+	// mounted surface).
+	reinstateRouter := newCompositionToolsRouter([]string{toolscore.ToolReinstatePermission}, activeUser("u-fuehrung", "fuehrung@gear.local"))
+	rec := doComposedJSONRequest(reinstateRouter, "tok", http.MethodPost, "/api/v1/tools/id-a/reinstatement", reinstateBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("tool.reinstate holder: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding reinstate response err = %v", err)
+	}
+	status, ok := body["status"].(map[string]any)
+	if !ok || status["status"] != "green" {
+		t.Errorf("reinstate status = %+v, want the derived green status", body["status"])
+	}
+	if body["message"] != toolscore.MsgToolReinstated {
+		t.Errorf("reinstate message = %+v, want %q", body["message"], toolscore.MsgToolReinstated)
+	}
+
+	// 403 with NO tool data: an inspection.submit-but-not-tool.reinstate caller
+	// is denied the reinstatement (the sibling surface keeps its OWN gate),
+	// while the inspection start still 200s for the same caller.
+	inspectionOnly := newCompositionToolsRouter([]string{toolscore.InspectionSubmitPermission}, activeUser("u-vol", "vol@gear.local"))
+	rec = doComposedJSONRequest(inspectionOnly, "tok", http.MethodPost, "/api/v1/tools/id-a/reinstatement", reinstateBody)
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("inspection.submit-only reinstate: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(strings.ToLower(rec.Body.String()), "werkzeug") || strings.Contains(rec.Body.String(), "id-a") {
+		t.Errorf("403 body leaks tool data: %s", rec.Body.String())
+	}
+	if rec := doComposedJSONRequest(inspectionOnly, "tok", http.MethodPost, "/api/v1/tools/id-a/inspection/start", ""); rec.Code != http.StatusOK {
+		t.Errorf("inspection.submit-only start: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
 }
 

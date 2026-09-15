@@ -134,3 +134,7 @@ Triage output of review loops — real, non-story-blocking findings that are not
 
 - The dashboard's derived `next_due` is serialized on the wire (green/orange/red) but not rendered on the row chip — the due date is currently dead data, available for Story 6.2 (export) / 6.3 (history) and a possible "Fällig: …" row meta later.
 - Per-tool status reads are N+1: `ListToolsForDashboard` runs `GetToolInspectionStatus` per tool (three small queries each: latest fail / latest pass / latest reinstatement), accepted at V1 fleet scale; a batched per-tool anchors query would cut a dashboard load from ~3N to ~2 queries when fleets grow. Also noted in the spec's Design Notes.
+
+## Deferred from: code review (2026-09-14) of spec-5-6-out-of-service-reinstatement.md
+
+- No idempotency / client-supplied key on `POST /api/v1/tools/{id}/reinstatement`; the append-only row has no unique guard. In practice the OOS precondition already mitigates duplicates (a second reinstate on the now-serviceable tool answers the 400 not-OOS), and the SPA disables the button while busy; an explicit idempotency key would harden the API against retried 500s. Revisit if the retry story matures.

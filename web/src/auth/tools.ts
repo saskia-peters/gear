@@ -22,6 +22,11 @@ export const TOOL_TYPES_PERMISSION = 'tool_types.manage'
 export const TOOLS_PERMISSION = 'tools.manage'
 export const TOOL_EDIT_PERMISSION = 'tool.edit'
 export const INSPECTION_SUBMIT_PERMISSION = 'inspection.submit'
+// REINSTATE_PERMISSION (Story 5.6, FR-15/AD-9) is the reinstatement gate code:
+// only Fuehrung/Admin holders (the base roles seed it) see the
+// "Wiederherstellen" button on an OOS row, mirroring the server const
+// ToolReinstatePermission.
+export const REINSTATE_PERMISSION = 'tool.reinstate'
 
 export type InspectionMode = 'pass_fail' | 'checklist'
 
@@ -420,6 +425,35 @@ export async function submitInspection(toolId: string, input: InspectionSubmitIn
 // button has a real in-flight window for the double-submit guard.
 export async function submitInspectionPlaceholder(): Promise<void> {
   await Promise.resolve()
+}
+
+// ============================================================================
+// Reinstatement (Story 5.6, FR-15/AD-9): a Fuehrung/Admin reinstates an OOS
+// tool with a MANDATORY reason — the SOLE exit from OOS. The server re-checks
+// `tool.reinstate` defense-in-depth (AD-6), persists the reinstatement and
+// returns the newly derived not-OOS status (next_due = reinstatement +
+// interval, AD-5).
+// ============================================================================
+
+// ReinstateResult is the POST /api/v1/tools/{id}/reinstatement payload (Story
+// 5.6): the server-derived status + the German confirmation. The status SHARES
+// the ToolStatusInfo shape with the dashboard list so the vocabulary never
+// drifts.
+export interface ReinstateResult {
+  status: ToolStatusInfo
+  message: string
+}
+
+// reinstateTool POSTs the reinstatement for an OOS tool with the mandatory
+// reason. 200 → the tool leaves OOS (the dashboard refetches); 400/403/404 →
+// ApiError with the server's German reason; 401 → stale/revoked session (the
+// caller logs in again).
+export async function reinstateTool(toolId: string, reason: string): Promise<ReinstateResult> {
+  return (await request(`${DASHBOARD_TOOLS_URL}/${encodeURIComponent(toolId)}/reinstatement`, {
+    method: 'POST',
+    headers: authTokenHeaders(),
+    body: JSON.stringify({ reason }),
+  })) as ReinstateResult
 }
 
 export { ApiError, DASHBOARD_TOOLS_URL }

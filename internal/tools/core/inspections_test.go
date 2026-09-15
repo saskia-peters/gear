@@ -323,11 +323,11 @@ func TestSubmitInspectionPassFailPass(t *testing.T) {
 
 func TestSubmitInspectionPassFailFail(t *testing.T) {
 	// SUBMIT_FAIL: a pass_fail result fail → the record persists (fail) and the
-	// derived status reads `oos` with NextDue nil (AD-4 — never stored).
+	// derived status reads `oos` with NextDue nil (AD-4 — never stored). The
+	// tool was NOT OOS before the submit (the fake's post-commit status read
+	// reflects the just-committed fail).
 	svc, store, _ := submitInspectionService()
 	store.types[0].InspectionMode = InspectionModePassFail
-	failAt := time.Now()
-	store.status = &ToolInspectionStatus{LatestFailAt: &failAt}
 
 	result, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", InspectionInput{
 		Mode: InspectionModePassFail, Result: InspectionResultFail,
@@ -349,10 +349,9 @@ func TestSubmitInspectionPassFailFail(t *testing.T) {
 func TestSubmitInspectionChecklistWithFailures(t *testing.T) {
 	// SUBMIT_CHECKLIST: every item answered, ≥1 failed → the record persists
 	// (fail) WITH the per-item snapshot (label + position from the type), and
-	// the derived status reads `oos`.
+	// the derived status reads `oos` (the fake's post-commit read reflects the
+	// just-committed fail).
 	svc, store, _ := submitInspectionService()
-	failedAt := time.Now()
-	store.status = &ToolInspectionStatus{LatestFailAt: &failedAt}
 
 	result, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", InspectionInput{
 		Mode:   InspectionModeChecklist,
@@ -494,13 +493,11 @@ func TestSubmitInspectionInvalid(t *testing.T) {
 
 func TestSubmitInspectionRoundTripStatus(t *testing.T) {
 	// The submit response's derived status reflects the ACTUAL status read
-	// (GetToolInspectionStatus): a tool with a recent pass answers green with a
-	// next_due = pass + interval (1 year). The fake store is seeded as if the
-	// pass just landed.
+	// (GetToolInspectionStatus): a committed pass answers green with a
+	// next_due = submitted_at + interval (1 year) — the fake's read-after-write
+	// mirrors the repository.
 	svc, store, _ := submitInspectionService()
 	store.types[0].InspectionMode = InspectionModePassFail
-	now := time.Now()
-	store.status = &ToolInspectionStatus{LastSuccessAt: &now}
 
 	result, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", InspectionInput{
 		Mode: InspectionModePassFail, Result: InspectionResultPass,
@@ -514,7 +511,7 @@ func TestSubmitInspectionRoundTripStatus(t *testing.T) {
 	if result.Status.NextDue == nil {
 		t.Fatal("next_due = nil, want the pass + 1-year interval")
 	}
-	want := now.Add(365 * 24 * time.Hour)
+	want := result.Inspection.SubmittedAt.Add(365 * 24 * time.Hour)
 	if !result.Status.NextDue.Equal(want) {
 		t.Errorf("next_due = %v, want %v (last pass + 1 year)", result.Status.NextDue, want)
 	}
@@ -531,8 +528,6 @@ func TestSubmitInspectionScheduleOverride(t *testing.T) {
 		{ID: "id-s2", Name: "1 Monat", IntervalUnit: admcore.IntervalUnitMonth, IntervalMagnitude: 1},
 	}}
 	store.tools[0].ScheduleID = "id-s2" // the per-tool override
-	now := time.Now()
-	store.status = &ToolInspectionStatus{LastSuccessAt: &now}
 
 	result, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", InspectionInput{
 		Mode: InspectionModePassFail, Result: InspectionResultPass,
@@ -543,7 +538,7 @@ func TestSubmitInspectionScheduleOverride(t *testing.T) {
 	if result.Status.Status != ToolStatusCodeGreen {
 		t.Fatalf("status = %q, want green", result.Status.Status)
 	}
-	want := now.Add(30 * 24 * time.Hour) // the 1-month OVERRIDE interval
+	want := result.Inspection.SubmittedAt.Add(30 * 24 * time.Hour) // the 1-month OVERRIDE interval
 	if result.Status.NextDue == nil || !result.Status.NextDue.Equal(want) {
 		t.Errorf("next_due = %v, want %v (the override interval, not the type default 1 year)", result.Status.NextDue, want)
 	}
@@ -575,13 +570,15 @@ func TestSubmitInspectionTrimBeforeValidate(t *testing.T) {
 }
 
 func TestSubmitInspectionStatusReadFailsAfterCommit(t *testing.T) {
-	// Patch 8: a FAILED status read AFTER the record committed must NOT surface
-	// as an error (a client retry would duplicate the record) — a warning is
-	// logged and the status is derived from the persisted record alone. A pass
-	// reads as green-from-submittedAt; a fail as `oos`.
+	// Patch 8 + Story 5.6: a FAILED status read AFTER the record committed must
+	// NOT surface as an error (a client retry would duplicate the record) — a
+	// warning is logged and the status is derived from the persisted record
+	// alone. The OOS gate reads the status BEFORE the write (read 1 → succeeds,
+	// not OOS); the post-commit read (read 2) fails → the best-effort path.
 	svc, store, _ := submitInspectionService()
 	store.types[0].InspectionMode = InspectionModePassFail
 	store.statusErr = errors.New("boom")
+	store.statusErrFromRead = 2
 
 	result, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", InspectionInput{
 		Mode: InspectionModePassFail, Result: InspectionResultPass,
@@ -665,4 +662,292 @@ func TestSubmitInspectionScheduleLoudFailures(t *testing.T) {
 			t.Error("invalid-interval submit must not persist")
 		}
 	})
+}
+
+// ============================================================================
+// Story 5.6 — OOS not-inspectable block + reinstatement (FR-14/FR-15/AD-4/AD-9)
+// ============================================================================
+
+func TestStartInspectionOOSBlocked(t *testing.T) {
+	// START_OOS: the tool's latest FAILED inspection is not since the latest
+	// reinstatement (none here) → the start is blocked with ErrToolOutOfService
+	// (403, German) BEFORE the qualification gate — an OOS tool is NOT
+	// inspectable (FR-14/AD-4).
+	svc, store, _ := submitInspectionService()
+	failAt := time.Now()
+	store.status = &ToolInspectionStatus{LatestFailAt: &failAt}
+
+	_, err := svc.StartInspection(context.Background(), actorID, "id-tool")
+	if !errors.Is(err, ErrToolOutOfService) {
+		t.Fatalf("err = %v, want ErrToolOutOfService", err)
+	}
+	if MsgToolOutOfService != "Das Gerät ist außer Betrieb und kann nicht geprüft werden." {
+		t.Errorf("MsgToolOutOfService = %q, want the spec German text", MsgToolOutOfService)
+	}
+}
+
+func TestStartInspectionOOSTieBoundary(t *testing.T) {
+	// START_OOS tie boundary: a fail AT the EXACT reinstatement timestamp is
+	// OOS (the equal-timestamp boundary favors safety) → the start is blocked.
+	svc, store, _ := submitInspectionService()
+	failAt := time.Now()
+	reinstatedAt := failAt
+	store.status = &ToolInspectionStatus{LatestFailAt: &failAt, LastReinstatedAt: &reinstatedAt}
+
+	if _, err := svc.StartInspection(context.Background(), actorID, "id-tool"); !errors.Is(err, ErrToolOutOfService) {
+		t.Fatalf("tie-boundary err = %v, want ErrToolOutOfService", err)
+	}
+}
+
+func TestStartInspectionReinstatedNotBlocked(t *testing.T) {
+	// A fail STRICTLY BEFORE the latest reinstatement is NOT OOS → the start is
+	// eligible again (the reinstate clock reset, AD-5).
+	svc, store, _ := submitInspectionService()
+	failAt := time.Now().Add(-48 * time.Hour)
+	reinstatedAt := time.Now()
+	store.status = &ToolInspectionStatus{LatestFailAt: &failAt, LastReinstatedAt: &reinstatedAt}
+
+	if _, err := svc.StartInspection(context.Background(), actorID, "id-tool"); err != nil {
+		t.Fatalf("reinstated start err = %v, want eligible", err)
+	}
+}
+
+func TestSubmitInspectionOOSBlocked(t *testing.T) {
+	// SUBMIT_OOS: submitting on an OOS tool → ErrToolOutOfService and NOTHING
+	// persisted (FR-14/AD-4). The OOS check runs BEFORE the qualification gate.
+	svc, store, _ := submitInspectionService()
+	failAt := time.Now()
+	store.status = &ToolInspectionStatus{LatestFailAt: &failAt}
+
+	_, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", checklistSubmitInput())
+	if !errors.Is(err, ErrToolOutOfService) {
+		t.Fatalf("err = %v, want ErrToolOutOfService", err)
+	}
+	if len(store.inspections) != 0 {
+		t.Error("an OOS tool must not persist an inspection")
+	}
+}
+
+// reinstateService wires the reinstatement I/O matrix around a Service: the
+// checklist-mode fixture, one ACTIVE schedule (id-s1, 1 year) and a
+// tool.reinstate holder.
+func reinstateService() (*Service, *fakeToolStore, *fakeAudit) {
+	store := inspectionStore()
+	audit := &fakeAudit{}
+	svc := NewService(
+		store,
+		&fakeSchedulesPort{schedules: []*admcore.Schedule{{
+			ID: "id-s1", Name: "1 Jahr", IntervalUnit: admcore.IntervalUnitYear, IntervalMagnitude: 1,
+		}}},
+		holdsPort(actorID, "id-q1"),
+		&fakePerms{perms: []string{ToolReinstatePermission}},
+		audit,
+		nil,
+	)
+	return svc, store, audit
+}
+
+func TestReinstateToolOK(t *testing.T) {
+	// REINSTATE_OK: an OOS tool (a latest fail, NO prior reinstatement) is
+	// reinstated by a tool.reinstate holder with a valid reason → the row
+	// persists (actor + trimmed reason), the reinstatement is audited and the
+	// derived status is NOT OOS with next_due = reinstatement + interval (the
+	// clock reset, AD-5). The fake's InsertReinstatement upgrades the status
+	// fixture's LastReinstatedAt (read-after-write), so the not-OOS response only
+	// holds if the service genuinely re-reads AFTER the write — never a
+	// pre-seeded anchor.
+	svc, store, audit := reinstateService()
+	failAt := time.Now().Add(-48 * time.Hour)
+	store.status = &ToolInspectionStatus{LatestFailAt: &failAt}
+
+	result, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "  Ersatzteil eingetroffen  ")
+	if err != nil {
+		t.Fatalf("ReinstateTool err = %v", err)
+	}
+	if result.Status.Status == ToolStatusCodeOOS {
+		t.Fatalf("status = %q, want NOT oos after reinstatement", result.Status.Status)
+	}
+	if len(store.reinstatements) != 1 {
+		t.Fatalf("persisted = %+v, want one reinstatement", store.reinstatements)
+	}
+	if result.Status.NextDue == nil {
+		t.Fatal("next_due = nil, want the persisted reinstatement + 1-year interval")
+	}
+	want := store.reinstatements[0].CreatedAt.Add(365 * 24 * time.Hour)
+	if !result.Status.NextDue.Equal(want) {
+		t.Errorf("next_due = %v, want %v (the PERSISTED reinstatement's created_at + 1 year)", result.Status.NextDue, want)
+	}
+	if store.reinstatements[0].Reason != "Ersatzteil eingetroffen" || store.reinstatements[0].ActorID != actorID || store.reinstatements[0].ToolID != "id-tool" {
+		t.Errorf("persisted = %+v, want the trimmed reason + actor + tool", store.reinstatements[0])
+	}
+	if len(audit.events) != 1 || audit.events[0].operation != AuditOperationToolReinstate {
+		t.Fatalf("audit events = %+v, want one tool.reinstate audit", audit.events)
+	}
+}
+
+func TestReinstateToolNotOOS(t *testing.T) {
+	// REINSTATE_NOT_OOS: a reinstatement on a tool that is NOT out of service —
+	// never failed, OR already reinstated after the last fail — answers the 400
+	// sentinel (MsgToolNotOutOfService) and NOTHING is written (FR-15: a
+	// reinstatement is only meaningful as the SOLE exit from OOS; a serviceable
+	// tool must never advance the clock or add a ledger row).
+	svc, store, _ := reinstateService()
+
+	// Never failed → serviceable.
+	if _, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "Ersatzteil"); !errors.Is(err, ErrInspectionInvalid) {
+		t.Fatalf("never-failed err = %v, want ErrInspectionInvalid", err)
+	} else {
+		var inv *InvalidInspectionError
+		if errors.As(err, &inv) && inv.Message != MsgToolNotOutOfService {
+			t.Errorf("message = %q, want %q", inv.Message, MsgToolNotOutOfService)
+		}
+	}
+	if len(store.reinstatements) != 0 {
+		t.Error("a non-OOS tool must not persist a reinstatement")
+	}
+}
+
+func TestReinstateToolDuplicateRejected(t *testing.T) {
+	// REINSTATE_DUPLICATE: after a successful reinstatement the tool is
+	// serviceable again (the persisted row flipped the derivation) — a SECOND
+	// reinstatement answers the not-OOS 400 with NOTHING more written.
+	svc, store, _ := reinstateService()
+	failAt := time.Now().Add(-48 * time.Hour)
+	store.status = &ToolInspectionStatus{LatestFailAt: &failAt}
+
+	if _, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "Erstes Ersatzteil"); err != nil {
+		t.Fatalf("first reinstatement err = %v", err)
+	}
+	if len(store.reinstatements) != 1 {
+		t.Fatalf("persisted after first = %d, want 1", len(store.reinstatements))
+	}
+
+	if _, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "Doppelt"); !errors.Is(err, ErrInspectionInvalid) {
+		t.Fatalf("duplicate reinstatement err = %v, want ErrInspectionInvalid (not-OOS)", err)
+	} else {
+		var inv *InvalidInspectionError
+		if errors.As(err, &inv) && inv.Message != MsgToolNotOutOfService {
+			t.Errorf("duplicate message = %q, want %q", inv.Message, MsgToolNotOutOfService)
+		}
+	}
+	if len(store.reinstatements) != 1 {
+		t.Errorf("persisted after duplicate = %d, want still 1 (nothing more written)", len(store.reinstatements))
+	}
+}
+
+func TestReinstateToolPostCommitScheduleFailure(t *testing.T) {
+	// REINSTATE_POST_COMMIT_SCHEDULE: the reinstatement row commits, then the
+	// schedule resolution fails — the committed write must be reported as a
+	// SUCCESS with a conservative non-OOS status (green, nil next_due), never an
+	// error (a client retry would DUPLICATE the row). The row + audit are
+	// written regardless.
+	svc, store, audit := reinstateService()
+	failAt := time.Now().Add(-48 * time.Hour)
+	store.status = &ToolInspectionStatus{LatestFailAt: &failAt}
+	svc.schedules = &fakeSchedulesPort{err: errors.New("boom")}
+
+	result, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "Ersatzteil")
+	if err != nil {
+		t.Fatalf("ReinstateTool(schedule fail) err = %v, want a best-effort success", err)
+	}
+	if len(store.reinstatements) != 1 {
+		t.Fatalf("persisted = %d, want the row committed despite the schedule failure", len(store.reinstatements))
+	}
+	if result.Status.Status == ToolStatusCodeOOS {
+		t.Errorf("status = %q, want a conservative NON-OOS status", result.Status.Status)
+	}
+	if result.Status.NextDue != nil {
+		t.Errorf("next_due = %v, want nil for the conservative fallback", result.Status.NextDue)
+	}
+	if len(audit.events) != 1 || audit.events[0].operation != AuditOperationToolReinstate {
+		t.Fatalf("audit events = %+v, want the tool.reinstate audit written", audit.events)
+	}
+}
+
+func TestReinstateToolPostCommitReadFailure(t *testing.T) {
+	// REINSTATE_POST_COMMIT_READ: the reinstatement row commits, then the
+	// post-write status read fails — the committed write must be reported as a
+	// SUCCESS with a conservative non-OOS status, never an error (a retry would
+	// duplicate the row). The OOS precondition read (read 1) succeeds; the
+	// post-write read (read 2) fails via statusErrFromRead.
+	svc, store, _ := reinstateService()
+	failAt := time.Now().Add(-48 * time.Hour)
+	store.status = &ToolInspectionStatus{LatestFailAt: &failAt}
+	store.statusErr = errors.New("boom")
+	store.statusErrFromRead = 2
+
+	result, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "Ersatzteil")
+	if err != nil {
+		t.Fatalf("ReinstateTool(read fail) err = %v, want a best-effort success", err)
+	}
+	if len(store.reinstatements) != 1 {
+		t.Fatalf("persisted = %d, want the row committed despite the status-read failure", len(store.reinstatements))
+	}
+	if result.Status.Status == ToolStatusCodeOOS {
+		t.Errorf("status = %q, want a conservative NON-OOS status", result.Status.Status)
+	}
+}
+
+func TestReinstateToolValidation(t *testing.T) {
+	// REINSTATE_EMPTY / REINSTATE_LONG: an empty/whitespace reason or a reason
+	// > 2000 runes answers the 400 sentinel (ErrInspectionInvalid) with the
+	// German message and NOTHING is persisted. The tool is OOS (a latest fail,
+	// no reinstatement) so the reason validation is what rejects the write.
+	svc, store, _ := reinstateService()
+	failAt := time.Now().Add(-48 * time.Hour)
+	store.status = &ToolInspectionStatus{LatestFailAt: &failAt}
+
+	if _, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "   "); !errors.Is(err, ErrInspectionInvalid) {
+		t.Fatalf("empty reason err = %v, want ErrInspectionInvalid", err)
+	}
+	if MsgReinstatementReasonRequired != "Bitte gib einen Grund für die Wiederherstellung an." {
+		t.Errorf("MsgReinstatementReasonRequired = %q, want the spec German text", MsgReinstatementReasonRequired)
+	}
+	long := strings.Repeat("ä", MaxReinstatementReasonRunes+1)
+	_, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", long)
+	var inv *InvalidInspectionError
+	if !errors.As(err, &inv) {
+		t.Fatalf("long reason err = %v, want *InvalidInspectionError", err)
+	}
+	if inv.Message != MsgReinstatementReasonTooLong {
+		t.Errorf("message = %q, want %q", inv.Message, MsgReinstatementReasonTooLong)
+	}
+	if len(store.reinstatements) != 0 {
+		t.Error("a validation failure must not persist a reinstatement")
+	}
+}
+
+func TestReinstateToolGated(t *testing.T) {
+	// REINSTATE_GATED: a caller without tool.reinstate → ErrForbidden, NO write
+	// (AD-6). An empty actor id never passes.
+	svc, store, _ := reinstateService()
+	svc.perms = &fakePerms{perms: []string{InspectionSubmitPermission}}
+	if _, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "Ersatzteil"); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("err = %v, want ErrForbidden", err)
+	}
+	if _, err := svc.ReinstateTool(context.Background(), "", "id-tool", "Ersatzteil"); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("empty actor err = %v, want ErrForbidden", err)
+	}
+	if len(store.reinstatements) != 0 {
+		t.Error("a gated caller must not persist a reinstatement")
+	}
+}
+
+func TestReinstateToolToolNotFound(t *testing.T) {
+	// REINSTATE_ARCHIVED / REINSTATE_UNKNOWN: an unknown or archived tool → the
+	// 404 sentinel, no write.
+	svc, store, _ := reinstateService()
+	if _, err := svc.ReinstateTool(context.Background(), actorID, "id-missing", "Ersatzteil"); !errors.Is(err, ErrToolNotFound) {
+		t.Fatalf("unknown id err = %v, want ErrToolNotFound", err)
+	}
+	archived := *inspectionStore()
+	now := time.Now()
+	archived.tools[0].ArchivedAt = &now
+	svc.store = &archived
+	if _, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "Ersatzteil"); !errors.Is(err, ErrToolNotFound) {
+		t.Fatalf("archived id err = %v, want ErrToolNotFound", err)
+	}
+	if len(store.reinstatements) != 0 {
+		t.Error("an archived/unknown tool must not persist a reinstatement")
+	}
 }

@@ -200,3 +200,91 @@ func TestPostgresInspectionItemsRollback(t *testing.T) {
 		t.Errorf("inspections = %d, want 0 (the failed item rolled the whole record back)", count)
 	}
 }
+
+// TestPostgresInsertReinstatement exercises the Story 5.6 store contract over
+// the dev database: the single-row reinstatement insert (actor + reason
+// round-trip, created_at = DB now()) and the derived-status anchors that flip
+// the OOS derivation — a fail STRICTLY BEFORE the latest reinstatement is NOT
+// OOS, a NEW fail at-or-after the latest reinstatement is OOS (AD-4).
+func TestPostgresInsertReinstatement(t *testing.T) {
+	pool := toolTestPool(t)
+	ctx := context.Background()
+	t.Cleanup(func() { pool.Close() })
+
+	repo := NewRepository(New(pool))
+	toolTypeID, _ := seedToolRefs(t, ctx, pool)
+	tool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Reinstate-Werkzeug", ToolTypeID: toolTypeID})
+	if err != nil {
+		t.Fatalf("CreateTool err = %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, "DELETE FROM inspections WHERE tool_id = $1", tool.ID)
+		_, _ = pool.Exec(ctx, "DELETE FROM reinstatements WHERE tool_id = $1", tool.ID)
+	})
+
+	// A failing inspection makes the tool OOS (a latest fail, no reinstatement).
+	if _, err := repo.InsertInspection(ctx, &core.Inspection{
+		ToolID: tool.ID, InspectorID: "00000000-0000-0000-0000-0000000000ff",
+		Mode: core.InspectionModePassFail, OverallResult: core.InspectionResultFail,
+	}); err != nil {
+		t.Fatalf("InsertInspection(fail) err = %v", err)
+	}
+	oos, err := repo.GetToolInspectionStatus(ctx, tool.ID)
+	if err != nil {
+		t.Fatalf("GetToolInspectionStatus(oos) err = %v", err)
+	}
+	if oos.LatestFailAt == nil || oos.LastReinstatedAt != nil {
+		t.Fatalf("status = %+v, want a latest fail with NO reinstatement (OOS)", oos)
+	}
+
+	// InsertReinstatement round-trip: actor + reason persist, created_at is the
+	// DB now(), and the latest reinstatement becomes the clock reset anchor.
+	if err := repo.InsertReinstatement(ctx, tool.ID, "00000000-0000-0000-0000-0000000000aa", "  Ersatzteil eingetroffen  "); err != nil {
+		t.Fatalf("InsertReinstatement err = %v", err)
+	}
+	after, err := repo.GetToolInspectionStatus(ctx, tool.ID)
+	if err != nil {
+		t.Fatalf("GetToolInspectionStatus(after) err = %v", err)
+	}
+	if after.LastReinstatedAt == nil {
+		t.Fatal("last_reinstated = nil, want the inserted reinstatement's created_at")
+	}
+	// The reinstatement is AFTER the earlier fail → the OOS rule yields
+	// NOT-OOS (a fail strictly before the latest reinstatement is not OOS, AD-4
+	// — reinstatement resets the clock). The stored reason round-trips verbatim
+	// (trimming is the core's job, never the store's).
+	var reason string
+	if err := pool.QueryRow(ctx, "SELECT reason FROM reinstatements WHERE tool_id = $1", tool.ID).Scan(&reason); err != nil {
+		t.Fatalf("scan reason err = %v", err)
+	}
+	if reason != "  Ersatzteil eingetroffen  " {
+		t.Errorf("reason = %q, want the persisted value verbatim (trim is core's job)", reason)
+	}
+	if !oos.LatestFailAt.Before(*after.LastReinstatedAt) {
+		t.Fatalf("latest_fail %v is NOT before last_reinstated %v → the derivation would read OOS", oos.LatestFailAt, after.LastReinstatedAt)
+	}
+
+	// A NEW fail after the reinstatement flips it back to OOS: the latest fail
+	// is at-or-after the latest reinstatement (the tie boundary favors safety).
+	if _, err := repo.InsertInspection(ctx, &core.Inspection{
+		ToolID: tool.ID, InspectorID: "00000000-0000-0000-0000-0000000000ff",
+		Mode: core.InspectionModePassFail, OverallResult: core.InspectionResultFail,
+	}); err != nil {
+		t.Fatalf("InsertInspection(new fail) err = %v", err)
+	}
+	flipped, err := repo.GetToolInspectionStatus(ctx, tool.ID)
+	if err != nil {
+		t.Fatalf("GetToolInspectionStatus(flipped) err = %v", err)
+	}
+	if flipped.LatestFailAt == nil || flipped.LastReinstatedAt == nil {
+		t.Fatalf("status = %+v, want both anchors for the at-or-after boundary", flipped)
+	}
+	if flipped.LatestFailAt.Before(*flipped.LastReinstatedAt) {
+		t.Errorf("latest_fail %v IS before last_reinstated %v → the derivation would read NOT OOS, want OOS", flipped.LatestFailAt, flipped.LastReinstatedAt)
+	}
+
+	// A malformed tool id answers the 404 sentinel (never a raw parse error).
+	if err := repo.InsertReinstatement(ctx, "nonsense", "00000000-0000-0000-0000-0000000000aa", "x"); !errors.Is(err, core.ErrToolNotFound) {
+		t.Fatalf("malformed id err = %v, want ErrToolNotFound", err)
+	}
+}

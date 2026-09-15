@@ -31,6 +31,19 @@ import (
 // the core re-check and the SPA-facing documentation never drift.
 const InspectionSubmitPermission = "inspection.submit"
 
+// ToolReinstatePermission is the server-authoritative gate code for the
+// reinstatement surface (Story 5.6, FR-15/AD-9/AD-6). Only Fuehrung/Admin
+// holders (the base roles seed tool.reinstate) reach it. One Go const so the
+// route mount, the core re-check and the SPA-facing documentation never drift.
+const ToolReinstatePermission = "tool.reinstate"
+
+// Audit-operation tag for a persisted reinstatement (NFR-O1/NFR-O2). The
+// reinstatement row itself is the audit source of truth; this is the operation
+// ledger row. It DERIVES from ToolReinstatePermission so the audit tag and the
+// gate code can never drift — the audit operation for a tool.reinstate write is
+// the same code.
+const AuditOperationToolReinstate = ToolReinstatePermission
+
 // Audit-operation tag for an ELIGIBLE inspection start (NFR-O1, best-effort).
 // A FAILED gate (ineligible attempt) is logged structured but not audited as a
 // user action — the deny log line carries the structured record.
@@ -48,6 +61,15 @@ var ErrToolQualificationMissing = errors.New("tools core: required qualification
 // button for the session after the server answers it (the 403 IS the gate,
 // AD-6 — never client-side trust).
 const MsgToolQualificationMissing = "Erforderliche Qualifikation fehlt."
+
+// ErrToolOutOfService is returned when a start/submit is attempted on a tool
+// that is Out of Service (Story 5.6, FR-14/AD-4): an OOS tool is NOT
+// inspectable — start AND submit are rejected BEFORE the qualification gate.
+// Handlers map it to the uniform 403 with the German explanation.
+var ErrToolOutOfService = errors.New("tools core: tool is out of service")
+
+// German microcopy for the OOS not-inspectable block (FR-14/AD-4, UX-DR8).
+const MsgToolOutOfService = "Das Gerät ist außer Betrieb und kann nicht geprüft werden."
 
 // InspectionStartResult is the eligible /start response (Story 5.1): the tool
 // plus its type's inspection_mode, enough for the stub inspection screen (the
@@ -92,6 +114,18 @@ func (s *Service) StartInspection(ctx context.Context, actorID, toolID string) (
 			return nil, ErrToolNotFound
 		}
 		return nil, fmt.Errorf("tools core: failed to resolve tool for inspection: %w", err)
+	}
+
+	// OOS block (Story 5.6, FR-14/AD-4): an Out-of-Service tool is NOT
+	// inspectable — the start is rejected BEFORE the qualification gate (the
+	// OOS state is the stronger condition; an OOS tool never proceeds to a
+	// qualification check).
+	if oos, err := s.toolIsOutOfService(ctx, toolID); err != nil {
+		return nil, err
+	} else if oos {
+		s.log().Warn("inspection start denied: tool out of service",
+			"actor", actorID, "tool", toolID)
+		return nil, ErrToolOutOfService
 	}
 
 	// The type's required_qualification_id is the intra-module gate input
@@ -154,6 +188,11 @@ const AuditOperationInspectionSubmit = "inspection.submit"
 // UTF-16 code units, Go counts runes), so the server bound is the gate.
 const MaxInspectionNotesRunes = 4000
 
+// MaxReinstatementReasonRunes bounds the mandatory reinstatement reason
+// (Story 5.6, FR-15/AD-9): ≤ 2000 runes, counted server-side (the spec's
+// bound). The trimmed reason is what is validated AND persisted.
+const MaxReinstatementReasonRunes = 2000
+
 // ErrInspectionInvalid is the sentinel wrapping a German validation message
 // for a 400 invalid_request (bad mode/result, over-long notes, checklist
 // mismatch, unexpected items). Handlers match it to the uniform 400.
@@ -177,6 +216,19 @@ const (
 	MsgInspectionNotesTooLong    = "Die Anmerkung ist zu lang (maximal 4000 Zeichen)."
 	MsgInspectionItemsMismatch   = "Die Checkliste ist unvollständig oder enthält unbekannte Punkte."
 	MsgInspectionItemsUnexpected = "Pass/Fail-Prüfungen haben keine Checklistenpunkte."
+	// MsgReinstatementReasonRequired is the 400 message for an empty/whitespace
+	// reinstatement reason (FR-15/AD-9 — the reason is MANDATORY).
+	MsgReinstatementReasonRequired = "Bitte gib einen Grund für die Wiederherstellung an."
+	// MsgReinstatementReasonTooLong is the 400 message for a reason over
+	// MaxReinstatementReasonRunes.
+	MsgReinstatementReasonTooLong = "Der Grund ist zu lang (maximal 2000 Zeichen)."
+	// MsgToolNotOutOfService is the 400 message when a reinstatement is
+	// attempted on a tool that is NOT out of service (Story 5.6, FR-15/AD-9 —
+	// reinstatement is the SOLE exit from OOS, so it is only meaningful for an
+	// OOS tool; a serviceable tool is rejected).
+	MsgToolNotOutOfService = "Das Gerät ist nicht außer Betrieb."
+	// MsgToolReinstated is the German confirmation of a successful reinstatement.
+	MsgToolReinstated = "Das Gerät wurde wiederhergestellt."
 )
 
 // Inspection is the domain representation of one persisted inspection record
@@ -253,6 +305,11 @@ type ToolInspectionStatus struct {
 type InspectionStore interface {
 	InsertInspection(ctx context.Context, inspection *Inspection) (*Inspection, error)
 	GetToolInspectionStatus(ctx context.Context, toolID string) (*ToolInspectionStatus, error)
+	// InsertReinstatement persists one reinstatement row (Story 5.6, FR-15/AD-9):
+	// tool, actor and the mandatory reason, created_at = DB now(). One
+	// transaction-free single-row insert; the row immediately flips the derived
+	// status (a fail before the latest reinstatement is not OOS).
+	InsertReinstatement(ctx context.Context, toolID, actorID, reason string) error
 }
 
 // SubmitInspection persists one inspection (SUBMIT_PASSFAIL / SUBMIT_CHECKLIST,
@@ -286,6 +343,18 @@ func (s *Service) SubmitInspection(ctx context.Context, actorID, toolID string, 
 			return nil, ErrToolNotFound
 		}
 		return nil, fmt.Errorf("tools core: failed to resolve tool for inspection: %w", err)
+	}
+
+	// OOS block (Story 5.6, FR-14/AD-4): an Out-of-Service tool is NOT
+	// inspectable — the submit is rejected BEFORE the qualification re-check,
+	// and nothing is persisted (an OOS tool never proceeds to a qualification
+	// check or a write).
+	if oos, err := s.toolIsOutOfService(ctx, toolID); err != nil {
+		return nil, err
+	} else if oos {
+		s.log().Warn("inspection submit denied: tool out of service",
+			"actor", actorID, "tool", toolID)
+		return nil, ErrToolOutOfService
 	}
 
 	// Qualification re-check on submit (FR-11/AD-6): the client's eligibility
@@ -364,6 +433,118 @@ func (s *Service) SubmitInspection(ctx context.Context, actorID, toolID string, 
 	}
 
 	return &SubmitInspectionResult{Inspection: persisted, Status: status}, nil
+}
+
+// ReinstateResult is the reinstate response (Story 5.6, FR-15/AD-9): the newly
+// derived status. Reinstatement resets the clock, so the derivation answers
+// not-OOS with `next_due = lastReinstatedAt + interval`.
+type ReinstateResult struct {
+	Status ToolStatus
+}
+
+// toolIsOutOfService reports whether a tool is currently Out of Service (Story
+// 5.6, FR-14/AD-4): OOS iff the LATEST FAILED inspection's submitted_at is
+// at-or-after the latest reinstatement (or none exists) — the same rule the
+// derived-status function applies, but the CHEAP check needs only ONE
+// GetToolInspectionStatus read (no schedule resolution). This is the
+// not-inspectable gate for start/submit.
+func (s *Service) toolIsOutOfService(ctx context.Context, toolID string) (bool, error) {
+	status, err := s.store.GetToolInspectionStatus(ctx, toolID)
+	if err != nil {
+		return false, fmt.Errorf("tools core: failed to resolve tool inspection status: %w", err)
+	}
+	if status == nil {
+		return false, nil
+	}
+	return status.LatestFailAt != nil && (status.LastReinstatedAt == nil || !status.LatestFailAt.Before(*status.LastReinstatedAt)), nil
+}
+
+// ReinstateTool reinstates an OOS tool (Story 5.6, FR-15/AD-9/AD-5): it
+// re-checks `tool.reinstate` defense-in-depth (AD-6), loads the tool
+// (missing/archived → ErrToolNotFound), rejects a NON-OOS tool (400 German —
+// reinstatement is the SOLE exit from OOS, so it is only meaningful for an OOS
+// tool, REINSTATE_NOT_OOS), validates the mandatory reason (trimmed non-empty,
+// ≤ 2000 runes → ErrInspectionInvalid 400), persists the reinstatement, audits
+// `tool.reinstate` and returns the newly derived status. Reinstatement resets
+// the clock — `next_due = lastReinstatedAt + interval` (AD-5).
+//
+// I/O matrix:
+//   - REINSTATE_OK: OOS holder + valid reason → 200 with the not-OOS derived status.
+//   - REINSTATE_NOT_OOS: tool is NOT out of service → ErrInspectionInvalid (400,
+//     MsgToolNotOutOfService), no write.
+//   - REINSTATE_GATED: caller lacks tool.reinstate → ErrForbidden (403, no write).
+//   - REINSTATE_ARCHIVED / REINSTATE_UNKNOWN: archived / nonexistent tool →
+//     ErrToolNotFound (404).
+//   - REINSTATE_EMPTY / REINSTATE_LONG: empty or > 2000-rune reason →
+//     ErrInspectionInvalid (400, no write).
+func (s *Service) ReinstateTool(ctx context.Context, actorID, toolID, reason string) (*ReinstateResult, error) {
+	if err := s.requireToolsPermission(ctx, actorID, []string{ToolReinstatePermission}); err != nil {
+		return nil, err
+	}
+
+	tool, err := s.store.GetToolWithTypeQualification(ctx, toolID)
+	if err != nil {
+		if errors.Is(err, ErrToolNotFound) {
+			return nil, ErrToolNotFound
+		}
+		return nil, fmt.Errorf("tools core: failed to resolve tool for reinstatement: %w", err)
+	}
+
+	// OOS precondition (FR-15/AD-9): reinstatement is the SOLE exit from OOS,
+	// so it is only meaningful for an OOS tool. A serviceable tool is rejected
+	// with a German 400 and NOTHING is written — a redundant/erroneous
+	// reinstatement must never advance the clock or add a ledger row.
+	oos, err := s.toolIsOutOfService(ctx, toolID)
+	if err != nil {
+		return nil, err
+	}
+	if !oos {
+		s.log().Warn("reinstatement rejected: tool not out of service",
+			"actor", actorID, "tool", toolID)
+		return nil, &InvalidInspectionError{Message: MsgToolNotOutOfService}
+	}
+
+	// The reason is MANDATORY (FR-15/AD-9): trimmed ONCE before validation, the
+	// trimmed value is what is validated AND persisted. Nothing is written on a
+	// validation failure.
+	reason = strings.TrimSpace(reason)
+	if reason == "" {
+		return nil, &InvalidInspectionError{Message: MsgReinstatementReasonRequired}
+	}
+	if utf8.RuneCountInString(reason) > MaxReinstatementReasonRunes {
+		return nil, &InvalidInspectionError{Message: MsgReinstatementReasonTooLong}
+	}
+
+	if err := s.store.InsertReinstatement(ctx, tool.ID, actorID, reason); err != nil {
+		return nil, fmt.Errorf("tools core: failed to persist reinstatement: %w", err)
+	}
+
+	s.auditTool(ctx, actorID, AuditOperationToolReinstate, "action=reinstate target=tool id="+tool.ID)
+
+	// Derive the new status (AD-4/AD-5) BEST-EFFORT after the row committed: a
+	// schedule/status resolution failure AFTER the write must NOT surface as an
+	// error (a client retry would DUPLICATE the reinstatement). Log the failure
+	// and answer a conservative NON-OOS status — the row committed, so the tool
+	// is out of OOS (green with nil next_due; the SPA refetches the real status
+	// from the dashboard list). The row is the audit source of truth regardless.
+	interval, err := s.resolveToolScheduleInterval(ctx, tool)
+	if err != nil {
+		s.log().Warn("tools core: schedule resolution failed after reinstatement; answering conservative non-OOS",
+			"tool", tool.ID, "error", err)
+		return &ReinstateResult{Status: ToolStatus{Status: ToolStatusCodeGreen}}, nil
+	}
+	statusInput, err := s.store.GetToolInspectionStatus(ctx, tool.ID)
+	if err != nil {
+		s.log().Warn("tools core: status read failed after reinstatement; answering conservative non-OOS",
+			"tool", tool.ID, "error", err)
+		return &ReinstateResult{Status: ToolStatus{Status: ToolStatusCodeGreen}}, nil
+	}
+	if statusInput == nil {
+		statusInput = &ToolInspectionStatus{}
+	}
+	status := deriveToolStatus(statusInput.LatestFailAt, statusInput.LastSuccessAt, statusInput.LastReinstatedAt,
+		interval, time.Now(), OrangeWindowDays)
+	return &ReinstateResult{Status: status}, nil
 }
 
 // resolveToolScheduleInterval resolves the tool's EFFECTIVE inspection

@@ -183,11 +183,20 @@ func main() {
 	// still read the Werkzeugliste but 403s on the start/submit.
 	inspectionSurface := auth.RequirePermission(sessionManager, userRepo, toolscore.InspectionSubmitPermission)(toolHandler.InspectionRoutes())
 
+	// Story 5.6 — the reinstatement surface under /api/v1/tools with its OWN
+	// gate — one permission per surface (AD-6, FR-15/AD-9): only `tool.reinstate`
+	// holders (Fuehrung/Admin, the base roles seed it) reach it. The core
+	// re-checks the exact code defense-in-depth (AD-6). It deliberately does NOT
+	// widen the inspection.submit gate — a reinstate-less inspection.submit
+	// caller can still start/submit but 403s on the reinstatement.
+	reinstateSurface := auth.RequirePermission(sessionManager, userRepo, toolscore.ToolReinstatePermission)(toolHandler.ReinstateRoutes())
+
 	// The two /api/v1/tools surfaces are combined into ONE router: the dashboard
-	// list (GET /, dashboard.view) and the inspection start + submit (POST
-	// /{id}/inspection/start and POST /{id}/inspection, inspection.submit). The
-	// inspection surface is mounted at the full path prefix (chi Mount strips it
-	// and preserves the {id} param) — InspectionRoutes owns the route patterns,
+	// list (GET /, dashboard.view), the inspection start + submit (POST
+	// /{id}/inspection/start and POST /{id}/inspection, inspection.submit) and
+	// the reinstatement (POST /{id}/reinstatement, tool.reinstate). Each surface
+	// is mounted at the full path prefix (chi Mount strips it and preserves the
+	// {id} param) — InspectionRoutes/ReinstateRoutes own the route patterns,
 	// never duplicated here. Each surface keeps ITS OWN gate — no shared
 	// middleware.
 	toolsSurface := chi.NewRouter()
@@ -195,6 +204,7 @@ func main() {
 	toolsSurface.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
 	toolsSurface.Handle("/", dashboardToolsSurface)
 	toolsSurface.Mount("/{id}/inspection", inspectionSurface)
+	toolsSurface.Mount("/{id}/reinstatement", reinstateSurface)
 
 	// Demo route for the gateway composition tests: any active user holding
 	// `dashboard.view` (all base roles) can reach /api/v1/protected/me.

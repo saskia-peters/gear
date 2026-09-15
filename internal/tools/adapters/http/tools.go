@@ -107,6 +107,21 @@ type inspectionSubmitResponseDTO struct {
 	Status     statusDTO     `json:"status"`
 }
 
+// reinstatementRequestDTO is the POST /api/v1/tools/{id}/reinstatement body
+// (Story 5.6, FR-15/AD-9): the MANDATORY reason. The decoder rejects unknown
+// fields + trailing JSON like the submit handler.
+type reinstatementRequestDTO struct {
+	Reason string `json:"reason"`
+}
+
+// reinstatementResponseDTO is the POST /api/v1/tools/{id}/reinstatement
+// payload (Story 5.6): the newly derived status (not-OOS, clock reset) + the
+// German confirmation.
+type reinstatementResponseDTO struct {
+	Status  statusDTO `json:"status"`
+	Message string    `json:"message"`
+}
+
 // ToolRoutes returns the Tool tool router (Story 4.3 + 4-3b, FR-9/FR-10):
 // GET/POST / and PUT /{id}, POST /{id}/archive — soft archive only, NO DELETE
 // endpoint (archived rows keep FK history intact). The outer mount gate is
@@ -172,6 +187,23 @@ func (h *Handler) InspectionRoutes() http.Handler {
 	r.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
 	r.Post("/start", h.StartInspection)
 	r.Post("/", h.SubmitInspection)
+	return r
+}
+
+// ReinstateRoutes returns the reinstatement router (Story 5.6, FR-15/AD-9):
+// the POST reinstate handler at the router ROOT. The composition root mounts
+// this router at the full path prefix (/api/v1/tools/{id}/reinstatement via
+// chi Mount, which strips the prefix and preserves the {id} param), so the
+// route pattern is defined ONCE here and never duplicated at the mount site.
+// The whole router is gated by `tool.reinstate` at the composition-root mount
+// point — its OWN gate, one permission per surface (AD-6) — so this router
+// carries no gateway itself; 404/405 answer with the uniform JSON envelope so
+// no sub-path can emit a plain-text body.
+func (h *Handler) ReinstateRoutes() http.Handler {
+	r := chi.NewRouter()
+	r.NotFound(httpapi.NotFoundHandler())
+	r.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
+	r.Post("/", h.ReinstateTool)
 	return r
 }
 
@@ -271,6 +303,62 @@ func (h *Handler) SubmitInspection(w http.ResponseWriter, r *http.Request) {
 	h.log().Info("inspection submitted", "email", user.Email, "id", id, "result", result.Inspection.OverallResult, "status", result.Status.Status)
 
 	httpapi.WriteJSON(w, http.StatusOK, toInspectionSubmitResponse(result))
+}
+
+// ReinstateTool handles POST /api/v1/tools/{id}/reinstatement
+// (REINSTATE_OK / REINSTATE_EMPTY / REINSTATE_LONG / REINSTATE_GATED /
+// REINSTATE_ARCHIVED / REINSTATE_UNKNOWN, Story 5.6, FR-15/AD-9): it re-checks
+// `tool.reinstate` defense-in-depth (AD-6), loads the tool, validates the
+// MANDATORY reason, persists the reinstatement, audits it and returns the newly
+// derived not-OOS status (next_due = reinstatement + interval, AD-5). Gated
+// `tool.reinstate` at the mount; the core re-checks defense-in-depth.
+//
+// Error mapping (uniform envelope):
+//   - 401 unauthorized when the caller is not authenticated
+//   - 403 forbidden when the caller lacks tool.reinstate (no tool data exposed)
+//   - 404 not_found for an unknown / archived tool id
+//   - 400 invalid_request with a German message for an empty / over-long reason
+//   - 500 internal_error on an unexpected failure
+func (h *Handler) ReinstateTool(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFrom(r.Context())
+	if user == nil {
+		httpapi.WriteError(w, http.StatusUnauthorized, "unauthorized", "Authentifizierung erforderlich.")
+		return
+	}
+
+	id := chi.URLParam(r, "id")
+	var input reinstatementRequestDTO
+	// Buffered decoder (same hardened pattern as the submit handler): reject
+	// UNKNOWN fields and trailing content after the JSON object — both answer
+	// the uniform 400, never a partial parse.
+	dec := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20))
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&input); err != nil {
+		httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", "Ungültiges JSON-Format.")
+		return
+	}
+	if err := dec.Decode(&struct{}{}); err != io.EOF {
+		httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", "Ungültiges JSON-Format.")
+		return
+	}
+
+	result, err := h.service.ReinstateTool(r.Context(), user.ID, id, input.Reason)
+	if err != nil {
+		h.mapReinstatementError(w, r, err, user)
+		return
+	}
+	// Defensive nil-guard: a nil-returning service path (a wiring defect) must
+	// not panic — answer the clean 500 via the error mapper's default branch.
+	if result == nil {
+		h.mapReinstatementError(w, r, errors.New("tools http: nil reinstatement result from service"), user)
+		return
+	}
+	h.log().Info("tool reinstated", "email", user.Email, "id", id, "status", result.Status.Status)
+
+	httpapi.WriteJSON(w, http.StatusOK, reinstatementResponseDTO{
+		Status:  toStatusDTO(result.Status),
+		Message: toolscore.MsgToolReinstated,
+	})
 }
 
 // ListTools handles GET /api/v1/admin/tools (GET_LIST_EMPTY / GET_LIST): it
@@ -459,6 +547,9 @@ func (h *Handler) mapInspectionError(w http.ResponseWriter, r *http.Request, err
 	case errors.Is(err, toolscore.ErrForbidden):
 		h.log().Warn("inspection access forbidden", "email", user.Email)
 		httpapi.WriteError(w, http.StatusForbidden, "forbidden", "Keine Berechtigung.")
+	case errors.Is(err, toolscore.ErrToolOutOfService):
+		h.log().Warn("inspection denied: tool out of service", "email", user.Email)
+		httpapi.WriteError(w, http.StatusForbidden, "forbidden", toolscore.MsgToolOutOfService)
 	case errors.Is(err, toolscore.ErrToolQualificationMissing):
 		h.log().Warn("inspection denied: required qualification missing", "email", user.Email)
 		httpapi.WriteError(w, http.StatusForbidden, "forbidden", toolscore.MsgToolQualificationMissing)
@@ -473,6 +564,32 @@ func (h *Handler) mapInspectionError(w http.ResponseWriter, r *http.Request, err
 			return
 		}
 		h.log().Error("inspection request failed unexpectedly", "error", err)
+		httpapi.WriteError(w, http.StatusInternalServerError, "internal_error", "Ein interner Fehler ist aufgetreten.")
+	}
+}
+
+// mapReinstatementError writes the uniform envelope for the reinstatement
+// service errors (Story 5.6, FR-15/AD-9). A validation failure
+// (ErrInspectionInvalid, the reason sentinels) maps to the 400 with the German
+// message; an unknown/archived tool → 404; a tool.reinstate-less caller → the
+// generic no-hint 403 (AD-6).
+func (h *Handler) mapReinstatementError(w http.ResponseWriter, r *http.Request, err error, user *usercore.User) {
+	var inv *toolscore.InvalidInspectionError
+	switch {
+	case errors.Is(err, toolscore.ErrForbidden):
+		h.log().Warn("reinstatement access forbidden", "email", user.Email)
+		httpapi.WriteError(w, http.StatusForbidden, "forbidden", "Keine Berechtigung.")
+	case errors.Is(err, toolscore.ErrToolNotFound):
+		httpapi.WriteError(w, http.StatusNotFound, "not_found", toolscore.MsgToolNotFound)
+	case errors.As(err, &inv):
+		h.log().Warn("reinstatement invalid", "email", user.Email)
+		httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", inv.Message)
+	default:
+		// Client-abort guard: a canceled request has no one to answer.
+		if r.Context().Err() != nil {
+			return
+		}
+		h.log().Error("reinstatement request failed unexpectedly", "error", err)
 		httpapi.WriteError(w, http.StatusInternalServerError, "internal_error", "Ein interner Fehler ist aufgetreten.")
 	}
 }

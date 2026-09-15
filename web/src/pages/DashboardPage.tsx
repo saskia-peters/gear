@@ -1,12 +1,13 @@
-import { useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
 import { useNavigate } from 'react-router-dom'
 import { Header } from '../components/Header.tsx'
 import { SummaryGrid } from '../components/SummaryGrid.tsx'
 import type { SummaryCounts } from '../components/SummaryGrid.tsx'
 import { FilterChips } from '../components/FilterChips.tsx'
 import { EmptyState } from '../components/EmptyState.tsx'
-import { clearAuthState } from '../auth/authState.ts'
-import { listDashboardTools, startInspection } from '../auth/tools.ts'
+import { PromptDialog } from '../components/PromptDialog.tsx'
+import { clearAuthState, hasPermission } from '../auth/authState.ts'
+import { listDashboardTools, reinstateTool, REINSTATE_PERMISSION, startInspection } from '../auth/tools.ts'
 import type { DashboardTool } from '../auth/tools.ts'
 import { statusLabel, statusClassKey, type StatusCode } from '../types/filters.ts'
 import styles from './DashboardPage.module.css'
@@ -35,6 +36,15 @@ import styles from './DashboardPage.module.css'
 // disabled/pending ids live in refs, cleared only on a full reload); 401 →
 // login; other → inline error (button stays enabled for a retry). A double
 // click is guarded: the button disables while its request is in flight.
+//
+// Story 5.6 (FR-14/AD-4 + FR-15/AD-9): an OOS tool is NOT inspectable — its
+// "Prüfung starten" button is DISABLED (no start click, no dead 403). Only a
+// `tool.reinstate` holder (Fuehrung/Admin) sees the "Wiederherstellen" button
+// on an OOS row; clicking it opens the PromptDialog asking for the MANDATORY
+// reason, then POSTs the reinstatement. On success the list refetches (the tool
+// leaves OOS; statuses/colors/counts update) + a confirmation shows; on error
+// the server's German message shows inline. Non-holders never see the button
+// (the 403 IS the gate, AD-6 — never client-side trust).
 export function DashboardPage() {
   // selectedFilters holds the ACTIVE status CODES; the EMPTY set means "Alle"
   // (no filter). "Alle" is cleared via clearFilters (Story 6.1).
@@ -43,6 +53,21 @@ export function DashboardPage() {
   const [loadError, setLoadError] = useState('')
   const [tools, setTools] = useState<DashboardTool[]>([])
   const [rowErrors, setRowErrors] = useState<Record<string, string>>({})
+  // confirmMessage is the transient success confirmation after a reinstatement
+  // (Story 5.6): it shows the server's German message. It is CLEARED when a new
+  // action starts or an error is set — a stale success must never sit next to a
+  // newer error.
+  const [confirmMessage, setConfirmMessage] = useState('')
+  // reinstateDialog is the PromptDialog target CAPTURED at open time (Story
+  // 5.6): { toolId, toolName }. It is set when "Wiederherstellen" is clicked
+  // and cleared on submit/close. It is deliberately NOT derived live from the
+  // `tools` list — a list refetch while the dialog is open must not resolve it
+  // to null and close the dialog mid-input (the captured data is all the dialog
+  // needs).
+  const [reinstateDialog, setReinstateDialog] = useState<{ toolId: string; toolName: string } | null>(null)
+  // reinstateBusy disables the dialog form + the row's reinstate buttons while
+  // the reinstatement is in flight (double-submit guard).
+  const [reinstateBusy, setReinstateBusy] = useState(false)
   // disabledStarts/pendingStarts hold tool ids whose start button is disabled
   // for the session (a 403) or in flight. They are COMPONENT STATE, so they
   // persist across the list REFETCH effect (the component instance is stable
@@ -52,39 +77,51 @@ export function DashboardPage() {
   const [disabledStarts, setDisabledStarts] = useState<ReadonlySet<string>>(new Set())
   const [pendingStarts, setPendingStarts] = useState<ReadonlySet<string>>(new Set())
   const pendingGuardRef = useRef<Set<string>>(new Set())
+  // cancelledRef is the in-flight cancellation guard for loadTools (Story 5.6
+  // patch): set on unmount so a mount or post-reinstate refetch can never call
+  // setTools/setLoaded after the component is gone. Shared by every in-flight
+  // load (the flag applies to whichever load is pending at unmount time).
+  const cancelledRef = useRef(false)
   const navigate = useNavigate()
+  // canReinstate (Story 5.6, FR-15/AD-9): the "Wiederherstellen" button renders
+  // ONLY for tool.reinstate holders — mirroring the server gate (AD-6).
+  const canReinstate = hasPermission(REINSTATE_PERMISSION)
 
-  useEffect(() => {
-    let cancelled = false
-    async function run() {
-      try {
-        const items = await listDashboardTools()
-        if (cancelled) return
-        setTools(items)
-        // Clear stale inline start errors on a list reload (Story 5.1): a
-        // transient failure must not linger after a successful refresh, and an
-        // error for a tool that left the list disappears with it. The session
-        // DISABLED set is deliberately NOT cleared (it persists across
-        // refetches).
-        setRowErrors({})
-      } catch (err) {
-        if (cancelled) return
-        const status = err instanceof Error && 'status' in err ? (err as { status: number }).status : 0
-        if (status === 401 || status === 403) {
-          clearAuthState()
-          navigate('/login', { replace: true })
-          return
-        }
-        setLoadError('Die Werkzeugliste konnte nicht geladen werden.')
-      } finally {
-        if (!cancelled) setLoaded(true)
+  // loadTools fetches the dashboard list (shared by the mount effect and the
+  // post-reinstate refresh, Story 5.6): statuses/colors/counts update because
+  // they are all DERIVED from the refetched list. Stale inline errors are
+  // cleared on a successful refresh; the session DISABLED set is deliberately
+  // NOT cleared (it persists across refetches). The `cancelledRef` guard (set by
+  // the effect cleanup on unmount) is checked after every await so a load that
+  // resolves after unmount never touches component state.
+  const loadTools = useCallback(async (): Promise<void> => {
+    try {
+      const items = await listDashboardTools()
+      if (cancelledRef.current) return
+      setTools(items)
+      setRowErrors({})
+    } catch (err) {
+      if (cancelledRef.current) return
+      const status = err instanceof Error && 'status' in err ? (err as { status: number }).status : 0
+      if (status === 401 || status === 403) {
+        clearAuthState()
+        navigate('/login', { replace: true })
+        return
       }
-    }
-    void run()
-    return () => {
-      cancelled = true
+      setLoadError('Die Werkzeugliste konnte nicht geladen werden.')
+      setConfirmMessage('')
+    } finally {
+      if (!cancelledRef.current) setLoaded(true)
     }
   }, [navigate])
+
+  useEffect(() => {
+    cancelledRef.current = false
+    void loadTools()
+    return () => {
+      cancelledRef.current = true
+    }
+  }, [loadTools])
 
   // counts are the per-status totals of the CURRENT list (Story 6.1,
   // SPA_COUNTS): derived from the server-returned statuses, never guessed. An
@@ -154,6 +191,9 @@ export function DashboardPage() {
     }
     pendingGuardRef.current.add(tool.id)
     setPendingStarts((prev) => new Set(prev).add(tool.id))
+    // Story 5.6 patch: a new action starts → a stale reinstate confirmation
+    // must not linger next to the upcoming outcome.
+    setConfirmMessage('')
     try {
       const result = await startInspection(tool.id)
       // Story 5.2: the inspection header shows the inventory number as the tool
@@ -194,6 +234,46 @@ export function DashboardPage() {
     }
   }
 
+  // handleReinstate POSTs the reinstatement (Story 5.6, FR-15/AD-9) with the
+  // reason the PromptDialog collected. On success the dialog closes, the
+  // server's confirmation shows and the list refetches (the tool leaves OOS);
+  // on error the dialog closes and the server's German message shows inline on
+  // the row. 401 → login (stale/revoked session).
+  // handleReinstate POSTs the reinstatement (Story 5.6, FR-15/AD-9) with the
+  // reason the PromptDialog collected. The target comes from the CAPTURED
+  // reinstateDialog (set at open time — never a live list lookup, so a refetch
+  // can't drop it mid-input). On success the dialog closes, the SERVER's
+  // confirmation shows (the handler always sends it — no client literal) and
+  // the list refetches (the tool leaves OOS); on error the dialog closes and
+  // the server's German message shows inline. 401 → login (stale/revoked
+  // session). The confirmation is cleared at the start of every attempt, so a
+  // stale success never sits next to a newer error.
+  const handleReinstate = async (reason: string): Promise<void> => {
+    if (!reinstateDialog) return
+    const { toolId } = reinstateDialog
+    setReinstateBusy(true)
+    setConfirmMessage('')
+    try {
+      const result = await reinstateTool(toolId, reason)
+      setReinstateDialog(null)
+      setConfirmMessage(result.message)
+      await loadTools()
+    } catch (err) {
+      setReinstateDialog(null)
+      const status = err instanceof Error && 'status' in err ? (err as { status: number }).status : 0
+      if (status === 401) {
+        clearAuthState()
+        navigate('/login', { replace: true })
+        return
+      }
+      const message =
+        err instanceof Error && err.message !== '' ? err.message : 'Die Wiederherstellung ist fehlgeschlagen.'
+      setRowErrors((prev) => ({ ...prev, [toolId]: message }))
+    } finally {
+      setReinstateBusy(false)
+    }
+  }
+
   return (
     <div className={styles.page}>
       <Header />
@@ -216,6 +296,11 @@ export function DashboardPage() {
           {loadError && (
             <p role="alert" className={styles.error}>
               {loadError}
+            </p>
+          )}
+          {confirmMessage && (
+            <p role="status" className={styles.confirm}>
+              {confirmMessage}
             </p>
           )}
           {!loaded ? (
@@ -250,15 +335,36 @@ export function DashboardPage() {
                       >
                         {statusLabel(tool.status.status)}
                       </span>
-                      <button
-                        type="button"
-                        className={styles.startButton}
-                        disabled={disabledStarts.has(tool.id) || pendingStarts.has(tool.id)}
-                        aria-label={`Prüfung starten für ${tool.name}`}
-                        onClick={() => void handleStart(tool)}
-                      >
-                        Prüfung starten
-                      </button>
+                      <div className={styles.rowButtons}>
+                        <button
+                          type="button"
+                          className={styles.startButton}
+                          disabled={
+                            // Story 5.6: an OOS tool is NOT inspectable — the
+                            // start button is DISABLED (FR-14/AD-4, no start
+                            // click). Otherwise the session 403-disable + the
+                            // in-flight guard apply.
+                            tool.status.status === 'oos' ||
+                            disabledStarts.has(tool.id) ||
+                            pendingStarts.has(tool.id)
+                          }
+                          aria-label={`Prüfung starten für ${tool.name}`}
+                          onClick={() => void handleStart(tool)}
+                        >
+                          Prüfung starten
+                        </button>
+                        {tool.status.status === 'oos' && canReinstate && (
+                          <button
+                            type="button"
+                            className={styles.reinstateButton}
+                            disabled={reinstateBusy}
+                            aria-label={`Wiederherstellen für ${tool.name}`}
+                            onClick={() => setReinstateDialog({ toolId: tool.id, toolName: tool.name })}
+                          >
+                            Wiederherstellen
+                          </button>
+                        )}
+                      </div>
                     </div>
                   </div>
                   {rowErrors[tool.id] && (
@@ -272,6 +378,24 @@ export function DashboardPage() {
           )}
         </section>
       </main>
+
+      {reinstateDialog && (
+        <PromptDialog
+          title="Werkzeug wiederherstellen"
+          label={`Grund für die Wiederherstellung von ${reinstateDialog.toolName}`}
+          placeholder="Grund für die Wiederherstellung"
+          submitLabel="Wiederherstellen"
+          cancelLabel="Abbrechen"
+          // Client-side pre-check only; the wording matches the server's
+          // MsgReinstatementReasonRequired (the server remains the gate).
+          emptyMessage="Bitte gib einen Grund für die Wiederherstellung an."
+          busy={reinstateBusy}
+          onSubmit={(reason) => void handleReinstate(reason)}
+          onClose={() => {
+            if (!reinstateBusy) setReinstateDialog(null)
+          }}
+        />
+      )}
     </div>
   )
 }
