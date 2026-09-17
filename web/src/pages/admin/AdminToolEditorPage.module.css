@@ -1,0 +1,234 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  width: 100%;
+}
+
+.body {
+  flex: 1;
+  display: flex;
+  flex-direction: column;
+  width: 100%;
+}
+
+/* Tablet and wide: the admin nav sits as a persistent sidebar to the left,
+   matching every other admin page (UX-DR10). */
+@media (min-width: 641px) {
+  .body {
+    flex-direction: row;
+  }
+}
+
+.main {
+  flex: 1;
+  width: 100%;
+  max-width: 720px;
+  margin: 0 auto;
+  padding: var(--gear-space-4) var(--gear-space-margin-mobile);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-4);
+  box-sizing: border-box;
+}
+
+.title {
+  font-size: var(--gear-font-display-size);
+  font-weight: var(--gear-font-display-weight);
+  line-height: var(--gear-font-display-line-height);
+  letter-spacing: var(--gear-font-display-letter-spacing);
+  color: var(--gear-color-ink-primary);
+  margin: 0 0 var(--gear-space-2);
+}
+
+.backButton {
+  align-self: flex-start;
+  min-height: 48px;
+  padding: 0 var(--gear-space-4);
+  border: 1px solid var(--gear-color-border-hairline);
+  border-radius: var(--gear-radius-md);
+  background-color: transparent;
+  color: var(--gear-color-ink-primary);
+  font-family: var(--gear-font-family);
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  cursor: pointer;
+}
+
+.backButton:hover {
+  background-color: var(--gear-color-surface-base);
+}
+
+.backButton:focus-visible {
+  outline: 2px solid var(--gear-focus-ring-color);
+  outline-offset: 2px;
+}
+
+.feedbackSuccess,
+.feedbackError {
+  margin: 0;
+  padding: var(--gear-space-3) var(--gear-space-4);
+  border-radius: var(--gear-radius-md);
+  font-size: var(--gear-font-label-size);
+  line-height: var(--gear-font-label-line-height);
+}
+
+.feedbackSuccess {
+  background-color: var(--gear-color-status-green-soft);
+  border: 1px solid var(--gear-color-status-green);
+  color: var(--gear-color-ink-primary);
+}
+
+.feedbackError {
+  background-color: var(--gear-color-status-red-soft);
+  border: 1px solid var(--gear-color-status-red);
+  color: var(--gear-color-status-red);
+}
+
+.emptyHint {
+  margin: 0;
+  color: var(--gear-color-ink-secondary);
+  font-size: var(--gear-font-body-size);
+}
+
+.skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-3);
+}
+
+.skeletonRow {
+  height: 72px;
+  border-radius: var(--gear-radius-md);
+  background: linear-gradient(
+    90deg,
+    var(--gear-color-surface-base) 25%,
+    var(--gear-color-surface-raised) 50%,
+    var(--gear-color-surface-base) 75%
+  );
+  background-size: 200% 100%;
+  animation: shimmer 1.4s ease infinite;
+}
+
+@keyframes shimmer {
+  from {
+    background-position: 200% 0;
+  }
+  to {
+    background-position: -200% 0;
+  }
+}
+
+.editor {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-4);
+  width: 100%;
+  padding: var(--gear-space-5);
+  background-color: var(--gear-color-surface-raised);
+  border: 1px solid var(--gear-color-border-hairline);
+  border-radius: var(--gear-radius-md);
+  box-sizing: border-box;
+}
+
+.formHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: var(--gear-space-3);
+}
+
+.formHeaderActions {
+  display: flex;
+  gap: var(--gear-space-2);
+  flex-shrink: 0;
+}
+
+.formTitle {
+  font-size: var(--gear-font-title-size);
+  font-weight: var(--gear-font-title-weight);
+  color: var(--gear-color-ink-primary);
+  margin: 0;
+}
+
+.field {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-2);
+  flex: 1;
+  min-width: 0;
+}
+
+.fieldRow {
+  display: flex;
+  gap: var(--gear-space-4);
+}
+
+.label {
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  color: var(--gear-color-ink-primary);
+}
+
+.input,
+.select {
+  min-height: 48px;
+  padding: 0 var(--gear-space-3);
+  border-radius: var(--gear-radius-md);
+  border: 1px solid var(--gear-color-input-border);
+  background-color: var(--gear-color-input-bg);
+  color: var(--gear-color-input-text);
+  font-size: var(--gear-font-body-size);
+  font-family: var(--gear-font-family);
+  box-sizing: border-box;
+}
+
+.select {
+  width: 100%;
+}
+
+/* The inventory-number read-only display on the create form (Story 4-3b): the
+   server auto-assigns the number, so the create editor shows it as a disabled
+   value instead of an editable input. */
+.inputReadonly {
+  min-height: 48px;
+  padding: 0 var(--gear-space-3);
+  border-radius: var(--gear-radius-md);
+  border: 1px solid var(--gear-color-border-hairline);
+  background-color: var(--gear-color-surface-base);
+  color: var(--gear-color-ink-secondary);
+  font-size: var(--gear-font-body-size);
+  font-family: var(--gear-font-family);
+  box-sizing: border-box;
+}
+
+.fieldHint {
+  font-size: var(--gear-font-meta-size);
+  color: var(--gear-color-ink-secondary);
+}
+
+.rowButton,
+.saveButton {
+  min-height: 48px;
+  padding: 0 var(--gear-space-4);
+  border-radius: var(--gear-radius-md);
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  font-family: var(--gear-font-family);
+  cursor: pointer;
+  border: 1px solid var(--gear-color-border-hairline);
+  background-color: var(--gear-color-surface-raised);
+  color: var(--gear-color-ink-primary);
+}
+
+.rowButton:disabled,
+.saveButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.saveButton {
+  background-color: var(--gear-color-button-primary-bg);
+  border-color: var(--gear-color-button-primary-bg);
+  color: var(--gear-color-button-primary-text);
+}

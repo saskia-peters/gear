@@ -521,6 +521,122 @@ describe('App & Dashboard Foundation', () => {
     expect(screen.queryByRole('link', { name: 'ADMIN' })).not.toBeInTheDocument()
   })
 
+  // --- Dedicated editor route gating (Spec 4-6 review 12) --------------------
+
+  const appToolTypeFixture = () => ({
+    id: 'id-t1',
+    name: 'Bohrmaschine',
+    default_schedule_id: 'id-s1',
+    required_qualification_id: '',
+    inspection_mode: 'pass_fail',
+    attributes: {},
+    checklist_items: [],
+    created_at: '2026-09-10T10:00:00Z',
+    updated_at: '2026-09-10T10:00:00Z',
+  })
+
+  const appToolFixture = () => ({
+    id: 'id-w1',
+    name: 'Bohrmaschine-01',
+    tool_type_id: 'id-t1',
+    tool_type_name: 'Bohrmaschine',
+    schedule_id: '',
+    inventory_number: 'GEAR000001',
+    attributes: {},
+    created_at: '2026-09-10T10:00:00Z',
+    updated_at: '2026-09-10T10:00:00Z',
+  })
+
+  const appScheduleFixture = () => ({
+    id: 'id-s1',
+    name: '1 Jahr',
+    interval_unit: 'year',
+    interval_magnitude: 1,
+    created_at: '2026-09-10T10:00:00Z',
+    updated_at: '2026-09-10T10:00:00Z',
+  })
+
+  // stubEditorDispatch answers RequireAuth/RequireAdminModule server-side AND
+  // the editor pages' catalog fetches, so an ALLOWED caller actually sees the
+  // editor form (the `:id` routes need a real list row to pre-fill).
+  function stubEditorDispatch(codes: string[], data: { toolTypes?: unknown; tools?: unknown; schedules?: unknown }) {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn((input: string | URL | Request) => {
+        const url = typeof input === 'string' ? input : input instanceof URL ? input.href : input.url
+        if (url.includes('/api/v1/auth/me/permissions')) {
+          return Promise.resolve({ ok: true, status: 200, json: async () => ({ permissions: codes }) })
+        }
+        if (url.includes('/api/v1/admin/tool-types')) {
+          return Promise.resolve({ ok: true, status: 200, json: async () => data.toolTypes ?? [] })
+        }
+        if (url.includes('/api/v1/admin/tools')) {
+          return Promise.resolve({ ok: true, status: 200, json: async () => data.tools ?? [] })
+        }
+        if (url.includes('/api/v1/admin/settings/schedules')) {
+          return Promise.resolve({ ok: true, status: 200, json: async () => data.schedules ?? [] })
+        }
+        if (url.includes('/api/v1/admin/qualifications')) {
+          return Promise.resolve({ ok: true, status: 200, json: async () => ({ qualifications: [], users: [] }) })
+        }
+        return Promise.resolve(validProfile({ permissions: codes }))
+      }),
+    )
+  }
+
+  it.each([
+    ['typen-neu', '/admin/werkzeuge/typen/neu', ['tool_types.manage'], 'Neuer Gerätetyp', { schedules: [appScheduleFixture()] }],
+    ['typen-id', '/admin/werkzeuge/typen/id-t1', ['tool_types.manage'], 'Gerätetyp bearbeiten', { toolTypes: [appToolTypeFixture()], schedules: [appScheduleFixture()] }],
+    ['tools-neu', '/admin/werkzeuge/tools/neu', ['tools.manage'], 'Neues Werkzeug', { toolTypes: [appToolTypeFixture()], schedules: [appScheduleFixture()] }],
+    ['tools-id', '/admin/werkzeuge/tools/id-w1', ['tool.edit'], 'Werkzeug bearbeiten', { toolTypes: [appToolTypeFixture()], tools: [appToolFixture()], schedules: [appScheduleFixture()] }],
+    ['zeitplaene-neu', '/admin/einstellungen/zeitplaene/neu', ['schedules.manage'], 'Neuer Zeitplan', {}],
+    ['zeitplaene-id', '/admin/einstellungen/zeitplaene/id-s1', ['schedules.manage'], 'Zeitplan bearbeiten', { schedules: [appScheduleFixture()] }],
+  ])(
+    'EDITOR_ROUTE_ALLOWED_%s: a caller holding the entry codes sees the editor page',
+    async (_key, route, codes, heading, data) => {
+      stubEditorDispatch(codes, data)
+      await act(async () => {
+        render(
+          <ThemeProvider>
+            <MemoryRouter initialEntries={[route]}>
+              <AppRoutes />
+            </MemoryRouter>
+          </ThemeProvider>,
+        )
+      })
+
+      expect(await screen.findByRole('heading', { level: 3, name: heading })).toBeInTheDocument()
+    },
+  )
+
+  it.each([
+    ['typen-neu', '/admin/werkzeuge/typen/neu', ['tools.manage'], 'Neuer Gerätetyp'],
+    ['typen-id', '/admin/werkzeuge/typen/id-t1', ['tools.manage'], 'Gerätetyp bearbeiten'],
+    ['tools-neu', '/admin/werkzeuge/tools/neu', ['tool_types.manage'], 'Neues Werkzeug'],
+    ['tools-id', '/admin/werkzeuge/tools/id-w1', ['tool_types.manage'], 'Werkzeug bearbeiten'],
+    ['zeitplaene-neu', '/admin/einstellungen/zeitplaene/neu', ['tools.manage'], 'Neuer Zeitplan'],
+    ['zeitplaene-id', '/admin/einstellungen/zeitplaene/id-s1', ['tools.manage'], 'Zeitplan bearbeiten'],
+  ])(
+    'EDITOR_ROUTE_BLOCKED_%s: a caller lacking the entry codes is redirected to the Dashboard',
+    async (_key, route, blockingCode, heading) => {
+      stubSessionValidation(validProfile({ is_admin: false, permissions: [blockingCode] }))
+      await act(async () => {
+        render(
+          <ThemeProvider>
+            <MemoryRouter initialEntries={[route]}>
+              <AppRoutes />
+            </MemoryRouter>
+          </ThemeProvider>,
+        )
+      })
+
+      expect(
+        await screen.findByRole('heading', { level: 2, name: 'Übersicht' }),
+      ).toBeInTheDocument()
+      expect(screen.queryByRole('heading', { name: heading })).not.toBeInTheDocument()
+    },
+  )
+
   it('REQUIRE_AUTH_VALID: a stored token validated server-side grants access to the dashboard', async () => {
     await renderApp()
     expect(screen.getByRole('heading', { level: 2, name: 'Übersicht' })).toBeInTheDocument()

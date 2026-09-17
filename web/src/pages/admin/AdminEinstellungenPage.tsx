@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react'
-import { useNavigate } from 'react-router-dom'
+import { useLocation, useNavigate } from 'react-router-dom'
 import { Header } from '../../components/Header.tsx'
 import { AdminNav } from '../../components/AdminNav.tsx'
 import { adminForbiddenHandled, clearAuthState, getPermissions } from '../../auth/authState.ts'
@@ -18,11 +18,10 @@ import {
   deleteBackupDestination,
   testBackupDestination,
   listSchedules,
-  createSchedule,
-  updateSchedule,
   archiveSchedule,
   getSystemSettings,
   updateSystemSetting,
+  scheduleDisplay,
 } from '../../auth/settings.ts'
 import type {
   SmtpSecurity,
@@ -31,7 +30,6 @@ import type {
   BackupDestination,
   BackupDestinationInput,
   Schedule,
-  ScheduleInput,
   ScheduleIntervalUnit,
   SystemSetting,
 } from '../../auth/settings.ts'
@@ -52,31 +50,33 @@ const MECHANISM_OPTIONS: ReadonlyArray<{ value: BackupMechanism; label: string }
   { value: 'sftp', label: 'SFTP' },
 ]
 
-// Interval units of the schedule catalog (FR-30/AD-16). `label` is the dropdown
-// option text; `display` is the row's German descriptor ("Jährlich", "Monatlich",
-// … — unit-only, never varying by magnitude), and `singular`/`plural` give the
-// correctly pluralized German unit rendered as e.g. "Jährlich − 1 Jahr" or
-// "Wöchentlich − 2 Wochen".
-const INTERVAL_OPTIONS: ReadonlyArray<{ value: ScheduleIntervalUnit; label: string; display: string; singular: string; plural: string }> = [
-  { value: 'year', label: 'Jahr', display: 'Jährlich', singular: 'Jahr', plural: 'Jahre' },
-  { value: 'quarter', label: 'Quartal', display: 'Vierteljährlich', singular: 'Quartal', plural: 'Quartale' },
-  { value: 'month', label: 'Monat', display: 'Monatlich', singular: 'Monat', plural: 'Monate' },
-  { value: 'week', label: 'Woche', display: 'Wöchentlich', singular: 'Woche', plural: 'Wochen' },
-  { value: 'day', label: 'Tag', display: 'Täglich', singular: 'Tag', plural: 'Tage' },
-]
+// Interval units of the schedule catalog (FR-30/AD-16) — the shared
+// INTERVAL_OPTIONS + scheduleDisplay vocabulary lives in the settings data
+// module so the Zeitpläne list rows and the dedicated schedule editor page
+// (Spec 4-6) cannot drift.
 
 type Feedback = { kind: 'success' | 'error'; message: string } | null
 type Tab = 'email' | 'backup' | 'schedules' | 'system'
+type SortDir = 'asc' | 'desc'
+
+// Schedule sorting is CHRONOLOGICAL (Spec 4-6 review 2): a week is shorter
+// than a month, so the rendered German string ("Wöchentlich − 2 Wochen" vs
+// "Monatlich − 1 Monat") must never drive the order. Each unit maps to its
+// representative duration in days; the sort compares (weight × magnitude).
+const INTERVAL_WEIGHT_DAYS: Record<ScheduleIntervalUnit, number> = {
+  year: 365,
+  quarter: 91,
+  month: 30,
+  week: 7,
+  day: 1,
+}
+
+function scheduleDurationDays(s: Schedule): number {
+  return (INTERVAL_WEIGHT_DAYS[s.interval_unit] ?? 0) * s.interval_magnitude
+}
 
 function mechanismLabel(m: BackupMechanism): string {
   return MECHANISM_OPTIONS.find((o) => o.value === m)?.label ?? m
-}
-
-function scheduleDisplay(s: Schedule): string {
-  const option = INTERVAL_OPTIONS.find((o) => o.value === s.interval_unit)
-  if (!option) return `${s.interval_magnitude} ${s.interval_unit}`
-  const unit = s.interval_magnitude === 1 ? option.singular : option.plural
-  return `${option.display} − ${s.interval_magnitude} ${unit}`
 }
 
 // AdminEinstellungenPage is the Einstellungen surface (Story 3.1 + 3.2 + 4.1 +
@@ -92,14 +92,35 @@ function scheduleDisplay(s: Schedule): string {
 // truth.
 export function AdminEinstellungenPage() {
   const navigate = useNavigate()
+  const location = useLocation()
   const perms = getPermissions()
   const canEmail = perms.includes(SMTP_SETTINGS_PERMISSION)
   const canBackup = perms.includes(BACKUP_SETTINGS_PERMISSION)
   const canSchedules = perms.includes(SCHEDULES_PERMISSION)
   const canSystem = perms.includes(SYSTEM_SETTINGS_PERMISSION)
-  const [activeTab, setActiveTab] = useState<Tab>(
-    canEmail ? 'email' : canBackup ? 'backup' : canSchedules ? 'schedules' : 'system',
-  )
+  // The schedule editor returns via router state (Spec 4-6 review 1/4): the
+  // carried tab puts a multi-tab holder back on Zeitpläne, and the carried
+  // message is shown once as a success notice. The state is cleared after the
+  // first render so it never reappears on a later remount.
+  const carried = location.state as { tab?: Tab | ''; message?: string } | null
+  const [activeTab, setActiveTab] = useState<Tab>(() => {
+    const fromTab = carried?.tab
+    if (fromTab === 'email' && canEmail) return 'email'
+    if (fromTab === 'backup' && canBackup) return 'backup'
+    if (fromTab === 'schedules' && canSchedules) return 'schedules'
+    if (fromTab === 'system' && canSystem) return 'system'
+    return canEmail ? 'email' : canBackup ? 'backup' : canSchedules ? 'schedules' : 'system'
+  })
+  const [notice] = useState<string | null>(carried?.message ?? null)
+
+  useEffect(() => {
+    // Drop the carried state after the first render: the success notice stays
+    // visible for this view, but a later remount/navigation must not re-show it.
+    if (notice) {
+      navigate(location.pathname, { replace: true, state: null })
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [])
 
   // handleApiError inspects an API error: a 403 clears the cached admin flag
   // and leaves the admin module; a 401 (expired/revoked session) clears the
@@ -133,6 +154,12 @@ export function AdminEinstellungenPage() {
           <p className={styles.description}>
             E-Mail-Versand, Backup-Ziele, Zeitpläne und System-Einstellungen. Änderungen gelten sofort, ohne Neubereitstellung.
           </p>
+
+          {notice && (
+            <p role="status" className={styles.feedbackSuccess}>
+              {notice}
+            </p>
+          )}
 
           <div className={styles.tabs} role="tablist" aria-label="Einstellungen">
             {canEmail && (
@@ -905,23 +932,23 @@ function BackupSettingsTab({ onApiError }: { onApiError: (err: unknown) => boole
   )
 }
 
-// ScheduleSettingsTab is the Zeitpläne surface (Story 4.1, FR-30/AD-16): the
-// active schedule-catalog list (name + "Jährlich − 1 year" interval display)
-// with a create/edit form (name, interval unit dropdown, magnitude number
-// input) and a per-row archive action with a confirm. Archive is SOFT — the
-// row leaves the active list and is never hard-deleted; archived schedules are
-// not shown (the server filters them). Inline German feedback.
+// ScheduleSettingsTab is the Zeitpläne surface (Story 4.1, FR-30/AD-16, Spec
+// 4-6): a COMPACT one-line sortable list of the active schedule-catalog rows —
+// Name · Intervall ("Jährlich − 1 Jahr") · Edit — with a "Neuer Zeitplan"
+// button navigating to /admin/einstellungen/zeitplaene/neu, a per-row
+// "Bearbeiten" navigating to /admin/einstellungen/zeitplaene/:id, and a
+// per-row archive action with a confirm. Archive is SOFT — the row leaves the
+// active list and is never hard-deleted; archived schedules are not shown (the
+// server filters them). The create/edit FORM lives on the dedicated editor
+// page. Sorted presentation-only (Name asc by default, localeCompare 'de').
 function ScheduleSettingsTab({ onApiError }: { onApiError: (err: unknown) => boolean }) {
+  const navigate = useNavigate()
   const [loaded, setLoaded] = useState(false)
   const [loadError, setLoadError] = useState('')
   const [schedules, setSchedules] = useState<Schedule[]>([])
   const [busy, setBusy] = useState(false)
   const [feedback, setFeedback] = useState<Feedback>(null)
-
-  const [editingId, setEditingId] = useState<string | null>(null)
-  const [name, setName] = useState('')
-  const [intervalUnit, setIntervalUnit] = useState<ScheduleIntervalUnit>('year')
-  const [magnitude, setMagnitude] = useState('')
+  const [sort, setSort] = useState<{ key: 'name' | 'intervall'; dir: SortDir }>({ key: 'name', dir: 'asc' })
 
   useEffect(() => {
     let cancelled = false
@@ -945,51 +972,36 @@ function ScheduleSettingsTab({ onApiError }: { onApiError: (err: unknown) => boo
     }
   }, [onApiError])
 
-  function resetForm() {
-    setEditingId(null)
-    setName('')
-    setIntervalUnit('year')
-    setMagnitude('')
+  function cycleSort(key: 'name' | 'intervall') {
+    setSort((prev) => (prev.key === key ? { key, dir: prev.dir === 'asc' ? 'desc' : 'asc' } : { key, dir: 'asc' }))
   }
 
-  function startEdit(s: Schedule) {
-    setEditingId(s.id)
-    setName(s.name)
-    setIntervalUnit(s.interval_unit)
-    setMagnitude(String(s.interval_magnitude))
-    setFeedback(null)
+  function ariaSort(key: 'name' | 'intervall'): 'ascending' | 'descending' | 'none' {
+    if (sort.key !== key) return 'none'
+    return sort.dir === 'asc' ? 'ascending' : 'descending'
   }
 
-  async function save() {
-    setBusy(true)
-    setFeedback(null)
-    const input: ScheduleInput = {
-      name: name.trim(),
-      interval_unit: intervalUnit,
-      interval_magnitude: Number(magnitude),
-    }
-    try {
-      if (editingId) {
-        const saved = await updateSchedule(editingId, input)
-        setSchedules((prev) => prev.map((s) => (s.id === editingId ? saved : s)))
-        setFeedback({ kind: 'success', message: saved.message })
-        resetForm()
-      } else {
-        const created = await createSchedule(input)
-        setSchedules((prev) => [...prev, created])
-        setFeedback({ kind: 'success', message: created.message })
-        resetForm()
-      }
-    } catch (err) {
-      if (onApiError(err)) return
-      setFeedback({
-        kind: 'error',
-        message: err instanceof Error ? err.message : 'Der Zeitplan konnte nicht gespeichert werden.',
-      })
-    } finally {
-      setBusy(false)
-    }
+  function sortLabel(key: 'name' | 'intervall', label: string): string {
+    const state = ariaSort(key)
+    const hint = state === 'ascending' ? ' (absteigend)' : state === 'descending' ? ' (aufsteigend)' : ''
+    return `Sortieren nach ${label}${hint}`
   }
+
+  function sortIndicator(key: 'name' | 'intervall'): string {
+    return ariaSort(key) === 'ascending' ? '▲' : ariaSort(key) === 'descending' ? '▼' : ''
+  }
+
+  const sorted = [...schedules].sort((a, b) => {
+    if (sort.key === 'intervall') {
+      // Chronological duration, NOT the rendered German string (Spec 4-6
+      // review 2): a "Wöchentlich − 2 Wochen" (14 days) sorts before a
+      // "Monatlich − 1 Monat" (30 days) even though "W" precedes "M".
+      const cmp = scheduleDurationDays(a) - scheduleDurationDays(b)
+      return sort.dir === 'asc' ? cmp : -cmp
+    }
+    const cmp = a.name.localeCompare(b.name, 'de', { sensitivity: 'base' })
+    return sort.dir === 'asc' ? cmp : -cmp
+  })
 
   async function archive(s: Schedule) {
     const ok = window.confirm(`Zeitplan „${s.name}“ wirklich archivieren? Archivierte Zeitpläne können nicht mehr bearbeitet werden.`)
@@ -1000,7 +1012,6 @@ function ScheduleSettingsTab({ onApiError }: { onApiError: (err: unknown) => boo
       const result = await archiveSchedule(s.id)
       setSchedules((prev) => prev.filter((x) => x.id !== s.id))
       setFeedback({ kind: 'success', message: result.message })
-      if (editingId === s.id) resetForm()
     } catch (err) {
       if (onApiError(err)) return
       setFeedback({
@@ -1035,114 +1046,80 @@ function ScheduleSettingsTab({ onApiError }: { onApiError: (err: unknown) => boo
         </div>
       ) : (
         <>
-          <form
-            className={styles.editor}
-            onSubmit={(e) => {
-              e.preventDefault()
-              void save()
-            }}
-          >
-            <div className={styles.formHeader}>
-              <h3 className={styles.formTitle}>{editingId ? 'Zeitplan bearbeiten' : 'Neuer Zeitplan'}</h3>
-              <div className={styles.formHeaderActions}>
-                <button type="submit" className={styles.saveButton} disabled={busy}>
-                  {busy ? 'Wird gespeichert...' : editingId ? 'Änderungen speichern' : 'Speichern'}
-                </button>
-                {editingId && (
-                  <button type="button" className={styles.testButton} disabled={busy} onClick={resetForm}>
-                    Abbrechen
-                  </button>
-                )}
-              </div>
-            </div>
+          <div className={styles.toolbar}>
+            <button type="button" className={styles.saveButton} onClick={() => navigate('/admin/einstellungen/zeitplaene/neu')}>
+              Neuer Zeitplan
+            </button>
+          </div>
 
-            <div className={styles.field}>
-              <label className={styles.label} htmlFor="schedule-name">
-                Name
-              </label>
-              <input
-                id="schedule-name"
-                className={styles.input}
-                value={name}
-                onChange={(e) => {
-                  setName(e.target.value)
-                  setFeedback(null)
-                }}
-                maxLength={255}
-                autoComplete="off"
-              />
-            </div>
-
-            <div className={styles.scheduleFieldRow}>
-              <div className={styles.field}>
-                <label className={styles.label} htmlFor="schedule-unit">
-                  Zeiteinheit
-                </label>
-                <select
-                  id="schedule-unit"
-                  className={styles.select}
-                  value={intervalUnit}
-                  onChange={(e) => {
-                    setIntervalUnit(e.target.value as ScheduleIntervalUnit)
-                    setFeedback(null)
-                  }}
-                >
-                  {INTERVAL_OPTIONS.map((option) => (
-                    <option key={option.value} value={option.value}>
-                      {option.label}
-                    </option>
-                  ))}
-                </select>
-              </div>
-              <div className={styles.field}>
-                <label className={styles.label} htmlFor="schedule-magnitude">
-                  Intervallgröße
-                </label>
-                <input
-                  id="schedule-magnitude"
-                  className={styles.input}
-                  type="number"
-                  min={1}
-                  max={1000000}
-                  value={magnitude}
-                  onChange={(e) => {
-                    setMagnitude(e.target.value)
-                    setFeedback(null)
-                  }}
-                />
-              </div>
-            </div>
-          </form>
-
-          {schedules.length > 0 && (
-            <ul className={styles.scheduleList} aria-label="Zeitpläne">
-              {schedules.map((s) => (
-                <li key={s.id} className={styles.scheduleRow}>
-                  <div className={styles.scheduleRowInfo}>
-                    <span className={styles.scheduleRowName}>{s.name}</span>
-                    <span className={styles.scheduleRowMeta}>{scheduleDisplay(s)}</span>
-                  </div>
-                  <div className={styles.scheduleRowActions}>
+          {schedules.length === 0 ? (
+            <p role="status" className={styles.emptyHint}>
+              Keine Zeitpläne vorhanden. Lege den ersten Zeitplan an.
+            </p>
+          ) : (
+            <table className={styles.catalogTable} aria-label="Zeitpläne">
+              <thead>
+                <tr>
+                  <th scope="col" aria-sort={ariaSort('name')}>
                     <button
                       type="button"
-                      className={styles.rowButton}
-                      disabled={busy}
-                      onClick={() => startEdit(s)}
+                      className={styles.sortButton}
+                      onClick={() => cycleSort('name')}
+                      aria-label={sortLabel('name', 'Name')}
                     >
-                      Bearbeiten
+                      Name
+                      <span className={styles.sortIndicator} aria-hidden="true">
+                        {sortIndicator('name')}
+                      </span>
                     </button>
+                  </th>
+                  <th scope="col" aria-sort={ariaSort('intervall')}>
                     <button
                       type="button"
-                      className={styles.dangerButton}
-                      disabled={busy}
-                      onClick={() => void archive(s)}
+                      className={styles.sortButton}
+                      onClick={() => cycleSort('intervall')}
+                      aria-label={sortLabel('intervall', 'Intervall')}
                     >
-                      Archivieren
+                      Intervall
+                      <span className={styles.sortIndicator} aria-hidden="true">
+                        {sortIndicator('intervall')}
+                      </span>
                     </button>
-                  </div>
-                </li>
-              ))}
-            </ul>
+                  </th>
+                  <th scope="col">
+                    <span className={styles.visuallyHidden}>Aktionen</span>
+                  </th>
+                </tr>
+              </thead>
+              <tbody>
+                {sorted.map((s) => (
+                  <tr key={s.id} className={styles.catalogRow}>
+                    <td className={styles.catalogName}>{s.name}</td>
+                    <td className={styles.catalogMeta}>{scheduleDisplay(s)}</td>
+                    <td>
+                      <div className={styles.rowActions}>
+                        <button
+                          type="button"
+                          className={styles.rowButton}
+                          disabled={busy}
+                          onClick={() => navigate(`/admin/einstellungen/zeitplaene/${s.id}`)}
+                        >
+                          Bearbeiten
+                        </button>
+                        <button
+                          type="button"
+                          className={styles.dangerButton}
+                          disabled={busy}
+                          onClick={() => void archive(s)}
+                        >
+                          Archivieren
+                        </button>
+                      </div>
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
           )}
         </>
       )}

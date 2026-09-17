@@ -283,6 +283,29 @@ function buildScheduleBody(input: ScheduleInput): Record<string, unknown> {
   }
 }
 
+// Interval units of the schedule catalog (FR-30/AD-16). `label` is the dropdown
+// option text; `display` is the row's German descriptor ("Jährlich", "Monatlich",
+// … — unit-only, never varying by magnitude), and `singular`/`plural` give the
+// correctly pluralized German unit rendered as e.g. "Jährlich − 1 Jahr" or
+// "Wöchentlich − 2 Wochen". Shared by the Zeitpläne list rows and the dedicated
+// schedule editor page (Spec 4-6).
+export const INTERVAL_OPTIONS: ReadonlyArray<{ value: ScheduleIntervalUnit; label: string; display: string; singular: string; plural: string }> = [
+  { value: 'year', label: 'Jahr', display: 'Jährlich', singular: 'Jahr', plural: 'Jahre' },
+  { value: 'quarter', label: 'Quartal', display: 'Vierteljährlich', singular: 'Quartal', plural: 'Quartale' },
+  { value: 'month', label: 'Monat', display: 'Monatlich', singular: 'Monat', plural: 'Monate' },
+  { value: 'week', label: 'Woche', display: 'Wöchentlich', singular: 'Woche', plural: 'Wochen' },
+  { value: 'day', label: 'Tag', display: 'Täglich', singular: 'Tag', plural: 'Tage' },
+]
+
+// scheduleDisplay renders one schedule's interval as the German descriptor
+// ("Jährlich − 1 Jahr") shown in the Zeitpläne list rows (Spec 4-6).
+export function scheduleDisplay(s: Schedule): string {
+  const option = INTERVAL_OPTIONS.find((o) => o.value === s.interval_unit)
+  if (!option) return `${s.interval_magnitude} ${s.interval_unit}`
+  const unit = s.interval_magnitude === 1 ? option.singular : option.plural
+  return `${option.display} − ${s.interval_magnitude} ${unit}`
+}
+
 // --- Configurable system settings (Story 5-2b) --------------------------------
 
 // SystemSettingValueType is the typed-store value type of a setting. Durations

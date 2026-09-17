@@ -50,12 +50,14 @@ function settingsFixture() {
   }
 }
 
-function renderPage() {
+function renderPage(initialEntry: string | { pathname: string; state?: unknown } = '/admin/einstellungen') {
   return render(
     <ThemeProvider>
-      <MemoryRouter initialEntries={['/admin/einstellungen']}>
+      <MemoryRouter initialEntries={[initialEntry]}>
         <Routes>
           <Route path="/admin/einstellungen" element={<AdminEinstellungenPage />} />
+          <Route path="/admin/einstellungen/zeitplaene/neu" element={<div>ZeitplanNeuSeite</div>} />
+          <Route path="/admin/einstellungen/zeitplaene/:id" element={<div>ZeitplanEditSeite</div>} />
           <Route path="/" element={<div>Dashboard</div>} />
           <Route path="/login" element={<div>Anmeldung</div>} />
         </Routes>
@@ -589,11 +591,14 @@ describe('AdminEinstellungenPage Zeitpläne tab', () => {
     stubFetchRoutes([stubSchedulesList([])])
     renderPage()
 
-    expect(await screen.findByLabelText('Name')).toBeInTheDocument()
+    expect(await screen.findByText('Keine Zeitpläne vorhanden. Lege den ersten Zeitplan an.')).toBeInTheDocument()
     expect(screen.getByRole('tab', { name: 'Zeitpläne' })).toBeInTheDocument()
     expect(screen.queryByRole('tab', { name: 'E-Mail' })).not.toBeInTheDocument()
     expect(screen.queryByRole('tab', { name: 'Backup' })).not.toBeInTheDocument()
     expect(screen.queryByLabelText('SMTP-Host')).not.toBeInTheDocument()
+    // No inline create/edit form on the list.
+    expect(screen.queryByRole('button', { name: 'Speichern' })).not.toBeInTheDocument()
+    expect(screen.queryByLabelText('Intervallgröße')).not.toBeInTheDocument()
   })
 
   it('TAB_GATING_EMAIL: with only admin.settings.email the Zeitpläne tab is hidden', async () => {
@@ -605,14 +610,15 @@ describe('AdminEinstellungenPage Zeitpläne tab', () => {
     expect(screen.queryByRole('tab', { name: 'Zeitpläne' })).not.toBeInTheDocument()
   })
 
-  it('EMPTY_LIST: no schedules renders an empty list without error', async () => {
+  it('EMPTY_LIST: no schedules renders the German empty note and the create button stays visible', async () => {
     stubFetchRoutes([stubSchedulesList([])])
     renderPage()
-    expect(await screen.findByRole('button', { name: 'Speichern' })).toBeInTheDocument()
-    expect(screen.queryByRole('list', { name: 'Zeitpläne' })).not.toBeInTheDocument()
+    expect(await screen.findByText('Keine Zeitpläne vorhanden. Lege den ersten Zeitplan an.')).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Neuer Zeitplan' })).toBeInTheDocument()
+    expect(screen.queryByRole('table', { name: 'Zeitpläne' })).not.toBeInTheDocument()
   })
 
-  it('LIST: schedules render with the "Jährlich − 1 Jahr" interval display', async () => {
+  it('LIST: schedules render as compact one-line rows with the interval display + sort headers', async () => {
     stubFetchRoutes([
       stubSchedulesList([
         scheduleFixture(),
@@ -625,66 +631,56 @@ describe('AdminEinstellungenPage Zeitpläne tab', () => {
     expect(screen.getByText('Jährlich − 1 Jahr')).toBeInTheDocument()
     expect(screen.getByText('Wöchentlich − 2 Wochen')).toBeInTheDocument()
     expect(screen.getAllByRole('button', { name: 'Archivieren' })).toHaveLength(2)
+    expect(screen.getAllByRole('button', { name: 'Bearbeiten' })).toHaveLength(2)
+    // The Name column is the default sort, so it shows the next-action hint.
+    expect(screen.getByRole('button', { name: 'Sortieren nach Name (absteigend)' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Sortieren nach Intervall' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Neuer Zeitplan' })).toBeInTheDocument()
   })
 
-  it('CREATE: the form POSTs and adds the row inline', async () => {
-    const fetchMock = stubFetchRoutes([
-      stubSchedulesList([]),
-      {
-        matcher: (url, init) => url === SCHEDULES_URL && init?.method === 'POST',
-        response: { ok: true, status: 201, body: { ...scheduleFixture(), message: 'Zeitplan gespeichert.' } },
-      },
+  it('SORT: clicking the Intervall column re-orders by CHRONOLOGICAL duration (Spec 4-6 review 2)', async () => {
+    stubFetchRoutes([
+      stubSchedulesList([
+        scheduleFixture(), // Jährlich − 1 Jahr (365 days)
+        { ...scheduleFixture(), id: 'id-s2', name: 'Monatlich', interval_unit: 'month', interval_magnitude: 1 }, // 30 days
+        { ...scheduleFixture(), id: 'id-s3', name: '2 Wochen', interval_unit: 'week', interval_magnitude: 2 }, // 14 days
+      ]),
     ])
     const user = userEvent.setup()
     renderPage()
 
-    await screen.findByRole('button', { name: 'Speichern' })
-    await user.type(screen.getByLabelText('Name'), '1 Jahr')
-    await user.selectOptions(screen.getByLabelText('Zeiteinheit'), 'year')
-    await user.clear(screen.getByLabelText('Intervallgröße'))
-    await user.type(screen.getByLabelText('Intervallgröße'), '1')
-    await user.click(screen.getByRole('button', { name: 'Speichern' }))
-
-    expect(await screen.findByText('Zeitplan gespeichert.')).toBeInTheDocument()
-    const postCall = fetchMock.mock.calls.find(([url, init]) => url === SCHEDULES_URL && init?.method === 'POST')
-    expect(postCall).toBeTruthy()
-    const body = JSON.parse((postCall![1] as RequestInit).body as string)
-    expect(body.name).toBe('1 Jahr')
-    expect(body.interval_unit).toBe('year')
-    expect(body.interval_magnitude).toBe(1)
     expect(await screen.findByText('1 Jahr')).toBeInTheDocument()
+    const table = screen.getByRole('table', { name: 'Zeitpläne' })
+    const names = () =>
+      Array.from(table.querySelectorAll('tbody tr')).map((tr) => tr.querySelector('td')?.textContent?.trim() ?? '')
+    // Default: Name asc → "1 Jahr" before "2 Wochen" before "Monatlich".
+    expect(names()).toEqual(['1 Jahr', '2 Wochen', 'Monatlich'])
+    // Intervall asc → shortest first: 2 Wochen (14d), Monatlich (30d), 1 Jahr (365d).
+    await user.click(screen.getByRole('button', { name: 'Sortieren nach Intervall' }))
+    expect(names()).toEqual(['2 Wochen', 'Monatlich', '1 Jahr'])
+    // Intervall desc → longest first.
+    await user.click(screen.getByRole('button', { name: 'Sortieren nach Intervall (absteigend)' }))
+    expect(names()).toEqual(['1 Jahr', 'Monatlich', '2 Wochen'])
   })
 
-  it('EDIT: Bearbeiten loads the row, PUT persists the changed interval', async () => {
-    const fetchMock = stubFetchRoutes([
-      stubSchedulesList([scheduleFixture()]),
-      {
-        matcher: (url, init) => url === `${SCHEDULES_URL}/id-s1` && init?.method === 'PUT',
-        response: { ok: true, status: 200, body: { ...scheduleFixture(), name: '2 Jahre', interval_magnitude: 2, message: 'Zeitplan gespeichert.' } },
-      },
-    ])
+  it('CREATE_NAV: "Neuer Zeitplan" navigates to the dedicated create page', async () => {
+    stubFetchRoutes([stubSchedulesList([])])
+    const user = userEvent.setup()
+    renderPage()
+
+    await screen.findByText('Keine Zeitpläne vorhanden. Lege den ersten Zeitplan an.')
+    await user.click(screen.getByRole('button', { name: 'Neuer Zeitplan' }))
+    expect(await screen.findByText('ZeitplanNeuSeite')).toBeInTheDocument()
+  })
+
+  it('EDIT_NAV: "Bearbeiten" navigates to the dedicated :id edit page', async () => {
+    stubFetchRoutes([stubSchedulesList([scheduleFixture()])])
     const user = userEvent.setup()
     renderPage()
 
     await screen.findByText('1 Jahr')
     await user.click(screen.getByRole('button', { name: 'Bearbeiten' }))
-    expect(screen.getByRole('heading', { name: 'Zeitplan bearbeiten' })).toBeInTheDocument()
-    expect(screen.getByLabelText('Name')).toHaveValue('1 Jahr')
-    expect(screen.getByLabelText('Zeiteinheit')).toHaveValue('year')
-
-    await user.clear(screen.getByLabelText('Name'))
-    await user.type(screen.getByLabelText('Name'), '2 Jahre')
-    await user.clear(screen.getByLabelText('Intervallgröße'))
-    await user.type(screen.getByLabelText('Intervallgröße'), '2')
-    await user.click(screen.getByRole('button', { name: 'Änderungen speichern' }))
-
-    expect(await screen.findByText('Zeitplan gespeichert.')).toBeInTheDocument()
-    const putCall = fetchMock.mock.calls.find(([url, init]) => url === `${SCHEDULES_URL}/id-s1` && init?.method === 'PUT')
-    expect(putCall).toBeTruthy()
-    const body = JSON.parse((putCall![1] as RequestInit).body as string)
-    expect(body.name).toBe('2 Jahre')
-    expect(body.interval_magnitude).toBe(2)
-    expect(await screen.findByText('2 Jahre')).toBeInTheDocument()
+    expect(await screen.findByText('ZeitplanEditSeite')).toBeInTheDocument()
   })
 
   it('ARCHIVE: confirming the prompt archives the row and removes it inline', async () => {
@@ -722,23 +718,6 @@ describe('AdminEinstellungenPage Zeitpläne tab', () => {
     expect(screen.getByText('1 Jahr')).toBeInTheDocument()
   })
 
-  it('FORM_ERROR: a 400 shows the server German message inline', async () => {
-    stubFetchRoutes([
-      stubSchedulesList([]),
-      {
-        matcher: (url, init) => url === SCHEDULES_URL && init?.method === 'POST',
-        response: { ok: false, status: 400, body: { error: { code: 'invalid_request', message: 'Bitte gib einen Namen für den Zeitplan an.' } } },
-      },
-    ])
-    const user = userEvent.setup()
-    renderPage()
-
-    await screen.findByRole('button', { name: 'Speichern' })
-    await user.click(screen.getByRole('button', { name: 'Speichern' }))
-
-    expect(await screen.findByRole('alert')).toHaveTextContent('Bitte gib einen Namen für den Zeitplan an.')
-  })
-
   it('FORBIDDEN: a 403 on load clears the admin flag and leaves the module', async () => {
     localStorage.setItem('gear.is_admin', 'true')
     stubFetchRoutes([
@@ -759,6 +738,24 @@ describe('AdminEinstellungenPage Zeitpläne tab', () => {
 
     expect(await screen.findByText('Anmeldung')).toBeInTheDocument()
     expect(localStorage.getItem('gear.session_token')).toBeNull()
+  })
+
+  it('NOTICE_TAB_RETURN: a multi-tab holder returns from the schedule editor to the Zeitpläne tab with the success notice', async () => {
+    // The holder owns BOTH E-Mail and Zeitpläne: the editor returns with
+    // { tab: 'schedules', message } so the Zeitpläne tab (not the E-Mail
+    // default) is active and the server confirmation shows once (Spec 4-6
+    // review 1/4).
+    localStorage.setItem('gear.permissions', JSON.stringify(['admin.settings.email', 'schedules.manage']))
+    stubFetchRoutes([
+      stubGet(settingsFixture()),
+      stubSchedulesList([scheduleFixture()]),
+    ])
+    renderPage({ pathname: '/admin/einstellungen', state: { tab: 'schedules', message: 'Zeitplan gespeichert.' } })
+
+    expect(await screen.findByText('1 Jahr')).toBeInTheDocument()
+    expect(screen.getByRole('tab', { name: 'Zeitpläne' })).toHaveAttribute('aria-selected', 'true')
+    expect(screen.getByRole('tab', { name: 'E-Mail' })).toHaveAttribute('aria-selected', 'false')
+    expect(screen.getByRole('status')).toHaveTextContent('Zeitplan gespeichert.')
   })
 })
 

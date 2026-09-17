@@ -19,8 +19,13 @@ import { AdminBenutzergruppenPage } from './pages/admin/AdminBenutzergruppenPage
 import { AdminRollenPage } from './pages/admin/AdminRollenPage.tsx'
 import { AdminQualifikationenPage } from './pages/admin/AdminQualifikationenPage.tsx'
 import { AdminWerkzeugePage } from './pages/admin/AdminWerkzeugePage.tsx'
+import { AdminToolTypeEditorPage } from './pages/admin/AdminToolTypeEditorPage.tsx'
+import { AdminToolEditorPage } from './pages/admin/AdminToolEditorPage.tsx'
 import { AdminEinstellungenPage } from './pages/admin/AdminEinstellungenPage.tsx'
+import { AdminScheduleEditorPage } from './pages/admin/AdminScheduleEditorPage.tsx'
 import { AdminDsgvoPage } from './pages/admin/AdminDsgvoPage.tsx'
+import { TOOL_TYPES_PERMISSION, TOOLS_PERMISSION, TOOL_EDIT_PERMISSION } from './auth/tools.ts'
+import { SCHEDULES_PERMISSION } from './auth/settings.ts'
 import { ForgotPasswordPage } from './pages/ForgotPasswordPage.tsx'
 import { ResetPasswordPage } from './pages/ResetPasswordPage.tsx'
 import { NotFoundPage } from './pages/NotFoundPage.tsx'
@@ -389,6 +394,61 @@ export function AppRoutes() {
           </AuthenticatedPage>
         }
       />
+      {/* Dedicated tool-type create/edit pages (Spec 4-6): gated by the
+          entity's manage code (tool_types.manage). The :id route must stay a
+          sibling of /neu so React Router matches it before any broader catch. */}
+      <Route
+        path="/admin/werkzeuge/typen/neu"
+        element={
+          <AuthenticatedPage>
+            <RequireAdminModule>
+              <RequireAdminEntry codes={[TOOL_TYPES_PERMISSION]}>
+                <AdminToolTypeEditorPage />
+              </RequireAdminEntry>
+            </RequireAdminModule>
+          </AuthenticatedPage>
+        }
+      />
+      <Route
+        path="/admin/werkzeuge/typen/:id"
+        element={
+          <AuthenticatedPage>
+            <RequireAdminModule>
+              <RequireAdminEntry codes={[TOOL_TYPES_PERMISSION]}>
+                <AdminToolTypeEditorPage />
+              </RequireAdminEntry>
+            </RequireAdminModule>
+          </AuthenticatedPage>
+        }
+      />
+      {/* Dedicated tool create/edit pages (Spec 4-6): the Werkzeuge tab opens
+          any-of tools.manage/tool.edit (Story 4-3b), so both codes may reach
+          the editor; create mode is additionally gated inside the page on
+          tools.manage alone. */}
+      <Route
+        path="/admin/werkzeuge/tools/neu"
+        element={
+          <AuthenticatedPage>
+            <RequireAdminModule>
+              <RequireAdminEntry codes={[TOOLS_PERMISSION, TOOL_EDIT_PERMISSION]}>
+                <AdminToolEditorPage />
+              </RequireAdminEntry>
+            </RequireAdminModule>
+          </AuthenticatedPage>
+        }
+      />
+      <Route
+        path="/admin/werkzeuge/tools/:id"
+        element={
+          <AuthenticatedPage>
+            <RequireAdminModule>
+              <RequireAdminEntry codes={[TOOLS_PERMISSION, TOOL_EDIT_PERMISSION]}>
+                <AdminToolEditorPage />
+              </RequireAdminEntry>
+            </RequireAdminModule>
+          </AuthenticatedPage>
+        }
+      />
       <Route
         path="/admin/einstellungen"
         element={
@@ -396,6 +456,32 @@ export function AppRoutes() {
             <RequireAdminModule>
               <RequireAdminEntry codes={adminNavCodes('einstellungen')}>
                 <AdminEinstellungenPage />
+              </RequireAdminEntry>
+            </RequireAdminModule>
+          </AuthenticatedPage>
+        }
+      />
+      {/* Dedicated schedule create/edit pages (Spec 4-6): gated by the
+          entity's manage code (schedules.manage). */}
+      <Route
+        path="/admin/einstellungen/zeitplaene/neu"
+        element={
+          <AuthenticatedPage>
+            <RequireAdminModule>
+              <RequireAdminEntry codes={[SCHEDULES_PERMISSION]}>
+                <AdminScheduleEditorPage />
+              </RequireAdminEntry>
+            </RequireAdminModule>
+          </AuthenticatedPage>
+        }
+      />
+      <Route
+        path="/admin/einstellungen/zeitplaene/:id"
+        element={
+          <AuthenticatedPage>
+            <RequireAdminModule>
+              <RequireAdminEntry codes={[SCHEDULES_PERMISSION]}>
+                <AdminScheduleEditorPage />
               </RequireAdminEntry>
             </RequireAdminModule>
           </AuthenticatedPage>
