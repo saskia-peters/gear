@@ -23,6 +23,33 @@
   gap: var(--gear-space-1);
 }
 
+/* The back button (top of the details page): returns to the dashboard
+   (mirroring the admin surfaces' back-row pattern). */
+.backRow {
+  display: flex;
+}
+
+.backButton {
+  min-height: 48px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--gear-space-2) var(--gear-space-3);
+  border: 1px solid var(--gear-color-border-hairline);
+  border-radius: var(--gear-radius-md);
+  background-color: transparent;
+  color: var(--gear-color-ink-primary);
+  font-family: var(--gear-font-family);
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  cursor: pointer;
+}
+
+.backButton:focus-visible {
+  outline: 2px solid var(--gear-focus-ring-color);
+  outline-offset: 2px;
+}
+
 .pageTitle {
   font-size: var(--gear-font-display-size);
   font-weight: var(--gear-font-display-weight);
@@ -196,15 +223,6 @@
   line-height: var(--gear-font-label-line-height);
 }
 
-.inspectionList {
-  margin: 0;
-  padding: 0;
-  list-style: none;
-  display: flex;
-  flex-direction: column;
-  gap: var(--gear-space-3);
-}
-
 /* trackList is the ONE merged newest-first track record (Story 6.3 follow-up):
    inspections + reinstatements interleaved, each card tagged by its kind. */
 .trackList {
@@ -213,24 +231,41 @@
   list-style: none;
   display: flex;
   flex-direction: column;
-  gap: var(--gear-space-3);
+  gap: var(--gear-space-2);
 }
 
 .historyCard {
-  padding: var(--gear-space-4);
+  padding: var(--gear-space-3) var(--gear-space-4);
   background-color: var(--gear-color-surface-raised);
   border: 1px solid var(--gear-color-border-hairline);
   border-radius: var(--gear-radius-md);
+}
+
+/* cardHeader is the compact top line of a track-record card: the kind badge on
+   the left and the date on the right — one line instead of a stacked dl. */
+.cardHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  flex-wrap: wrap;
+  gap: var(--gear-space-1) var(--gear-space-2);
+  margin-bottom: var(--gear-space-1);
+}
+
+.cardDate {
+  font-size: var(--gear-font-meta-size);
+  color: var(--gear-color-ink-secondary);
+  white-space: nowrap;
+  min-width: 0;
 }
 
 /* entryBadge tags one merged track-record card as a Prüfung or a
    Wiederherstellung (Story 6.3 follow-up). */
 .entryBadge {
   display: inline-block;
-  margin-bottom: var(--gear-space-2);
-  padding: var(--gear-space-1) var(--gear-space-3);
+  padding: var(--gear-space-1) var(--gear-space-2);
   border-radius: var(--gear-radius-md);
-  font-size: var(--gear-font-label-size);
+  font-size: var(--gear-font-meta-size);
   font-weight: var(--gear-font-label-weight);
   line-height: var(--gear-font-label-line-height);
 }
@@ -247,23 +282,64 @@
   border: 1px solid var(--gear-color-status-green);
 }
 
-.historyDetail {
+/* cardMeta is the compact single-line summary of a track-record card: actor /
+   inspector + outcome + mode (or actor + reason for a reinstatement). */
+.cardMeta {
   margin: 0;
   display: flex;
-  flex-direction: column;
-  gap: var(--gear-space-2);
+  align-items: baseline;
+  flex-wrap: wrap;
+  gap: var(--gear-space-1) var(--gear-space-3);
+  font-size: var(--gear-font-body-size);
+  color: var(--gear-color-ink-primary);
+}
+
+.cardActor {
+  font-weight: var(--gear-font-title-weight);
+}
+
+.cardOutcome {
+  font-weight: var(--gear-font-label-weight);
+}
+
+.cardOutcomePass {
+  color: var(--gear-color-status-green);
+}
+
+.cardOutcomeFail {
+  color: var(--gear-color-status-red);
+}
+
+.cardMode {
+  color: var(--gear-color-ink-secondary);
+}
+
+.cardReason {
+  color: var(--gear-color-ink-secondary);
+}
+
+/* cardNotes is the optional inspection note line (only when a note exists). */
+.cardNotes {
+  margin: var(--gear-space-1) 0 0;
+  font-size: var(--gear-font-body-size);
+  color: var(--gear-color-ink-primary);
+}
+
+.cardNotesLabel {
+  font-weight: var(--gear-font-label-weight);
+  color: var(--gear-color-ink-secondary);
 }
 
 /* The per-checklist-item results (FR-18): one row per snapshotted item with
    its pass/fail outcome. */
 .itemsList {
   margin: var(--gear-space-2) 0 0;
-  padding: var(--gear-space-3) 0 0;
+  padding: var(--gear-space-2) 0 0;
   list-style: none;
   border-top: 1px solid var(--gear-color-border-hairline);
   display: flex;
   flex-direction: column;
-  gap: var(--gear-space-2);
+  gap: var(--gear-space-1);
 }
 
 .itemRow {

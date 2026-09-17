@@ -128,6 +128,18 @@ describe('ToolDetailsPage header (Story 6.3)', () => {
     expect(mock).not.toHaveBeenCalled()
   })
 
+  it('BACK_BUTTON: the back button at the top returns to the dashboard and unmounts the details page', async () => {
+    renderPage(HEADER_STATE)
+
+    await screen.findByText('Bohrmaschine-01')
+    const back = screen.getByRole('button', { name: '← Zurück zur Übersicht' })
+    await act(async () => {
+      back.click()
+    })
+    expect(screen.getByText('Dashboard')).toBeInTheDocument()
+    expect(screen.queryByText('Werkzeugdetails')).not.toBeInTheDocument()
+  })
+
   it('HEADER_DEEPLINK: without router state it re-resolves the header via listDashboardTools find-by-id', async () => {
     const mock = stubFetch({ ok: true, status: 200, json: async () => dashboardListFixture() })
     renderPage('/tools/id-w1')
@@ -202,7 +214,7 @@ describe('ToolDetailsPage history (Story 6.3, FR-18)', () => {
     expect(cards.length).toBe(3)
     expect(cards[0]).toHaveTextContent('Wiederherstellung')
     expect(cards[0]).toHaveTextContent('Ersatzteil eingetroffen')
-    expect(cards[0]).toHaveTextContent('Durchgeführt von')
+    expect(cards[0]).toHaveTextContent('Anna Muster')
     expect(cards[1]).toHaveTextContent('Prüfung')
     expect(cards[1]).toHaveTextContent('Bohrfutter locker')
     expect(cards[2]).toHaveTextContent('Prüfung')
@@ -229,9 +241,8 @@ describe('ToolDetailsPage history (Story 6.3, FR-18)', () => {
     expect(screen.getByText('Pass/Fail')).toBeInTheDocument()
     expect(screen.getByText('Alles ok')).toBeInTheDocument()
 
-    // Reinstatement: actor + reason + date.
+    // Reinstatement: actor + reason + date (in the compact card meta line).
     expect(screen.getByText('Ersatzteil eingetroffen')).toBeInTheDocument()
-    expect(screen.getByText('Durchgeführt von')).toBeInTheDocument()
     expect(screen.getByText(new Date('2026-09-16T08:00:00Z').toLocaleString('de-DE'))).toBeInTheDocument()
   })
 

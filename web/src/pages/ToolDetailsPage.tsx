@@ -229,6 +229,11 @@ export function ToolDetailsPage() {
     <div className={styles.page}>
       <Header />
       <main className={styles.main}>
+        <div className={styles.backRow}>
+          <button type="button" className={styles.backButton} onClick={() => navigate('/')}>
+            ← Zurück zur Übersicht
+          </button>
+        </div>
         <section className={styles.titleSection}>
           <h2 className={styles.pageTitle}>Werkzeugdetails</h2>
           <p className={styles.pageSubtitle}>Prüfungen und Wiederherstellungen dieses Geräts.</p>
@@ -297,72 +302,70 @@ export function ToolDetailsPage() {
                 <ul className={styles.trackList} aria-label="Historie">
                   {trackRecord.map((entry) => (
                     <li key={trackRecordKey(entry)} className={styles.historyCard}>
-                      <span
-                        className={`${styles.entryBadge} ${
-                          entry.kind === 'inspection' ? styles.entryBadgeInspection : styles.entryBadgeReinstatement
-                        }`}
-                      >
-                        {entry.kind === 'inspection' ? 'Prüfung' : 'Wiederherstellung'}
-                      </span>
-                      <dl className={styles.historyDetail}>
-                        {entry.kind === 'inspection' ? (
-                          <>
-                            <div className={styles.detailRow}>
-                              <dt className={styles.detailTerm}>Prüfer/in</dt>
-                              <dd className={styles.detailValue}>{entry.inspector_name}</dd>
-                            </div>
-                            <div className={styles.detailRow}>
-                              <dt className={styles.detailTerm}>Datum</dt>
-                              <dd className={styles.detailValue}>{formatTimestamp(entry.at)}</dd>
-                            </div>
-                            <div className={styles.detailRow}>
-                              <dt className={styles.detailTerm}>Ergebnis</dt>
-                              <dd className={styles.detailValue}>{outcomeLabel(entry.overall_result)}</dd>
-                            </div>
-                            <div className={styles.detailRow}>
-                              <dt className={styles.detailTerm}>Modus</dt>
-                              <dd className={styles.detailValue}>{modeLabel(entry.mode)}</dd>
-                            </div>
-                            {entry.notes && (
-                              <div className={styles.detailRow}>
-                                <dt className={styles.detailTerm}>Anmerkung</dt>
-                                <dd className={styles.detailValue}>{entry.notes}</dd>
-                              </div>
-                            )}
-                            {entry.mode === 'checklist' && entry.items.length > 0 && (
-                              <ul className={styles.itemsList} aria-label="Prüfpunkte">
-                                {entry.items.map((item) => (
-                                  <li key={item.id} className={styles.itemRow}>
-                                    <span className={styles.itemLabel}>{item.label}</span>
-                                    <span
-                                      className={`${styles.itemResult} ${
-                                        item.result === 'pass' ? styles.itemPass : styles.itemFail
-                                      }`}
-                                    >
-                                      {outcomeLabel(item.result)}
-                                    </span>
-                                  </li>
-                                ))}
-                              </ul>
-                            )}
-                          </>
-                        ) : (
-                          <>
-                            <div className={styles.detailRow}>
-                              <dt className={styles.detailTerm}>Durchgeführt von</dt>
-                              <dd className={styles.detailValue}>{entry.actor_name}</dd>
-                            </div>
-                            <div className={styles.detailRow}>
-                              <dt className={styles.detailTerm}>Datum</dt>
-                              <dd className={styles.detailValue}>{formatTimestamp(entry.at)}</dd>
-                            </div>
-                            <div className={styles.detailRow}>
-                              <dt className={styles.detailTerm}>Grund</dt>
-                              <dd className={styles.detailValue}>{entry.reason}</dd>
-                            </div>
-                          </>
-                        )}
-                      </dl>
+                      <div className={styles.cardHeader}>
+                        <span
+                          className={`${styles.entryBadge} ${
+                            entry.kind === 'inspection'
+                              ? styles.entryBadgeInspection
+                              : styles.entryBadgeReinstatement
+                          }`}
+                        >
+                          {entry.kind === 'inspection' ? 'Prüfung' : 'Wiederherstellung'}
+                        </span>
+                        <span className={styles.cardDate}>{formatTimestamp(entry.at)}</span>
+                      </div>
+                      {entry.kind === 'inspection' ? (
+                        <>
+                          <p className={styles.cardMeta}>
+                            <span className={styles.cardActor} aria-label={`Prüfer/in: ${entry.inspector_name}`}>
+                              {entry.inspector_name}
+                            </span>
+                            <span
+                              className={`${styles.cardOutcome} ${
+                                entry.overall_result === 'pass' ? styles.cardOutcomePass : styles.cardOutcomeFail
+                              }`}
+                              aria-label={`Ergebnis: ${outcomeLabel(entry.overall_result)}`}
+                            >
+                              {outcomeLabel(entry.overall_result)}
+                            </span>
+                            <span className={styles.cardMode} aria-label={`Modus: ${modeLabel(entry.mode)}`}>
+                              {modeLabel(entry.mode)}
+                            </span>
+                          </p>
+                          {entry.notes && (
+                            <p className={styles.cardNotes}>
+                              <span className={styles.cardNotesLabel}>Anmerkung:</span> {entry.notes}
+                            </p>
+                          )}
+                          {entry.mode === 'checklist' && entry.items.length > 0 && (
+                            <ul className={styles.itemsList} aria-label="Prüfpunkte">
+                              {entry.items.map((item) => (
+                                <li key={item.id} className={styles.itemRow}>
+                                  <span className={styles.itemLabel}>{item.label}</span>
+                                  <span
+                                    className={`${styles.itemResult} ${
+                                      item.result === 'pass' ? styles.itemPass : styles.itemFail
+                                    }`}
+                                  >
+                                    {outcomeLabel(item.result)}
+                                  </span>
+                                </li>
+                              ))}
+                            </ul>
+                          )}
+                        </>
+                      ) : (
+                        <p className={styles.cardMeta}>
+                          <span className={styles.cardActor} aria-label={`Durchgeführt von: ${entry.actor_name}`}>
+                            {entry.actor_name}
+                          </span>
+                          {entry.reason && (
+                            <span className={styles.cardReason} aria-label={`Grund: ${entry.reason}`}>
+                              {entry.reason}
+                            </span>
+                          )}
+                        </p>
+                      )}
                     </li>
                   ))}
                 </ul>
