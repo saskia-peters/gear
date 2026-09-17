@@ -287,3 +287,44 @@ LIMIT 1;
 INSERT INTO reinstatements (tool_id, actor_id, reason)
 VALUES ($1, $2, $3)
 RETURNING id, tool_id, actor_id, reason, created_at;
+
+-- ============================================================================
+-- History queries (Story 6.3, FR-18/AD-6/AD-8): the per-tool audit trail of
+-- inspections + reinstatements, newest first. The inspector/actor NAMES never
+-- resolve here — the Tool module never joins user tables (AD-8/AD-11); the
+-- plain FK-less ids are read out and the core resolves the display names
+-- through the User module's DisplayNameResolver seam in ONE bulk call.
+-- ============================================================================
+
+-- name: ListInspectionsByTool :many
+-- The FULL inspection history of a tool (FR-18), reverse-chronological with
+-- the id tiebreak for equal timestamps (submitted_at DESC, id DESC — the same
+-- deterministic tiebreak as the status-read queries; the existing 000027 index
+-- inspections_tool_id_submitted_at_idx already supports it). A tool with no
+-- inspections answers an empty set (the history surface renders the German
+-- empty state, never a 404).
+SELECT id, tool_id, inspector_id, mode, overall_result, notes, submitted_at
+FROM inspections
+WHERE tool_id = $1
+ORDER BY submitted_at DESC, id DESC;
+
+-- name: ListReinstatementsByTool :many
+-- The FULL reinstatement ledger of a tool (FR-18), newest first with the id
+-- tiebreak (created_at DESC, id DESC — the existing 000027 index
+-- reinstatements_tool_id_created_at_idx already supports it). A tool with no
+-- reinstatements answers an empty set.
+SELECT id, tool_id, actor_id, reason, created_at
+FROM reinstatements
+WHERE tool_id = $1
+ORDER BY created_at DESC, id DESC;
+
+-- name: ListInspectionItemsByTool :many
+-- The snapshotted ordered checklist items of EVERY inspection of a tool (FR-18
+-- per-checklist-item results), grouped by inspection and ordered by position
+-- within each group. The repository groups them onto the fetched inspections
+-- in ONE round-trip (no N+1 per-inspection item reads).
+SELECT ii.id, ii.inspection_id, ii.item_id, ii.label, ii.position, ii.result
+FROM inspection_items ii
+JOIN inspections i ON i.id = ii.inspection_id
+WHERE i.tool_id = $1
+ORDER BY ii.inspection_id, ii.position;

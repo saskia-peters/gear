@@ -3,7 +3,9 @@ package core
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
+	"sort"
 	"strings"
 	"testing"
 	"time"
@@ -136,6 +138,51 @@ func (f *fakeToolStore) InsertReinstatement(_ context.Context, toolID, actorID, 
 	t := createdAt
 	f.status.LastReinstatedAt = &t
 	return nil
+}
+
+// ListInspectionsByTool returns the tool's inspection history (Story 6.3),
+// newest first (submitted_at DESC, id DESC) — mirroring the repository's SQL
+// ORDER BY so the core's pass-through ordering is faithfully exercised. The
+// items the inspection was inserted with are returned alongside.
+func (f *fakeToolStore) ListInspectionsByTool(_ context.Context, toolID string) ([]*Inspection, error) {
+	var out []*Inspection
+	for _, insp := range f.inspections {
+		if insp.ToolID == toolID {
+			out = append(out, insp)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].SubmittedAt.Equal(out[j].SubmittedAt) {
+			return out[i].ID > out[j].ID
+		}
+		return out[i].SubmittedAt.After(out[j].SubmittedAt)
+	})
+	return out, nil
+}
+
+// ListReinstatementsByTool returns the tool's reinstatement ledger (Story 6.3),
+// newest first (created_at DESC, id DESC) — mirroring the repository's SQL
+// ORDER BY.
+func (f *fakeToolStore) ListReinstatementsByTool(_ context.Context, toolID string) ([]*Reinstatement, error) {
+	var out []*Reinstatement
+	for i, r := range f.reinstatements {
+		if r.ToolID == toolID {
+			out = append(out, &Reinstatement{
+				ID:        fmt.Sprintf("id-rein-%d", i),
+				ToolID:    r.ToolID,
+				ActorID:   r.ActorID,
+				Reason:    r.Reason,
+				CreatedAt: r.CreatedAt,
+			})
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID > out[j].ID
+		}
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
+	return out, nil
 }
 
 func (f *fakeToolStore) ListTools(context.Context) ([]*Tool, error) {
@@ -295,6 +342,7 @@ func newToolService(perms ...string) (*Service, *fakeToolStore, *fakeAudit) {
 		&fakeSchedulesPort{schedules: []*admcore.Schedule{{ID: "id-s1", Name: "1 Jahr"}}},
 		&fakeQualificationPort{},
 		&fakePerms{perms: perms},
+		nil,
 		audit,
 		nil,
 	)
@@ -867,6 +915,7 @@ func dashboardService() (*Service, *fakeToolStore) {
 		}}},
 		&fakeQualificationPort{},
 		&fakePerms{perms: []string{DashboardViewPermission}},
+		nil,
 		&fakeAudit{},
 		nil,
 	)
@@ -1280,6 +1329,7 @@ func TestCreateToolNilOverridePortFailsLoudly(t *testing.T) {
 		nil,
 		nil,
 		&fakePerms{perms: []string{ToolsManagePermission}},
+		nil,
 		&fakeAudit{},
 		nil,
 	)

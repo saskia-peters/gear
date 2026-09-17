@@ -186,6 +186,19 @@ type PermissionResolver interface {
 	ListPermissionsByUser(ctx context.Context, userID string) ([]string, error)
 }
 
+// DisplayNameResolver is the narrow read-only seam the Tool history surface
+// (Story 6.3, FR-18/AD-8/AD-11) consumes to render inspector/actor names: given
+// the plain FK-less user ids referenced by inspection/reinstatement rows, it
+// returns the id → display_name map for the EXISTING users. A user id ABSENT
+// from the result (a deleted account — Story 3.4 DSGVO rewrite, not yet built)
+// maps to the literal "Deleted User" at the core — never a 404, never an empty
+// string. The User module's postgres repository implements it (ListUsersByIDs).
+// It is deliberately narrow: the Tool module never joins user tables; it only
+// ever asks for display names in ONE bulk call (the spec's no-N+1 invariant).
+type DisplayNameResolver interface {
+	ResolveDisplayNames(ctx context.Context, userIDs []string) (map[string]string, error)
+}
+
 // AuditWriter appends to the User-owned audit trail (NFR-O1/NFR-O2). The User
 // module's postgres repository implements it; the Tool module never authors
 // another module's SQL (AD-8/AD-11).
@@ -203,6 +216,7 @@ type Service struct {
 	schedules      adminports.SchedulesPort
 	qualifications userports.QualificationCatalogPort
 	perms          PermissionResolver
+	displayNames   DisplayNameResolver
 	audit          AuditWriter
 	logger         *slog.Logger
 }
@@ -210,12 +224,12 @@ type Service struct {
 // NewService constructs the Tool service. store is the combined persistence
 // port over the Tool-owned tables (tool types + tools); schedules/
 // qualifications are the read-only consumer ports used only by the write path
-// (FK validation); perms/audit are the User-module repository seams
-// (permission re-check + audit trail). logger may be nil (falls back to
-// slog.Default()); it is used for structured logging of audit-write failures
-// (NFR-O1).
-func NewService(store toolModuleStore, schedules adminports.SchedulesPort, qualifications userports.QualificationCatalogPort, perms PermissionResolver, audit AuditWriter, logger *slog.Logger) *Service {
-	return &Service{store: store, schedules: schedules, qualifications: qualifications, perms: perms, audit: audit, logger: logger}
+// (FK validation); perms/displayNames/audit are the User-module repository
+// seams (permission re-check + the history surface's display-name resolution +
+// the audit trail). logger may be nil (falls back to slog.Default()); it is
+// used for structured logging of audit-write failures (NFR-O1).
+func NewService(store toolModuleStore, schedules adminports.SchedulesPort, qualifications userports.QualificationCatalogPort, perms PermissionResolver, displayNames DisplayNameResolver, audit AuditWriter, logger *slog.Logger) *Service {
+	return &Service{store: store, schedules: schedules, qualifications: qualifications, perms: perms, displayNames: displayNames, audit: audit, logger: logger}
 }
 
 // log returns the configured logger or slog.Default().

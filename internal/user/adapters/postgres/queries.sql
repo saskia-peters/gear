@@ -812,6 +812,18 @@ FROM users
 WHERE id = ANY($1::uuid[])
 ORDER BY id;
 
+-- name: ListUsersByIDs :many
+-- The id → display_name pairs of the EXISTING users among the given set (Story
+-- 6.3, FR-18/AD-8): the Tool history surface resolves inspector/actor display
+-- names through this seam — the Tool module never joins user tables. A user id
+-- ABSENT from the result (a deleted account, Story 3.4 not yet built) maps to
+-- the literal "Deleted User" at the core — never a 404, never an empty string.
+-- No secret material is selected.
+SELECT id, display_name
+FROM users
+WHERE id = ANY($1::uuid[])
+ORDER BY id;
+
 -- name: PermissionGroupsExistByIDs :many
 -- The permission-group ids that exist among the given set (Story 2.6). Used to
 -- validate a user edit's role set: every requested role must exist (count

@@ -332,12 +332,19 @@ describe('App & Dashboard Foundation', () => {
   })
 
   it('NAV_SCHIRRMEISTER: a schirrmeister sees the ADMIN module and the Werkzeuge entry is reachable', async () => {
-    // schirrmeister = dashboard.view + inspection.submit + tools.manage +
-    // tool_types.manage. Only Werkzeuge (+ Übersicht) are exposed (FR-19).
+    // schirrmeister = dashboard.view + inspection.submit + inspection.history.view
+    // + tools.manage + tool_types.manage (migration 000028 adds the history
+    // code). Only Werkzeuge (+ Übersicht) are exposed (FR-19).
     stubSessionValidation(
       validProfile({
         is_admin: false,
-        permissions: ['dashboard.view', 'inspection.submit', 'tools.manage', 'tool_types.manage'],
+        permissions: [
+          'dashboard.view',
+          'inspection.submit',
+          'inspection.history.view',
+          'tools.manage',
+          'tool_types.manage',
+        ],
       }),
     )
     await act(async () => {
@@ -812,6 +819,64 @@ describe('App & Dashboard Foundation', () => {
     render(
       <ThemeProvider>
         <MemoryRouter initialEntries={['/inspection/id-w1']}>
+          <AppRoutes />
+        </MemoryRouter>
+      </ThemeProvider>,
+    )
+
+    expect(await screen.findByRole('heading', { level: 2, name: 'Anmeldung' })).toBeInTheDocument()
+  })
+
+  it('TOOLS_ROUTE: the tool details page renders the Werkzeugdetails heading for an authenticated deep link', async () => {
+    // A deep link (/tools/:toolId) carries NO router state, so the page resolves
+    // the header from the listDashboardTools() refetch (dashboard.view). The
+    // fetch mock dispatches by URL: the RequireAuth profile/permissions checks
+    // get validProfile, the dashboard list gets a real tool row.
+    const mock = vi.fn().mockImplementation((url: string) => {
+      if (url === '/api/v1/tools') {
+        return Promise.resolve({
+          ok: true,
+          status: 200,
+          json: async () => [
+            {
+              id: 'id-w1',
+              name: 'Bohrmaschine-01',
+              tool_type_id: 'id-t1',
+              tool_type_name: 'Bohrmaschine',
+              inventory_number: 'GEAR000001',
+              status: { status: 'green', next_due: '2027-09-14T10:00:00Z' },
+            },
+          ],
+        })
+      }
+      return validProfile()
+    })
+    vi.stubGlobal('fetch', mock)
+    await act(async () => {
+      render(
+        <ThemeProvider>
+          <MemoryRouter initialEntries={['/tools/id-w1']}>
+            <AppRoutes />
+          </MemoryRouter>
+        </ThemeProvider>,
+      )
+    })
+
+    expect(
+      await screen.findByRole('heading', { level: 2, name: 'Werkzeugdetails' }),
+    ).toBeInTheDocument()
+    expect(screen.getByText('Bohrmaschine-01')).toBeInTheDocument()
+    expect(screen.getByText('GEAR000001')).toBeInTheDocument()
+    expect(screen.getByText('Gerätetyp')).toBeInTheDocument()
+    expect(screen.getByText('Bohrmaschine')).toBeInTheDocument()
+    expect(screen.getByText('Einsatzbereit')).toBeInTheDocument()
+  })
+
+  it('TOOLS_ROUTE_PROTECTED: redirects to /login without a session token', async () => {
+    localStorage.removeItem(TOKEN_STORAGE_KEY)
+    render(
+      <ThemeProvider>
+        <MemoryRouter initialEntries={['/tools/id-w1']}>
           <AppRoutes />
         </MemoryRouter>
       </ThemeProvider>,

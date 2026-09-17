@@ -160,6 +160,82 @@ func (r *Repository) InsertReinstatement(ctx context.Context, toolID, actorID, r
 	return err
 }
 
+// ListInspectionsByTool reads the FULL inspection history of a tool (Story 6.3,
+// FR-18): every row reverse-chronological (submitted_at DESC, id DESC — the SQL
+// ORDER BY guarantees it) EACH WITH its snapshotted ordered checklist items. The
+// items are fetched in ONE round-trip (ListInspectionItemsByTool JOINs
+// inspections by tool_id) and grouped onto the inspections — never an N+1
+// per-inspection item read. A malformed tool id answers core.ErrToolNotFound.
+// A tool with no inspections answers an empty list, nil-safe.
+func (r *Repository) ListInspectionsByTool(ctx context.Context, toolID string) ([]*core.Inspection, error) {
+	uid, err := parseOptionalUUID(toolID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := r.queries.ListInspectionsByTool(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return []*core.Inspection{}, nil
+	}
+	itemRows, err := r.queries.ListInspectionItemsByTool(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+	itemsByInspection := groupInspectionItems(itemRows)
+	out := make([]*core.Inspection, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, inspectionFromRow(row, itemsByInspection[row.ID]))
+	}
+	return out, nil
+}
+
+// ListReinstatementsByTool reads the FULL reinstatement ledger of a tool (Story
+// 6.3, FR-18): every row newest first (created_at DESC, id DESC — the SQL ORDER
+// BY guarantees it). A malformed tool id answers core.ErrToolNotFound. A tool
+// with no reinstatements answers an empty list, nil-safe.
+func (r *Repository) ListReinstatementsByTool(ctx context.Context, toolID string) ([]*core.Reinstatement, error) {
+	uid, err := parseOptionalUUID(toolID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := r.queries.ListReinstatementsByTool(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return []*core.Reinstatement{}, nil
+	}
+	out := make([]*core.Reinstatement, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, reinstatementFromRow(row))
+	}
+	return out, nil
+}
+
+// groupInspectionItems buckets the fetched item rows by their inspection_id so
+// the repository can attach them to the fetched inspections in one round-trip.
+func groupInspectionItems(rows []InspectionItem) map[pgtype.UUID][]InspectionItem {
+	grouped := make(map[pgtype.UUID][]InspectionItem, len(rows))
+	for i := range rows {
+		id := rows[i].InspectionID
+		grouped[id] = append(grouped[id], rows[i])
+	}
+	return grouped
+}
+
+// reinstatementFromRow maps an sqlc reinstatement row to the domain value.
+func reinstatementFromRow(row Reinstatement) *core.Reinstatement {
+	return &core.Reinstatement{
+		ID:        row.ID.String(),
+		ToolID:    row.ToolID.String(),
+		ActorID:   row.ActorID.String(),
+		Reason:    row.Reason,
+		CreatedAt: row.CreatedAt.Time,
+	}
+}
+
 // inspectionNotesValue encodes the notes for the nullable text column: an empty
 // note (the common case) stores SQL NULL, a non-empty one the text.
 func inspectionNotesValue(notes string) pgtype.Text {

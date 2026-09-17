@@ -73,6 +73,32 @@ func (r *Repository) ListPermissionsByUser(ctx context.Context, userID string) (
 	return r.queries.ListPermissionsByUser(ctx, uid)
 }
 
+// ResolveDisplayNames returns the id → display_name map for the EXISTING users
+// among the given set (Story 6.3, FR-18/AD-8): the Tool history surface
+// resolves inspector/actor display names through this seam — the Tool module
+// never joins user tables (AD-8/AD-11). A user id ABSENT from the result (a
+// deleted account, Story 3.4 not yet built) is simply a MISSING key — the Tool
+// core maps it to the literal "Deleted User", never a 404 or an empty string.
+// An empty input answers an empty map (no query).
+func (r *Repository) ResolveDisplayNames(ctx context.Context, userIDs []string) (map[string]string, error) {
+	uuids, err := uuidSlice(userIDs)
+	if err != nil {
+		return nil, err
+	}
+	if len(uuids) == 0 {
+		return map[string]string{}, nil
+	}
+	rows, err := r.queries.ListUsersByIDs(ctx, uuids)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(rows))
+	for _, row := range rows {
+		out[uuidToString(row.ID.Bytes)] = row.DisplayName
+	}
+	return out, nil
+}
+
 // CreateSession persists a new server-side session row and returns its domain
 // representation (NFR-S2).
 func (r *Repository) CreateSession(ctx context.Context, userID, tokenHash string, expiresAt time.Time) (*core.Session, error) {

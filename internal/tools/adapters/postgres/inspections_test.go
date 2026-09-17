@@ -288,3 +288,240 @@ func TestPostgresInsertReinstatement(t *testing.T) {
 		t.Fatalf("malformed id err = %v, want ErrToolNotFound", err)
 	}
 }
+
+// TestPostgresToolHistory exercises the Story 6.3 history store contract over
+// the dev database: ListInspectionsByTool returns the tool's FULL inspection
+// history newest-first (submitted_at DESC with the id tiebreak) EACH WITH its
+// snapshotted ordered checklist items (the one-query items join), and
+// ListReinstatementsByTool returns the reinstatement ledger newest-first
+// (created_at DESC). A tool without history answers empty lists; a malformed
+// tool id answers the 404 sentinel.
+func TestPostgresToolHistory(t *testing.T) {
+	pool := toolTestPool(t)
+	ctx := context.Background()
+	t.Cleanup(func() { pool.Close() })
+
+	repo := NewRepository(New(pool))
+	toolTypeID, _ := seedToolRefs(t, ctx, pool)
+	tool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-History-Werkzeug", ToolTypeID: toolTypeID})
+	if err != nil {
+		t.Fatalf("CreateTool err = %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, "DELETE FROM inspections WHERE tool_id = $1", tool.ID)
+		_, _ = pool.Exec(ctx, "DELETE FROM reinstatements WHERE tool_id = $1", tool.ID)
+	})
+
+	// Seed THREE inspections with back-dated submitted_at (the DESC order must
+	// be deterministic): an OLDER pass_fail, a NEWER pass_fail and a NEWEST
+	// checklist WITH its snapshot items.
+	older, err := repo.InsertInspection(ctx, &core.Inspection{
+		ToolID: tool.ID, InspectorID: "00000000-0000-0000-0000-0000000000ff",
+		Mode: core.InspectionModePassFail, OverallResult: core.InspectionResultPass, Notes: "alt",
+	})
+	if err != nil {
+		t.Fatalf("InsertInspection(older) err = %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE inspections SET submitted_at = '2026-09-01T09:00:00Z' WHERE id = $1`, older.ID); err != nil {
+		t.Fatalf("back-dating older inspection err = %v", err)
+	}
+	newer, err := repo.InsertInspection(ctx, &core.Inspection{
+		ToolID: tool.ID, InspectorID: "00000000-0000-0000-0000-0000000000ff",
+		Mode: core.InspectionModePassFail, OverallResult: core.InspectionResultFail,
+	})
+	if err != nil {
+		t.Fatalf("InsertInspection(newer) err = %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE inspections SET submitted_at = '2026-09-10T09:00:00Z' WHERE id = $1`, newer.ID); err != nil {
+		t.Fatalf("back-dating newer inspection err = %v", err)
+	}
+	newest, err := repo.InsertInspection(ctx, &core.Inspection{
+		ToolID: tool.ID, InspectorID: "00000000-0000-0000-0000-0000000000ff",
+		Mode: core.InspectionModeChecklist, OverallResult: core.InspectionResultFail, Notes: "Bohrfutter locker",
+		Items: []core.InspectionItem{
+			{ItemID: "11111111-1111-1111-1111-111111111111", Label: "Kabel", Position: 0, Result: core.InspectionResultPass},
+			{ItemID: "22222222-2222-2222-2222-222222222222", Label: "Bohrfutter", Position: 1, Result: core.InspectionResultFail},
+		},
+	})
+	if err != nil {
+		t.Fatalf("InsertInspection(newest checklist) err = %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE inspections SET submitted_at = '2026-09-15T09:00:00Z' WHERE id = $1`, newest.ID); err != nil {
+		t.Fatalf("back-dating newest inspection err = %v", err)
+	}
+
+	// LIST newest first (submitted_at DESC): newest checklist, newer fail, older pass.
+	history, err := repo.ListInspectionsByTool(ctx, tool.ID)
+	if err != nil {
+		t.Fatalf("ListInspectionsByTool err = %v", err)
+	}
+	if len(history) != 3 {
+		t.Fatalf("inspections = %d, want 3", len(history))
+	}
+	if history[0].ID != newest.ID || history[1].ID != newer.ID || history[2].ID != older.ID {
+		t.Errorf("order = [%s, %s, %s], want [newest, newer, older]", history[0].ID, history[1].ID, history[2].ID)
+	}
+	// The newest checklist carries its snapshotted ORDERED items (the items
+	// join grouped them onto the right inspection); the pass_fail rows are empty.
+	if len(history[0].Items) != 2 {
+		t.Fatalf("newest items = %+v, want the two snapshot items", history[0].Items)
+	}
+	if history[0].Items[0].Label != "Kabel" || history[0].Items[0].Position != 0 || history[0].Items[0].Result != core.InspectionResultPass {
+		t.Errorf("newest items[0] = %+v, want the Kabel pass snapshot", history[0].Items[0])
+	}
+	if history[0].Items[1].Label != "Bohrfutter" || history[0].Items[1].Position != 1 || history[0].Items[1].Result != core.InspectionResultFail {
+		t.Errorf("newest items[1] = %+v, want the Bohrfutter fail snapshot", history[0].Items[1])
+	}
+	for _, h := range history[1:] {
+		if len(h.Items) != 0 {
+			t.Errorf("pass_fail inspection %s items = %+v, want none", h.ID, h.Items)
+		}
+	}
+
+	// EMPTY: a tool with no records answers an empty list, nil-safe.
+	other, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-History-Leer", ToolTypeID: toolTypeID})
+	if err != nil {
+		t.Fatalf("CreateTool(empty target) err = %v", err)
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, "DELETE FROM tools WHERE id = $1", other.ID) })
+	empty, err := repo.ListInspectionsByTool(ctx, other.ID)
+	if err != nil {
+		t.Fatalf("ListInspectionsByTool(empty) err = %v", err)
+	}
+	if len(empty) != 0 {
+		t.Errorf("empty inspections = %+v, want an empty list", empty)
+	}
+
+	// REINSTATEMENTS newest first (created_at DESC): two rows seeded out of
+	// order by created_at.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO reinstatements (tool_id, actor_id, reason, created_at) VALUES
+		 ($1, '00000000-0000-0000-0000-0000000000aa', 'frucher', '2026-09-14T08:00:00Z'),
+		 ($1, '00000000-0000-0000-0000-0000000000aa', 'spaeter', '2026-09-16T08:00:00Z')`, tool.ID); err != nil {
+		t.Fatalf("seeding reinstatements err = %v", err)
+	}
+	rein, err := repo.ListReinstatementsByTool(ctx, tool.ID)
+	if err != nil {
+		t.Fatalf("ListReinstatementsByTool err = %v", err)
+	}
+	if len(rein) != 2 {
+		t.Fatalf("reinstatements = %d, want 2", len(rein))
+	}
+	if rein[0].Reason != "spaeter" || rein[1].Reason != "frucher" {
+		t.Errorf("reinstatement order = [%s, %s], want [spaeter, frucher]", rein[0].Reason, rein[1].Reason)
+	}
+	if rein[0].ActorID != "00000000-0000-0000-0000-0000000000aa" {
+		t.Errorf("reinstatement actor = %q, want the seeded actor", rein[0].ActorID)
+	}
+
+	emptyRein, err := repo.ListReinstatementsByTool(ctx, other.ID)
+	if err != nil {
+		t.Fatalf("ListReinstatementsByTool(empty) err = %v", err)
+	}
+	if len(emptyRein) != 0 {
+		t.Errorf("empty reinstatements = %+v, want an empty list", emptyRein)
+	}
+
+	// A malformed tool id answers the 404 sentinel (never a raw parse error).
+	if _, err := repo.ListInspectionsByTool(ctx, "nonsense"); !errors.Is(err, core.ErrToolNotFound) {
+		t.Fatalf("ListInspectionsByTool(malformed) err = %v, want ErrToolNotFound", err)
+	}
+	if _, err := repo.ListReinstatementsByTool(ctx, "nonsense"); !errors.Is(err, core.ErrToolNotFound) {
+		t.Fatalf("ListReinstatementsByTool(malformed) err = %v, want ErrToolNotFound", err)
+	}
+}
+
+// TestPostgresToolHistoryEqualTimestampTiebreak pins the id DESC tiebreak of
+// the Story 6.3 history queries (FR-18): two inspections sharing ONE
+// submitted_at and two reinstatements sharing ONE created_at come back ordered
+// by id DESC — the deterministic tiebreak for equal timestamps (the same
+// convention as the tool_types `name ASC` tiebreaker test: rows are inserted
+// directly with a PINNED timestamp so the ORDER BY tiebreak is exercised).
+func TestPostgresToolHistoryEqualTimestampTiebreak(t *testing.T) {
+	pool := toolTestPool(t)
+	ctx := context.Background()
+	t.Cleanup(func() { pool.Close() })
+
+	repo := NewRepository(New(pool))
+	toolTypeID, _ := seedToolRefs(t, ctx, pool)
+	tool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Tiebreak-Werkzeug", ToolTypeID: toolTypeID})
+	if err != nil {
+		t.Fatalf("CreateTool err = %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, "DELETE FROM inspections WHERE tool_id = $1", tool.ID)
+		_, _ = pool.Exec(ctx, "DELETE FROM reinstatements WHERE tool_id = $1", tool.ID)
+	})
+
+	// TWO inspections with the SAME submitted_at → the id DESC tiebreak decides.
+	// The DB-generated uuidv7 ids are monotonic, so the second insert carries the
+	// lexicographically-greater id — it must come FIRST.
+	inspA, err := repo.InsertInspection(ctx, &core.Inspection{
+		ToolID: tool.ID, InspectorID: "00000000-0000-0000-0000-0000000000ff",
+		Mode: core.InspectionModePassFail, OverallResult: core.InspectionResultPass,
+	})
+	if err != nil {
+		t.Fatalf("InsertInspection(A) err = %v", err)
+	}
+	inspB, err := repo.InsertInspection(ctx, &core.Inspection{
+		ToolID: tool.ID, InspectorID: "00000000-0000-0000-0000-0000000000ff",
+		Mode: core.InspectionModePassFail, OverallResult: core.InspectionResultPass,
+	})
+	if err != nil {
+		t.Fatalf("InsertInspection(B) err = %v", err)
+	}
+	// Pin BOTH to the SAME submitted_at so the ORDER BY tiebreak is exercised.
+	for _, id := range []string{inspA.ID, inspB.ID} {
+		if _, err := pool.Exec(ctx, `UPDATE inspections SET submitted_at = '2026-01-01T00:00:00Z' WHERE id = $1`, id); err != nil {
+			t.Fatalf("pinning equal submitted_at err = %v", err)
+		}
+	}
+
+	history, err := repo.ListInspectionsByTool(ctx, tool.ID)
+	if err != nil {
+		t.Fatalf("ListInspectionsByTool(tiebreak) err = %v", err)
+	}
+	if len(history) != 2 {
+		t.Fatalf("inspections = %d, want 2", len(history))
+	}
+	wantFirst := inspB.ID
+	if inspA.ID > inspB.ID {
+		wantFirst = inspA.ID
+	}
+	if history[0].ID != wantFirst {
+		t.Fatalf("tiebreak order = [%s, %s], want [%s, ...] (id DESC for equal submitted_at)", history[0].ID, history[1].ID, wantFirst)
+	}
+	if history[1].ID == history[0].ID {
+		t.Fatalf("tiebreak rows share an id: %s", history[0].ID)
+	}
+
+	// TWO reinstatements with the SAME created_at → the id DESC tiebreak decides.
+	var reinA, reinB string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO reinstatements (tool_id, actor_id, reason, created_at)
+		 VALUES ($1, '00000000-0000-0000-0000-0000000000aa', 'A', '2026-01-01T00:00:00Z') RETURNING id`, tool.ID,
+	).Scan(&reinA); err != nil {
+		t.Fatalf("inserting rein-A err = %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO reinstatements (tool_id, actor_id, reason, created_at)
+		 VALUES ($1, '00000000-0000-0000-0000-0000000000aa', 'B', '2026-01-01T00:00:00Z') RETURNING id`, tool.ID,
+	).Scan(&reinB); err != nil {
+		t.Fatalf("inserting rein-B err = %v", err)
+	}
+
+	rein, err := repo.ListReinstatementsByTool(ctx, tool.ID)
+	if err != nil {
+		t.Fatalf("ListReinstatementsByTool(tiebreak) err = %v", err)
+	}
+	if len(rein) != 2 {
+		t.Fatalf("reinstatements = %d, want 2", len(rein))
+	}
+	wantFirstRein := reinB
+	if reinA > reinB {
+		wantFirstRein = reinA
+	}
+	if rein[0].ID != wantFirstRein {
+		t.Fatalf("rein tiebreak order = [%s, %s], want [%s, ...] (id DESC for equal created_at)", rein[0].ID, rein[1].ID, wantFirstRein)
+	}
+}

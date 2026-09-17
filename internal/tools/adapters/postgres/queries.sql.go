@@ -503,6 +503,131 @@ func (q *Queries) InsertToolTypeChecklistItem(ctx context.Context, arg InsertToo
 	return err
 }
 
+const listInspectionItemsByTool = `-- name: ListInspectionItemsByTool :many
+SELECT ii.id, ii.inspection_id, ii.item_id, ii.label, ii.position, ii.result
+FROM inspection_items ii
+JOIN inspections i ON i.id = ii.inspection_id
+WHERE i.tool_id = $1
+ORDER BY ii.inspection_id, ii.position
+`
+
+// The snapshotted ordered checklist items of EVERY inspection of a tool (FR-18
+// per-checklist-item results), grouped by inspection and ordered by position
+// within each group. The repository groups them onto the fetched inspections
+// in ONE round-trip (no N+1 per-inspection item reads).
+func (q *Queries) ListInspectionItemsByTool(ctx context.Context, toolID pgtype.UUID) ([]InspectionItem, error) {
+	rows, err := q.db.Query(ctx, listInspectionItemsByTool, toolID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []InspectionItem
+	for rows.Next() {
+		var i InspectionItem
+		if err := rows.Scan(
+			&i.ID,
+			&i.InspectionID,
+			&i.ItemID,
+			&i.Label,
+			&i.Position,
+			&i.Result,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listInspectionsByTool = `-- name: ListInspectionsByTool :many
+
+SELECT id, tool_id, inspector_id, mode, overall_result, notes, submitted_at
+FROM inspections
+WHERE tool_id = $1
+ORDER BY submitted_at DESC, id DESC
+`
+
+// ============================================================================
+// History queries (Story 6.3, FR-18/AD-6/AD-8): the per-tool audit trail of
+// inspections + reinstatements, newest first. The inspector/actor NAMES never
+// resolve here — the Tool module never joins user tables (AD-8/AD-11); the
+// plain FK-less ids are read out and the core resolves the display names
+// through the User module's DisplayNameResolver seam in ONE bulk call.
+// ============================================================================
+// The FULL inspection history of a tool (FR-18), reverse-chronological with
+// the id tiebreak for equal timestamps (submitted_at DESC, id DESC — the same
+// deterministic tiebreak as the status-read queries; the existing 000027 index
+// inspections_tool_id_submitted_at_idx already supports it). A tool with no
+// inspections answers an empty set (the history surface renders the German
+// empty state, never a 404).
+func (q *Queries) ListInspectionsByTool(ctx context.Context, toolID pgtype.UUID) ([]Inspection, error) {
+	rows, err := q.db.Query(ctx, listInspectionsByTool, toolID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Inspection
+	for rows.Next() {
+		var i Inspection
+		if err := rows.Scan(
+			&i.ID,
+			&i.ToolID,
+			&i.InspectorID,
+			&i.Mode,
+			&i.OverallResult,
+			&i.Notes,
+			&i.SubmittedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listReinstatementsByTool = `-- name: ListReinstatementsByTool :many
+SELECT id, tool_id, actor_id, reason, created_at
+FROM reinstatements
+WHERE tool_id = $1
+ORDER BY created_at DESC, id DESC
+`
+
+// The FULL reinstatement ledger of a tool (FR-18), newest first with the id
+// tiebreak (created_at DESC, id DESC — the existing 000027 index
+// reinstatements_tool_id_created_at_idx already supports it). A tool with no
+// reinstatements answers an empty set.
+func (q *Queries) ListReinstatementsByTool(ctx context.Context, toolID pgtype.UUID) ([]Reinstatement, error) {
+	rows, err := q.db.Query(ctx, listReinstatementsByTool, toolID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Reinstatement
+	for rows.Next() {
+		var i Reinstatement
+		if err := rows.Scan(
+			&i.ID,
+			&i.ToolID,
+			&i.ActorID,
+			&i.Reason,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listToolTypeChecklistItems = `-- name: ListToolTypeChecklistItems :many
 SELECT id, tool_type_id, position, label, created_at, updated_at
 FROM tool_type_checklist_items

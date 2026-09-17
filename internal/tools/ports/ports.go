@@ -98,4 +98,13 @@ type Service interface {
 	// (next_due = reinstatement + resolved interval, AD-5). Reinstatement is the
 	// SOLE exit from OOS (FR-15).
 	ReinstateTool(ctx context.Context, actorID, toolID, reason string) (*core.ReinstateResult, error)
+	// ListInspectionHistory returns the per-tool audit trail (Story 6.3, FR-18):
+	// every inspection (newest first, each naming the inspector + timestamp +
+	// outcome + notes + mode + the snapshotted per-checklist-item results) and
+	// every reinstatement (newest first, actor + reason). Re-checks
+	// `inspection.history.view` defense-in-depth (AD-6); missing/archived tool
+	// → ErrToolNotFound (404 German); inspector/actor display names resolve
+	// through the DisplayNameResolver seam (a missing user row maps to the
+	// literal "Deleted User", Story 3.4 forward-compat).
+	ListInspectionHistory(ctx context.Context, actorID, toolID string) (*core.ToolHistory, error)
 }

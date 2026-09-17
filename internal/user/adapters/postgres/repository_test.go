@@ -1544,11 +1544,11 @@ func TestPostgresBasePermissionSeedResolution(t *testing.T) {
 	}
 
 	schirrmeister := newGroupUser("schirrmeister")
-	// 10 codes after migrations 000011 + 000013 + 000025 (user decision + Spec
-	// 2.9 + Story 4-3b): schirrmeister now also carries users.view +
-	// users.qualifications.manage + tool.edit.
-	if got := resolve(schirrmeister); !sameCodeSet(got, []string{"dashboard.view", "inspection.submit", "tool.edit", "tools.manage", "tool_types.manage", "users.qualifications.manage", "users.view"}) {
-		t.Errorf("schirrmeister permissions = %v, want [dashboard.view inspection.submit tool.edit tools.manage tool_types.manage users.qualifications.manage users.view]", got)
+	// 8 codes after migrations 000011 + 000013 + 000025 + 000028 (user decision
+	// + Spec 2.9 + Story 4-3b + Story 6.3): schirrmeister now also carries
+	// users.view + users.qualifications.manage + tool.edit + inspection.history.view.
+	if got := resolve(schirrmeister); !sameCodeSet(got, []string{"dashboard.view", "inspection.submit", "inspection.history.view", "tool.edit", "tools.manage", "tool_types.manage", "users.qualifications.manage", "users.view"}) {
+		t.Errorf("schirrmeister permissions = %v, want [dashboard.view inspection.submit inspection.history.view tool.edit tools.manage tool_types.manage users.qualifications.manage users.view]", got)
 	}
 
 	fuehrende := newGroupUser("fuehrende")
@@ -1564,7 +1564,7 @@ func TestPostgresBasePermissionSeedResolution(t *testing.T) {
 	// dashboard.view + inspection.submit) resolves a DEDUPLICATED set — no
 	// repeated codes.
 	multi := newGroupUser("helfende", "schirrmeister")
-	if got := resolve(multi); !sameCodeSet(got, []string{"dashboard.view", "inspection.submit", "tool.edit", "tools.manage", "tool_types.manage", "users.qualifications.manage", "users.view"}) {
+	if got := resolve(multi); !sameCodeSet(got, []string{"dashboard.view", "inspection.submit", "inspection.history.view", "tool.edit", "tools.manage", "tool_types.manage", "users.qualifications.manage", "users.view"}) {
 		t.Errorf("multi-role permissions = %v, want the deduplicated union (no repeated codes)", got)
 	}
 
@@ -1947,4 +1947,93 @@ func groupMembershipCount(t *testing.T, pool *pgxpool.Pool, userID, group string
 		t.Fatalf("counting group membership failed: %v", err)
 	}
 	return n == want
+}
+
+// TestPostgresResolveDisplayNames exercises the Story 6.3 display-name seam
+// (FR-18/AD-8): Repository.ResolveDisplayNames / the generated ListUsersByIDs
+// query returns the id → display_name map for the EXISTING users among the
+// given set. A non-existent uuid is simply ABSENT from the map (no error — the
+// Tool core maps the missing key to the literal "Deleted User"); an empty input
+// answers an empty map (no query).
+func TestPostgresResolveDisplayNames(t *testing.T) {
+	dbURL := os.Getenv("DATABASE_URL")
+	if dbURL == "" {
+		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
+	}
+
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+
+	pool, err := pgxpool.New(ctx, dbURL)
+	if err != nil {
+		t.Skipf("skipping db integration test: %v", err)
+	}
+	defer pool.Close()
+
+	if err := pool.Ping(ctx); err != nil {
+		t.Skipf("skipping db integration test (db ping failed): %v", err)
+	}
+
+	repo := NewRepository(New(pool))
+	suffix := time.Now().Format("20060102150405.000000")
+	emailA := "displayname.a." + suffix + "@gear.local"
+	emailB := "displayname.b." + suffix + "@gear.local"
+
+	a, err := repo.CreateRegisteredUser(ctx, emailA, "Erika Mustermann", "Erika", "Mustermann", "$argon2id$v=19$dummyhash")
+	if err != nil {
+		t.Fatalf("CreateRegisteredUser(A) failed: %v", err)
+	}
+	b, err := repo.CreateRegisteredUser(ctx, emailB, "Max Mustermann", "Max", "Mustermann", "$argon2id$v=19$dummyhash")
+	if err != nil {
+		t.Fatalf("CreateRegisteredUser(B) failed: %v", err)
+	}
+	t.Cleanup(func() {
+		// Related rows cascade; the two test users have no sessions/grants.
+		_, _ = pool.Exec(context.Background(), `DELETE FROM users WHERE id = $1`, a.ID)
+		_, _ = pool.Exec(context.Background(), `DELETE FROM users WHERE id = $1`, b.ID)
+	})
+
+	// Existing uuids → each present with its display_name.
+	names, err := repo.ResolveDisplayNames(ctx, []string{a.ID, b.ID})
+	if err != nil {
+		t.Fatalf("ResolveDisplayNames(existing) failed: %v", err)
+	}
+	if names[a.ID] != "Erika Mustermann" {
+		t.Errorf("names[%s] = %q, want Erika Mustermann", a.ID, names[a.ID])
+	}
+	if names[b.ID] != "Max Mustermann" {
+		t.Errorf("names[%s] = %q, want Max Mustermann", b.ID, names[b.ID])
+	}
+
+	// A NON-EXISTENT uuid → that id is ABSENT from the map (no error, never a
+	// 404) — the Tool core renders the missing key as "Deleted User".
+	missing := "00000000-0000-0000-0000-0000000000ff"
+	names, err = repo.ResolveDisplayNames(ctx, []string{missing})
+	if err != nil {
+		t.Fatalf("ResolveDisplayNames(missing) failed: %v", err)
+	}
+	if len(names) != 0 {
+		t.Errorf("missing-uuid map = %+v, want empty (the id is absent)", names)
+	}
+
+	// A MIX of existing + missing → only the existing resolve.
+	names, err = repo.ResolveDisplayNames(ctx, []string{a.ID, missing})
+	if err != nil {
+		t.Fatalf("ResolveDisplayNames(mixed) failed: %v", err)
+	}
+	if names[a.ID] != "Erika Mustermann" {
+		t.Errorf("mixed names[%s] = %q, want Erika Mustermann", a.ID, names[a.ID])
+	}
+	if _, present := names[missing]; present {
+		t.Errorf("mixed map must not contain the missing id: %+v", names)
+	}
+
+	// Empty input → empty map (no query, no error).
+	names, err = repo.ResolveDisplayNames(ctx, []string{})
+	if err != nil {
+		t.Fatalf("ResolveDisplayNames(empty) failed: %v", err)
+	}
+	if len(names) != 0 {
+		t.Errorf("empty-input map = %+v, want empty", names)
+	}
 }

@@ -44,6 +44,14 @@ type fakeToolService struct {
 	reinstateNil     bool
 	lastReinstateID  string
 	lastReason       string
+	// ListInspectionHistory fixture (Story 6.3): historyErr drives the error
+	// rows; history is the returned payload (defaults to an empty history);
+	// historyNil simulates a nil-returning service path (a clean 500);
+	// lastHistoryID captures the tool id from the URL.
+	historyErr    error
+	history       *toolscore.ToolHistory
+	historyNil    bool
+	lastHistoryID string
 }
 
 func (f *fakeToolService) ListToolTypes(context.Context, string) ([]*toolscore.ToolType, error) {
@@ -204,6 +212,23 @@ func (f *fakeToolService) ReinstateTool(_ context.Context, _, toolID, reason str
 	return &toolscore.ReinstateResult{Status: f.reinstateStatus}, nil
 }
 
+func (f *fakeToolService) ListInspectionHistory(_ context.Context, _, toolID string) (*toolscore.ToolHistory, error) {
+	if f.historyErr != nil {
+		return nil, f.historyErr
+	}
+	if f.historyNil {
+		return nil, nil
+	}
+	if f.history == nil {
+		return &toolscore.ToolHistory{
+			Inspections:    []*toolscore.ToolHistoryInspection{},
+			Reinstatements: []*toolscore.ToolHistoryReinstatement{},
+		}, nil
+	}
+	f.lastHistoryID = toolID
+	return f.history, nil
+}
+
 var _ toolports.Service = (*fakeToolService)(nil)
 
 // toolGateway wraps the REAL ToolRoutes() behind the same ANY-of gate the
@@ -233,15 +258,18 @@ func dashboardToolGateway(perms []string, session *usercore.Session, svc toolpor
 }
 
 // toolsInspectionGateway mimics the composition-root combined /api/v1/tools
-// router (Story 5.1 + 5.3 + 5.6): the dashboard list surface (GET /,
+// router (Story 5.1 + 5.3 + 5.6 + 6.3): the dashboard list surface (GET /,
 // dashboard.view), the inspection surface (POST /{id}/inspection/start + POST
-// /{id}/inspection, inspection.submit) AND the reinstatement surface (POST
-// /{id}/reinstatement, tool.reinstate) combined via exact-match Handle + prefix
-// Mount, EACH behind its OWN gate — so the composition mount gate test is
-// exercised here (a dashboard.view-but-not- inspection.submit caller reads the
-// list but 403s on the start/submit; an inspection.submit-but-not-tool.reinstate
-// caller 403s on the reinstatement). Each surface is mounted at the full path
-// prefix; InspectionRoutes/ReinstateRoutes own the route patterns.
+// /{id}/inspection, inspection.submit), the reinstatement surface (POST
+// /{id}/reinstatement, tool.reinstate) AND the history surface (GET
+// /{id}/history, inspection.history.view) combined via exact-match Handle +
+// prefix Mount, EACH behind its OWN gate — so the composition mount gate test
+// is exercised here (a dashboard.view-but-not-inspection.submit caller reads
+// the list but 403s on the start/submit; an inspection.submit-but-not-
+// tool.reinstate caller 403s on the reinstatement; a dashboard.view-but-not-
+// inspection.history.view caller 403s on the history). Each surface is mounted
+// at the full path prefix; InspectionRoutes/ReinstateRoutes/HistoryRoutes own
+// the route patterns.
 func toolsInspectionGateway(perms []string, session *usercore.Session, svc toolports.Service) http.Handler {
 	h := NewHandler(svc, &gateValidator{session: session}, &gateResolver{perms: perms}, discardLogger())
 	dashboardSurface := auth.RequirePermission(
@@ -259,12 +287,18 @@ func toolsInspectionGateway(perms []string, session *usercore.Session, svc toolp
 		&gateResolver{perms: perms},
 		toolscore.ToolReinstatePermission,
 	)(h.ReinstateRoutes())
+	historySurface := auth.RequirePermission(
+		&gateValidator{session: session},
+		&gateResolver{perms: perms},
+		toolscore.InspectionHistoryViewPermission,
+	)(h.HistoryRoutes())
 	combined := chi.NewRouter()
 	combined.NotFound(httpapi.NotFoundHandler())
 	combined.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
 	combined.Handle("/", dashboardSurface)
 	combined.Mount("/{id}/inspection", inspectionSurface)
 	combined.Mount("/{id}/reinstatement", reinstateSurface)
+	combined.Mount("/{id}/history", historySurface)
 	return combined
 }
 
@@ -275,6 +309,13 @@ func toolsInspectionGateway(perms []string, session *usercore.Session, svc toolp
 func nakedInspectionRouter(svc toolports.Service) http.Handler {
 	h := NewHandler(svc, &gateValidator{}, &gateResolver{}, discardLogger())
 	return h.InspectionRoutes()
+}
+
+// nakedHistoryRouter exposes the HistoryRoutes router WITHOUT the auth gateway,
+// so the handler's own guards (the nil-user 401) are directly testable.
+func nakedHistoryRouter(svc toolports.Service) http.Handler {
+	h := NewHandler(svc, &gateValidator{}, &gateResolver{}, discardLogger())
+	return h.HistoryRoutes()
 }
 
 func toolFixture(id, name string) *toolscore.Tool {
@@ -2044,6 +2085,307 @@ func TestReinstateToolClientAbort(t *testing.T) {
 	req := httptest.NewRequest(http.MethodPost, "/id-a/reinstatement", strings.NewReader(`{"reason":"Ersatzteil"}`))
 	req = req.WithContext(auth.WithUser(ctx, activeAdmin().User))
 	h.ReinstateTool(rec, req)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want no response written on a client abort (the recorder defaults to 200)", rec.Code)
+	}
+	if rec.Body.Len() != 0 {
+		t.Errorf("body = %q, want empty (the abort guard must not write)", rec.Body.String())
+	}
+}
+
+// ============================================================================
+// Tool history (Story 6.3, FR-18/AD-6): the GET /api/v1/tools/{id}/history
+// surface behind inspection.history.view.
+// ============================================================================
+
+// historyFixture is a full tool history (Story 6.3): a newer checklist
+// inspection WITH its per-item snapshot results + an older pass_fail + one
+// reinstatement, by the known inspector.
+func historyFixture() *toolscore.ToolHistory {
+	newer := time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC)
+	older := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
+	created := time.Date(2026, 9, 16, 8, 0, 0, 0, time.UTC)
+	return &toolscore.ToolHistory{
+		Inspections: []*toolscore.ToolHistoryInspection{
+			{
+				ID: "insp-new", InspectorID: "u-admin", InspectorName: "Anna Muster",
+				Mode: toolscore.InspectionModeChecklist, OverallResult: toolscore.InspectionResultFail,
+				Notes: "Bohrfutter locker", SubmittedAt: newer,
+				Items: []toolscore.InspectionItem{
+					{ID: "it-1", InspectionID: "insp-new", ItemID: "item-1", Label: "Kabel", Position: 0, Result: toolscore.InspectionResultPass},
+					{ID: "it-2", InspectionID: "insp-new", ItemID: "item-2", Label: "Bohrfutter", Position: 1, Result: toolscore.InspectionResultFail},
+				},
+			},
+			{
+				ID: "insp-old", InspectorID: "u-admin", InspectorName: "Anna Muster",
+				Mode: toolscore.InspectionModePassFail, OverallResult: toolscore.InspectionResultPass,
+				Notes: "Alles ok", SubmittedAt: older,
+				Items: []toolscore.InspectionItem{},
+			},
+		},
+		Reinstatements: []*toolscore.ToolHistoryReinstatement{
+			{ID: "rein-1", ActorID: "u-admin", ActorName: "Anna Muster", Reason: "Ersatzteil eingetroffen", CreatedAt: created},
+		},
+	}
+}
+
+func TestToolHistoryOK(t *testing.T) {
+	// HIST_OK: an inspection.history.view holder GETs the tool's history — the
+	// DTO carries BOTH newest-first lists with the inspector name, timestamp,
+	// outcome, notes, mode and the per-checklist-item results; reinstatements
+	// carry the actor + reason. The {id} path param reaches the service.
+	svc := &fakeToolService{history: historyFixture()}
+	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionHistoryViewPermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodGet, "/id-a/history", "tok", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var body struct {
+		Inspections    []map[string]any `json:"inspections"`
+		Reinstatements []map[string]any `json:"reinstatements"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding err = %v", err)
+	}
+	if len(body.Inspections) != 2 || len(body.Reinstatements) != 1 {
+		t.Fatalf("history = %d inspections / %d reinstatements, want 2 / 1", len(body.Inspections), len(body.Reinstatements))
+	}
+	insp := body.Inspections[0]
+	if insp["id"] != "insp-new" || insp["inspector_id"] != "u-admin" || insp["inspector_name"] != "Anna Muster" {
+		t.Errorf("inspection[0] identity = %+v", insp)
+	}
+	if insp["mode"] != "checklist" || insp["overall_result"] != "fail" || insp["notes"] != "Bohrfutter locker" {
+		t.Errorf("inspection[0] record = %+v", insp)
+	}
+	if insp["submitted_at"] != "2026-09-15T10:00:00Z" {
+		t.Errorf("submitted_at = %v, want the RFC3339 UTC timestamp", insp["submitted_at"])
+	}
+	items, ok := insp["items"].([]any)
+	if !ok || len(items) != 2 {
+		t.Fatalf("items = %+v, want the two snapshot items", insp["items"])
+	}
+	if item, ok := items[0].(map[string]any); !ok || item["item_id"] != "item-1" || item["label"] != "Kabel" || item["position"] != float64(0) || item["result"] != "pass" {
+		t.Errorf("items[0] = %+v, want the Kabel pass snapshot", items[0])
+	}
+	if item, ok := items[1].(map[string]any); !ok || item["label"] != "Bohrfutter" || item["result"] != "fail" {
+		t.Errorf("items[1] = %+v, want the Bohrfutter fail snapshot", items[1])
+	}
+	// Newest first: the second inspection is the older pass_fail with an EMPTY
+	// items array (never null).
+	if insp2 := body.Inspections[1]; insp2["id"] != "insp-old" || insp2["mode"] != "pass_fail" {
+		t.Errorf("inspection[1] = %+v, want the older pass_fail", insp2)
+	}
+	if items2, ok := body.Inspections[1]["items"].([]any); !ok || len(items2) != 0 {
+		t.Errorf("inspection[1] items = %+v, want an empty array", body.Inspections[1]["items"])
+	}
+	rein := body.Reinstatements[0]
+	if rein["actor_id"] != "u-admin" || rein["actor_name"] != "Anna Muster" || rein["reason"] != "Ersatzteil eingetroffen" || rein["created_at"] != "2026-09-16T08:00:00Z" {
+		t.Errorf("reinstatement = %+v", rein)
+	}
+	if svc.lastHistoryID != "id-a" {
+		t.Errorf("service received tool id = %q, want id-a", svc.lastHistoryID)
+	}
+}
+
+func TestToolHistoryEmpty(t *testing.T) {
+	// HIST_EMPTY: a tool with no records answers 200 with EMPTY arrays — never
+	// null, never a 404.
+	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionHistoryViewPermission}, activeAdmin(), &fakeToolService{})
+	rec := doRequest(surface, http.MethodGet, "/id-a/history", "tok", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding err = %v", err)
+	}
+	if insp, ok := body["inspections"].([]any); !ok || len(insp) != 0 {
+		t.Errorf("inspections = %+v, want an empty array", body["inspections"])
+	}
+	if rein, ok := body["reinstatements"].([]any); !ok || len(rein) != 0 {
+		t.Errorf("reinstatements = %+v, want an empty array", body["reinstatements"])
+	}
+}
+
+func TestToolHistoryCompositionMountGate(t *testing.T) {
+	// HIST_GATED (Story 6.3, AD-6): the history is its OWN surface — a
+	// dashboard.view-but-not-inspection.history.view caller still READS the
+	// Werkzeugliste but 403s on the history with NO data exposed; the history
+	// holder reaches it. The reverse is also pinned: a history-only holder
+	// reaches the history but is denied the dashboard list.
+	svc := &fakeToolService{tools: []*toolscore.Tool{toolFixture("id-a", "Bohrmaschine-01")}, history: historyFixture()}
+
+	dashboardOnly := toolsInspectionGateway([]string{toolscore.DashboardViewPermission}, activeAdmin(), svc)
+	if rec := doRequest(dashboardOnly, http.MethodGet, "/", "tok", ""); rec.Code != http.StatusOK {
+		t.Fatalf("dashboard GET status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	rec := doRequest(dashboardOnly, http.MethodGet, "/id-a/history", "tok", "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("history status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 403 err = %v", err)
+	}
+	if env.Error.Code != "forbidden" {
+		t.Errorf("code = %q, want forbidden", env.Error.Code)
+	}
+	if strings.Contains(strings.ToLower(rec.Body.String()), "bohrmaschine") || strings.Contains(rec.Body.String(), "Anna Muster") || strings.Contains(rec.Body.String(), "id-a") {
+		t.Errorf("403 body leaks history/tool data: %s", rec.Body.String())
+	}
+
+	historyOnly := toolsInspectionGateway([]string{toolscore.InspectionHistoryViewPermission}, activeAdmin(), svc)
+	if rec := doRequest(historyOnly, http.MethodGet, "/id-a/history", "tok", ""); rec.Code != http.StatusOK {
+		t.Fatalf("history (holder) status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if rec := doRequest(historyOnly, http.MethodGet, "/", "tok", ""); rec.Code != http.StatusForbidden {
+		t.Fatalf("dashboard (history-only) status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestToolHistoryToolNotFound(t *testing.T) {
+	// HIST_UNKNOWN / HIST_ARCHIVED: the service's ErrToolNotFound → the uniform
+	// 404 with the German message.
+	svc := &fakeToolService{historyErr: toolscore.ErrToolNotFound}
+	surface := toolsInspectionGateway([]string{toolscore.InspectionHistoryViewPermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodGet, "/id-missing/history", "tok", "")
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("status = %d, want 404 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 404 err = %v", err)
+	}
+	if env.Error.Code != "not_found" {
+		t.Errorf("code = %q, want not_found", env.Error.Code)
+	}
+	if env.Error.Message != toolscore.MsgToolNotFound {
+		t.Errorf("message = %q, want %q", env.Error.Message, toolscore.MsgToolNotFound)
+	}
+}
+
+func TestToolHistoryForbiddenEnvelope(t *testing.T) {
+	// The core re-check (defense-in-depth, AD-6): a caller whose live set lost
+	// inspection.history.view between the gateway and the core answers the
+	// generic no-hint 403, with no history data.
+	svc := &fakeToolService{historyErr: toolscore.ErrForbidden}
+	surface := toolsInspectionGateway([]string{toolscore.InspectionHistoryViewPermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodGet, "/id-a/history", "tok", "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 403 err = %v", err)
+	}
+	if env.Error.Message != "Keine Berechtigung." {
+		t.Errorf("message = %q, want the generic no-hint forbidden microcopy", env.Error.Message)
+	}
+	if strings.Contains(rec.Body.String(), "Anna Muster") {
+		t.Errorf("403 body leaks history data: %s", rec.Body.String())
+	}
+}
+
+func TestToolHistoryUnauthenticated(t *testing.T) {
+	// No session → 401 uniform envelope.
+	surface := toolsInspectionGateway([]string{toolscore.InspectionHistoryViewPermission}, nil, &fakeToolService{})
+	rec := doRequest(surface, http.MethodGet, "/id-a/history", "", "")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 401 err = %v", err)
+	}
+	if env.Error.Code != "unauthorized" {
+		t.Errorf("code = %q, want unauthorized", env.Error.Code)
+	}
+}
+
+func TestToolHistoryMethodNotAllowedEnvelope(t *testing.T) {
+	// Only GET is registered on the history surface: POST answers the uniform
+	// 405 (read-only surface, no write path).
+	surface := toolsInspectionGateway([]string{toolscore.InspectionHistoryViewPermission}, activeAdmin(), &fakeToolService{})
+	rec := doRequest(surface, http.MethodPost, "/id-a/history", "tok", "")
+	if rec.Code != http.StatusMethodNotAllowed {
+		t.Fatalf("status = %d, want 405 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 405 err = %v", err)
+	}
+	if env.Error.Code != "method_not_allowed" {
+		t.Errorf("code = %q, want method_not_allowed", env.Error.Code)
+	}
+}
+
+func TestToolHistoryInternalErrorEnvelope(t *testing.T) {
+	// DEFAULT branch (mapInspectionError): an UNEXPECTED service error → 500
+	// internal_error uniform envelope with the German message, and NO history
+	// data leak — the raw error never reaches the client.
+	svc := &fakeToolService{historyErr: errors.New("boom")}
+	surface := toolsInspectionGateway([]string{toolscore.InspectionHistoryViewPermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodGet, "/id-a/history", "tok", "")
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 500 err = %v", err)
+	}
+	if env.Error.Code != "internal_error" {
+		t.Errorf("code = %q, want internal_error", env.Error.Code)
+	}
+	if env.Error.Message != "Ein interner Fehler ist aufgetreten." {
+		t.Errorf("message = %q, want the German internal-error microcopy", env.Error.Message)
+	}
+	if strings.Contains(rec.Body.String(), "Anna Muster") {
+		t.Errorf("500 body leaks history data: %s", rec.Body.String())
+	}
+}
+
+func TestToolHistoryNilUserUnauthorized(t *testing.T) {
+	// Handler-level defense-in-depth: no authenticated user in the context → 401
+	// (unreachable through the gated composition but still a handler guard).
+	// The NAKED router owns the route at "/" (the mount strips the /{id}/history
+	// prefix in production).
+	surface := nakedHistoryRouter(&fakeToolService{})
+	rec := doRequest(surface, http.MethodGet, "/", "", "")
+	if rec.Code != http.StatusUnauthorized {
+		t.Fatalf("status = %d, want 401 (body %s)", rec.Code, rec.Body.String())
+	}
+}
+
+func TestToolHistoryNilServiceResult(t *testing.T) {
+	// A nil-returning service path (a wiring defect) → the clean 500, never a
+	// panic.
+	svc := &fakeToolService{historyNil: true}
+	surface := toolsInspectionGateway([]string{toolscore.InspectionHistoryViewPermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodGet, "/id-a/history", "tok", "")
+	if rec.Code != http.StatusInternalServerError {
+		t.Fatalf("status = %d, want 500 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 500 err = %v", err)
+	}
+	if env.Error.Code != "internal_error" {
+		t.Errorf("code = %q, want internal_error", env.Error.Code)
+	}
+}
+
+func TestToolHistoryClientAbort(t *testing.T) {
+	// The client-abort guard in mapInspectionError: a canceled request has no
+	// one to answer — the handler returns WITHOUT writing. A user is injected so
+	// the handler passes its nil-user guard and reaches the error mapper.
+	svc := &fakeToolService{historyErr: errors.New("boom")}
+	h := NewHandler(svc, &gateValidator{}, &gateResolver{}, discardLogger())
+	rec := httptest.NewRecorder()
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodGet, "/id-a/history", nil)
+	req = req.WithContext(auth.WithUser(ctx, activeAdmin().User))
+	h.ListInspectionHistory(rec, req)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want no response written on a client abort (the recorder defaults to 200)", rec.Code)
 	}

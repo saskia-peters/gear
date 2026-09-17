@@ -5,6 +5,7 @@ import { ErrorBoundary } from './components/ErrorBoundary.tsx'
 import { AppShell } from './components/AppShell.tsx'
 import { DashboardPage } from './pages/DashboardPage.tsx'
 import { InspectionPage } from './pages/InspectionPage.tsx'
+import { ToolDetailsPage } from './pages/ToolDetailsPage.tsx'
 import { LoginPage } from './pages/LoginPage.tsx'
 import { MfaPage } from './pages/MfaPage.tsx'
 import { RegisterPage } from './pages/RegisterPage.tsx'
@@ -259,6 +260,14 @@ export function AppRoutes() {
         element={
           <AuthenticatedPage>
             <InspectionPage />
+          </AuthenticatedPage>
+        }
+      />
+      <Route
+        path="/tools/:toolId"
+        element={
+          <AuthenticatedPage>
+            <ToolDetailsPage />
           </AuthenticatedPage>
         }
       />

@@ -2345,6 +2345,44 @@ func (q *Queries) ListUsers(ctx context.Context, status pgtype.Text) ([]ListUser
 	return items, nil
 }
 
+const listUsersByIDs = `-- name: ListUsersByIDs :many
+SELECT id, display_name
+FROM users
+WHERE id = ANY($1::uuid[])
+ORDER BY id
+`
+
+type ListUsersByIDsRow struct {
+	ID          pgtype.UUID `json:"id"`
+	DisplayName string      `json:"display_name"`
+}
+
+// The id → display_name pairs of the EXISTING users among the given set (Story
+// 6.3, FR-18/AD-8): the Tool history surface resolves inspector/actor display
+// names through this seam — the Tool module never joins user tables. A user id
+// ABSENT from the result (a deleted account, Story 3.4 not yet built) maps to
+// the literal "Deleted User" at the core — never a 404, never an empty string.
+// No secret material is selected.
+func (q *Queries) ListUsersByIDs(ctx context.Context, dollar_1 []pgtype.UUID) ([]ListUsersByIDsRow, error) {
+	rows, err := q.db.Query(ctx, listUsersByIDs, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListUsersByIDsRow
+	for rows.Next() {
+		var i ListUsersByIDsRow
+		if err := rows.Scan(&i.ID, &i.DisplayName); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const permissionGroupExists = `-- name: PermissionGroupExists :one
 SELECT EXISTS (
     SELECT 1 FROM permission_groups

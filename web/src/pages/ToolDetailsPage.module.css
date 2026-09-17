@@ -1,0 +1,258 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  width: 100%;
+}
+
+.main {
+  flex: 1;
+  width: 100%;
+  max-width: 1024px;
+  margin: 0 auto;
+  padding: var(--gear-space-6) var(--gear-space-margin-mobile);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-6);
+  box-sizing: border-box;
+}
+
+.titleSection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-1);
+}
+
+.pageTitle {
+  font-size: var(--gear-font-display-size);
+  font-weight: var(--gear-font-display-weight);
+  line-height: var(--gear-font-display-line-height);
+  letter-spacing: var(--gear-font-display-letter-spacing);
+  color: var(--gear-color-ink-primary);
+  hyphens: auto;
+  word-break: normal;
+}
+
+.pageSubtitle {
+  font-size: var(--gear-font-body-size);
+  color: var(--gear-color-ink-secondary);
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-4);
+  width: 100%;
+}
+
+.loading {
+  margin: 0;
+  padding: var(--gear-space-3) var(--gear-space-4);
+  border-radius: var(--gear-radius-md);
+  background-color: var(--gear-color-surface-raised);
+  border: 1px solid var(--gear-color-border-hairline);
+  color: var(--gear-color-ink-secondary);
+  font-size: var(--gear-font-label-size);
+  line-height: var(--gear-font-label-line-height);
+}
+
+/* The header loading skeleton (Story 6.3): shimmer-free placeholder rows while
+   the deep-link dashboard-list refetch resolves the tool. */
+.skeleton {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-3);
+  padding: var(--gear-space-4);
+  background-color: var(--gear-color-surface-raised);
+  border: 1px solid var(--gear-color-border-hairline);
+  border-radius: var(--gear-radius-md);
+}
+
+.skeletonRow {
+  height: 1.25rem;
+  border-radius: var(--gear-radius-sm, 4px);
+  background-color: var(--gear-color-surface-muted, var(--gear-color-border-hairline));
+}
+
+.error {
+  margin: 0;
+  padding: var(--gear-space-3) var(--gear-space-4);
+  border-radius: var(--gear-radius-md);
+  background-color: var(--gear-color-status-red-soft);
+  border: 1px solid var(--gear-color-status-red);
+  color: var(--gear-color-status-red);
+  font-size: var(--gear-font-label-size);
+  line-height: var(--gear-font-label-line-height);
+}
+
+/* The tool header card (Story 6.3, mirroring the InspectionPage header): tool
+   name + Gerätenummer + Gerätetyp + the derived status chip. */
+.toolHeader {
+  padding: var(--gear-space-4);
+  background-color: var(--gear-color-surface-raised);
+  border: 1px solid var(--gear-color-border-hairline);
+  border-radius: var(--gear-radius-md);
+}
+
+.detail {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-3);
+}
+
+.detailRow {
+  display: flex;
+  align-items: baseline;
+  gap: var(--gear-space-3);
+}
+
+.detailTerm {
+  min-width: 8rem;
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  color: var(--gear-color-ink-secondary);
+}
+
+.detailValue {
+  margin: 0;
+  font-size: var(--gear-font-title-size);
+  font-weight: var(--gear-font-title-weight);
+  color: var(--gear-color-ink-primary);
+}
+
+/* The derived-status chip (Story 6.3, sharing the dashboard's color
+   vocabulary): green/orange/red/OOS pills rendered from the dashboard list. */
+.statusChip {
+  display: inline-flex;
+  align-items: center;
+  min-height: 28px;
+  padding: 0 var(--gear-space-2);
+  border-radius: var(--gear-radius-pill, 999px);
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  line-height: var(--gear-font-label-line-height);
+  white-space: nowrap;
+}
+
+.statusGreen {
+  background-color: var(--gear-color-status-green-soft);
+  color: var(--gear-color-status-green);
+  border: 1px solid var(--gear-color-status-green);
+}
+
+.statusOrange {
+  background-color: var(--gear-color-status-orange-soft, var(--gear-color-status-orange));
+  color: var(--gear-color-status-orange);
+  border: 1px solid var(--gear-color-status-orange);
+}
+
+.statusRed {
+  background-color: var(--gear-color-status-red-soft);
+  color: var(--gear-color-status-red);
+  border: 1px solid var(--gear-color-status-red);
+}
+
+.statusOos {
+  background-color: var(--gear-color-status-oos-soft, var(--gear-color-status-red-soft));
+  color: var(--gear-color-status-oos, var(--gear-color-status-red));
+  border: 1px solid var(--gear-color-status-oos, var(--gear-color-status-red));
+}
+
+/* The history sections (Story 6.3, FR-18): one card per inspection /
+   reinstatement, reverse-chronological. */
+.historySection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-3);
+}
+
+.historyTitle {
+  margin: 0;
+  font-size: var(--gear-font-title-size);
+  font-weight: var(--gear-font-title-weight);
+  color: var(--gear-color-ink-primary);
+}
+
+.noPermission {
+  margin: 0;
+  padding: var(--gear-space-3) var(--gear-space-4);
+  border-radius: var(--gear-radius-md);
+  background-color: var(--gear-color-surface-raised);
+  border: 1px solid var(--gear-color-border-hairline);
+  color: var(--gear-color-ink-secondary);
+  font-size: var(--gear-font-label-size);
+  line-height: var(--gear-font-label-line-height);
+}
+
+.emptyNote {
+  margin: 0;
+  padding: var(--gear-space-3) var(--gear-space-4);
+  border-radius: var(--gear-radius-md);
+  background-color: var(--gear-color-surface-raised);
+  border: 1px solid var(--gear-color-border-hairline);
+  color: var(--gear-color-ink-secondary);
+  font-size: var(--gear-font-label-size);
+  line-height: var(--gear-font-label-line-height);
+}
+
+.inspectionList {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-3);
+}
+
+.historyCard {
+  padding: var(--gear-space-4);
+  background-color: var(--gear-color-surface-raised);
+  border: 1px solid var(--gear-color-border-hairline);
+  border-radius: var(--gear-radius-md);
+}
+
+.historyDetail {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-2);
+}
+
+/* The per-checklist-item results (FR-18): one row per snapshotted item with
+   its pass/fail outcome. */
+.itemsList {
+  margin: var(--gear-space-2) 0 0;
+  padding: var(--gear-space-3) 0 0;
+  list-style: none;
+  border-top: 1px solid var(--gear-color-border-hairline);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-2);
+}
+
+.itemRow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: var(--gear-space-3);
+}
+
+.itemLabel {
+  font-size: var(--gear-font-body-size);
+  color: var(--gear-color-ink-primary);
+}
+
+.itemResult {
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  white-space: nowrap;
+}
+
+.itemPass {
+  color: var(--gear-color-status-green);
+}
+
+.itemFail {
+  color: var(--gear-color-status-red);
+}

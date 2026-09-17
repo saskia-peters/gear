@@ -144,7 +144,7 @@ func main() {
 	// tables (AD-7/AD-10/AD-11).
 	toolStore := toolpostgres.New(pool)
 	toolRepo := toolpostgres.NewRepository(toolStore)
-	toolService := toolscore.NewService(toolRepo, adminSettingsService, userService, userRepo, userRepo, log)
+	toolService := toolscore.NewService(toolRepo, adminSettingsService, userService, userRepo, userRepo, userRepo, log)
 	toolHandler := toolhttp.NewHandler(toolService, sessionManager, userRepo, log)
 
 	// The tool-type surface mounts under /api/v1/admin/tool-types with its OWN
@@ -191,12 +191,22 @@ func main() {
 	// caller can still start/submit but 403s on the reinstatement.
 	reinstateSurface := auth.RequirePermission(sessionManager, userRepo, toolscore.ToolReinstatePermission)(toolHandler.ReinstateRoutes())
 
+	// Story 6.3 — the per-tool history surface under /api/v1/tools with its OWN
+	// gate — one permission per surface (AD-6, FR-18): only `inspection.history.view`
+	// holders (Schirrmeister/Fuehrung/Admin, the base roles seed it) reach the
+	// inspection + reinstatement history. The core re-checks the exact code
+	// defense-in-depth (AD-6). It deliberately does NOT widen the
+	// dashboard.view / inspection.submit gates — a history-less caller can still
+	// read the Werkzeugliste and start/submit but 403s on the history.
+	historySurface := auth.RequirePermission(sessionManager, userRepo, toolscore.InspectionHistoryViewPermission)(toolHandler.HistoryRoutes())
+
 	// The two /api/v1/tools surfaces are combined into ONE router: the dashboard
 	// list (GET /, dashboard.view), the inspection start + submit (POST
-	// /{id}/inspection/start and POST /{id}/inspection, inspection.submit) and
-	// the reinstatement (POST /{id}/reinstatement, tool.reinstate). Each surface
-	// is mounted at the full path prefix (chi Mount strips it and preserves the
-	// {id} param) — InspectionRoutes/ReinstateRoutes own the route patterns,
+	// /{id}/inspection/start and POST /{id}/inspection, inspection.submit), the
+	// reinstatement (POST /{id}/reinstatement, tool.reinstate) and the history
+	// (GET /{id}/history, inspection.history.view). Each surface is mounted at
+	// the full path prefix (chi Mount strips it and preserves the {id} param) —
+	// InspectionRoutes/ReinstateRoutes/HistoryRoutes own the route patterns,
 	// never duplicated here. Each surface keeps ITS OWN gate — no shared
 	// middleware.
 	toolsSurface := chi.NewRouter()
@@ -205,6 +215,7 @@ func main() {
 	toolsSurface.Handle("/", dashboardToolsSurface)
 	toolsSurface.Mount("/{id}/inspection", inspectionSurface)
 	toolsSurface.Mount("/{id}/reinstatement", reinstateSurface)
+	toolsSurface.Mount("/{id}/history", historySurface)
 
 	// Demo route for the gateway composition tests: any active user holding
 	// `dashboard.view` (all base roles) can reach /api/v1/protected/me.

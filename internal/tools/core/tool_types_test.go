@@ -160,6 +160,12 @@ func (f *fakeToolTypeStore) GetToolInspectionStatus(_ context.Context, _ string)
 func (f *fakeToolTypeStore) InsertReinstatement(_ context.Context, _, _, _ string) error {
 	return ErrToolNotFound
 }
+func (f *fakeToolTypeStore) ListInspectionsByTool(_ context.Context, _ string) ([]*Inspection, error) {
+	return []*Inspection{}, nil
+}
+func (f *fakeToolTypeStore) ListReinstatementsByTool(_ context.Context, _ string) ([]*Reinstatement, error) {
+	return []*Reinstatement{}, nil
+}
 
 // fakeSchedulesPort is an adminports.SchedulesPort over a fixed ACTIVE catalog.
 // err lets tests simulate a resolution failure (the submit interval path).
@@ -220,6 +226,7 @@ func newToolTypeService(perms ...string) (*Service, *fakeToolTypeStore, *fakeAud
 		&fakeSchedulesPort{schedules: []*admcore.Schedule{{ID: "id-s1", Name: "1 Jahr"}}},
 		&fakeQualificationPort{qualificationIDs: []string{"id-q1"}},
 		&fakePerms{perms: perms},
+		nil,
 		audit,
 		nil,
 	)
@@ -636,6 +643,7 @@ func TestToolTypesNilPortsFailLoudly(t *testing.T) {
 		nil,
 		nil,
 		&fakePerms{perms: []string{ToolTypesManagePermission}},
+		nil,
 		&fakeAudit{},
 		nil,
 	)

@@ -27,6 +27,13 @@ export const INSPECTION_SUBMIT_PERMISSION = 'inspection.submit'
 // "Wiederherstellen" button on an OOS row, mirroring the server const
 // ToolReinstatePermission.
 export const REINSTATE_PERMISSION = 'tool.reinstate'
+// HISTORY_PERMISSION (Story 6.3, FR-18/AD-6) is the per-tool history gate code:
+// only Schirrmeister/Fuehrung/Admin holders (the base roles seed it) see the
+// inspection + reinstatement history on the tool details page, mirroring the
+// server const InspectionHistoryViewPermission. The SPA skips the history fetch
+// for non-holders as a courtesy; the SERVER is the gate (a non-holder answers
+// the uniform 403 with no data).
+export const HISTORY_PERMISSION = 'inspection.history.view'
 
 export type InspectionMode = 'pass_fail' | 'checklist'
 
@@ -442,6 +449,93 @@ export async function reinstateTool(toolId: string, reason: string): Promise<Rei
     headers: authTokenHeaders(),
     body: JSON.stringify({ reason }),
   })) as ReinstateResult
+}
+
+// ============================================================================
+// Tool history (Story 6.3, FR-18/AD-6/AD-8): the per-tool audit trail of
+// inspections + reinstatements, newest first. The endpoint GET
+// /api/v1/tools/{id}/history is gated by `inspection.history.view` on the
+// server — the SPA pre-checks the permission and skips the fetch for
+// non-holders (showing the German no-permission note) as a courtesy only; the
+// SERVER is the gate (a non-holder answers the uniform 403 with no data).
+// Inspector/actor display names are server-resolved (a deleted account renders
+// "Deleted User", Story 3.4 forward-compat) — the client never resolves users.
+// ============================================================================
+
+// ToolHistoryItem is one snapshotted per-checklist-item result of a history
+// inspection (FR-18): the label + position were copied from the type's
+// checklist at submit time.
+export interface ToolHistoryItem {
+  id: string
+  item_id: string
+  label: string
+  position: number
+  result: InspectionResult
+}
+
+// ToolInspectionHistory is one inspection row of the history payload: the
+// inspector display name (server-resolved) + the record's fields + the ordered
+// snapshot items (empty for pass_fail).
+export interface ToolInspectionHistory {
+  id: string
+  inspector_id: string
+  inspector_name: string
+  mode: InspectionMode
+  overall_result: InspectionResult
+  notes: string
+  submitted_at: string
+  items: ToolHistoryItem[]
+}
+
+// ToolReinstatementHistory is one reinstatement row of the history payload:
+// the actor display name (server-resolved) + the record's fields.
+export interface ToolReinstatementHistory {
+  id: string
+  actor_id: string
+  actor_name: string
+  reason: string
+  created_at: string
+}
+
+// ToolHistory is the GET /api/v1/tools/{id}/history payload (Story 6.3): the
+// two newest-first lists — inspections (each with per-checklist-item results)
+// and reinstatements. Empty lists are `[]`, never null.
+export interface ToolHistory {
+  inspections: ToolInspectionHistory[]
+  reinstatements: ToolReinstatementHistory[]
+}
+
+// isHistoryRecord is the narrow runtime guard for the malformed-body defense
+// (Story 6.3): the server contract promises objects, but a null/non-object
+// element must never reach the page render. The response is treated as
+// untyped at this boundary; only the shape the page consumes is normalized.
+function isHistoryRecord(value: unknown): value is Record<string, unknown> {
+  return Boolean(value) && typeof value === 'object'
+}
+
+// listToolHistory GETs the per-tool inspection + reinstatement history (Story
+// 6.3, FR-18). 200 → the newest-first lists; 403 → ApiError (the server is the
+// gate, no data exposed); 401 → stale/revoked session (the caller logs in
+// again); other → ApiError with the server's German reason. DEFENSIVE: a
+// malformed body never crashes the page render — the two lists are coerced to
+// `[]` when non-array, null/non-object elements are dropped, and each
+// inspection's `items` is coerced to `[]` when non-array (so `insp.items.length`
+// / `.map` on the page is always safe).
+export async function listToolHistory(toolId: string): Promise<ToolHistory> {
+  const data = (await request(`${DASHBOARD_TOOLS_URL}/${encodeURIComponent(toolId)}/history`, {
+    headers: authTokenHeaders(),
+  })) as unknown
+  const raw = (data ?? {}) as { inspections?: unknown; reinstatements?: unknown }
+  const inspections = (Array.isArray(raw.inspections)
+    ? raw.inspections.filter(isHistoryRecord).map((item) => ({
+        ...item,
+        items: Array.isArray(item.items) ? (item.items as ToolHistoryItem[]) : [],
+      }))
+    : []) as unknown as ToolInspectionHistory[]
+  const reinstatements = (Array.isArray(raw.reinstatements)
+    ? raw.reinstatements.filter(isHistoryRecord)
+    : []) as unknown as ToolReinstatementHistory[]
+  return { inspections, reinstatements }
 }
 
 export { ApiError, DASHBOARD_TOOLS_URL }

@@ -59,6 +59,7 @@ func TestStartInspectionEligibleNoQualType(t *testing.T) {
 		nil,
 		nil, // nil qualification port: must NOT be reached
 		&fakePerms{perms: []string{InspectionSubmitPermission}},
+		nil,
 		&fakeAudit{},
 		nil,
 	)
@@ -85,6 +86,7 @@ func TestStartInspectionQualified(t *testing.T) {
 		&fakeSchedulesPort{},
 		holdsPort(actorID, "id-q1"),
 		&fakePerms{perms: []string{InspectionSubmitPermission}},
+		nil,
 		&fakeAudit{},
 		nil,
 	)
@@ -107,6 +109,7 @@ func TestStartInspectionMissingQual(t *testing.T) {
 		&fakeSchedulesPort{},
 		holdsPort(actorID), // holds nothing
 		&fakePerms{perms: []string{InspectionSubmitPermission}},
+		nil,
 		&fakeAudit{},
 		nil,
 	)
@@ -130,6 +133,7 @@ func TestStartInspectionExpiredQual(t *testing.T) {
 		&fakeSchedulesPort{},
 		holdsPort(actorID), // the user-core port already resolved the expired assignment
 		&fakePerms{perms: []string{InspectionSubmitPermission}},
+		nil,
 		&fakeAudit{},
 		nil,
 	)
@@ -147,6 +151,7 @@ func TestStartInspectionToolNotFound(t *testing.T) {
 		&fakeSchedulesPort{},
 		holdsPort(actorID, "id-q1"),
 		&fakePerms{perms: []string{InspectionSubmitPermission}},
+		nil,
 		&fakeAudit{},
 		nil,
 	)
@@ -171,6 +176,7 @@ func TestStartInspectionForbidden(t *testing.T) {
 		&fakeSchedulesPort{},
 		holdsPort(actorID, "id-q1"),
 		&fakePerms{perms: []string{"dashboard.view"}},
+		nil,
 		&fakeAudit{},
 		nil,
 	)
@@ -193,6 +199,7 @@ func TestStartInspectionNilQualPortFailsLoudly(t *testing.T) {
 		&fakeSchedulesPort{},
 		nil,
 		&fakePerms{perms: []string{InspectionSubmitPermission}},
+		nil,
 		&fakeAudit{},
 		nil,
 	)
@@ -217,6 +224,7 @@ func TestStartInspectionPortErrorPropagates(t *testing.T) {
 		&fakeSchedulesPort{},
 		&fakeQualificationPort{qualificationIDs: []string{"id-q1"}, holdErr: errors.New("boom")},
 		&fakePerms{perms: []string{InspectionSubmitPermission}},
+		nil,
 		&fakeAudit{},
 		nil,
 	)
@@ -239,6 +247,7 @@ func TestStartInspectionAuditsEligibleStart(t *testing.T) {
 		&fakeSchedulesPort{},
 		nil,
 		&fakePerms{perms: []string{InspectionSubmitPermission}},
+		nil,
 		audit,
 		nil,
 	)
@@ -267,6 +276,7 @@ func submitInspectionService() (*Service, *fakeToolStore, *fakeAudit) {
 		}}},
 		holdsPort(actorID, "id-q1"),
 		&fakePerms{perms: []string{InspectionSubmitPermission}},
+		nil,
 		audit,
 		nil,
 	)
@@ -741,6 +751,7 @@ func reinstateService() (*Service, *fakeToolStore, *fakeAudit) {
 		}}},
 		holdsPort(actorID, "id-q1"),
 		&fakePerms{perms: []string{ToolReinstatePermission}},
+		nil,
 		audit,
 		nil,
 	)
@@ -949,5 +960,271 @@ func TestReinstateToolToolNotFound(t *testing.T) {
 	}
 	if len(store.reinstatements) != 0 {
 		t.Error("an archived/unknown tool must not persist a reinstatement")
+	}
+}
+
+// ============================================================================
+// Story 6.3 — per-tool inspection + reinstatement history (FR-18/AD-6/AD-8)
+// ============================================================================
+
+// fakeDisplayNames is a DisplayNameResolver returning a fixed id → display_name
+// map (absent ids are MISSING keys — the core maps them to "Deleted User").
+// err lets tests simulate a resolution failure (a 500-style internal error);
+// calls counts the invocations so tests can pin the ONE-bulk-call invariant.
+type fakeDisplayNames struct {
+	names map[string]string
+	err   error
+	calls int
+}
+
+func (f *fakeDisplayNames) ResolveDisplayNames(_ context.Context, userIDs []string) (map[string]string, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	out := map[string]string{}
+	for _, id := range userIDs {
+		if name, ok := f.names[id]; ok {
+			out[id] = name
+		}
+	}
+	return out, nil
+}
+
+// historyService wires the history I/O matrix around a Service: the checklist
+// fixture (id-tool / id-t1), a display-name resolver seeded with the known
+// inspector (actorID → "Anna Muster") and an inspection.history.view holder.
+func historyService() (*Service, *fakeToolStore, *fakeDisplayNames) {
+	store := inspectionStore()
+	names := &fakeDisplayNames{names: map[string]string{actorID: "Anna Muster"}}
+	svc := NewService(
+		store,
+		nil,
+		nil,
+		&fakePerms{perms: []string{InspectionHistoryViewPermission}},
+		names,
+		&fakeAudit{},
+		nil,
+	)
+	return svc, store, names
+}
+
+// historyInspections seeds the tool's inspection history in REVERSE-CHRONO order
+// (newest first — the order the store returns, pinned by the postgres suite):
+// a NEWER checklist inspection (with its per-item snapshot) and an OLDER
+// pass_fail inspection, both by the known inspector.
+func historyInspections() []*Inspection {
+	newer := time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC)
+	older := time.Date(2026, 9, 1, 9, 0, 0, 0, time.UTC)
+	return []*Inspection{
+		{
+			ID: "insp-new", ToolID: "id-tool", InspectorID: actorID,
+			Mode: InspectionModeChecklist, OverallResult: InspectionResultFail, Notes: "Bohrfutter locker",
+			SubmittedAt: newer,
+			Items: []InspectionItem{
+				{ID: "item-row-1", InspectionID: "insp-new", ItemID: "item-1", Label: "Kabel", Position: 0, Result: InspectionResultPass},
+				{ID: "item-row-2", InspectionID: "insp-new", ItemID: "item-2", Label: "Bohrfutter", Position: 1, Result: InspectionResultFail},
+			},
+		},
+		{
+			ID: "insp-old", ToolID: "id-tool", InspectorID: actorID,
+			Mode: InspectionModePassFail, OverallResult: InspectionResultPass, Notes: "Alles ok",
+			SubmittedAt: older,
+			Items:       []InspectionItem{},
+		},
+	}
+}
+
+func TestListInspectionHistoryOK(t *testing.T) {
+	// HIST_OK: an inspection.history.view holder reads the tool's full history —
+	// inspections newest-first (each naming the inspector + timestamp + outcome +
+	// notes + mode + the snapshotted per-checklist-item results) and
+	// reinstatements newest-first (actor + reason). The display names resolve
+	// through the seam in ONE call.
+	svc, store, names := historyService()
+	store.inspections = historyInspections()
+	store.reinstatements = []reinstatementRecord{
+		{ToolID: "id-tool", ActorID: actorID, Reason: "Ersatzteil eingetroffen", CreatedAt: time.Date(2026, 9, 16, 8, 0, 0, 0, time.UTC)},
+	}
+
+	got, err := svc.ListInspectionHistory(context.Background(), actorID, "id-tool")
+	if err != nil {
+		t.Fatalf("ListInspectionHistory err = %v", err)
+	}
+	if len(got.Inspections) != 2 || len(got.Reinstatements) != 1 {
+		t.Fatalf("history = %d inspections / %d reinstatements, want 2 / 1", len(got.Inspections), len(got.Reinstatements))
+	}
+	// Newest first (the store order is preserved).
+	if got.Inspections[0].ID != "insp-new" || got.Inspections[1].ID != "insp-old" {
+		t.Errorf("inspections order = [%s, %s], want [insp-new, insp-old]", got.Inspections[0].ID, got.Inspections[1].ID)
+	}
+	newest := got.Inspections[0]
+	if newest.InspectorName != "Anna Muster" || newest.InspectorID != actorID {
+		t.Errorf("newest inspector = %+v, want Anna Muster", newest)
+	}
+	if newest.Mode != InspectionModeChecklist || newest.OverallResult != InspectionResultFail || newest.Notes != "Bohrfutter locker" {
+		t.Errorf("newest record = %+v, want the checklist fail + notes", newest)
+	}
+	if !newest.SubmittedAt.Equal(time.Date(2026, 9, 15, 10, 0, 0, 0, time.UTC)) {
+		t.Errorf("newest submitted_at = %v, want the newer timestamp", newest.SubmittedAt)
+	}
+	// The per-checklist-item snapshot round-trips (label + position + result).
+	if len(newest.Items) != 2 {
+		t.Fatalf("newest items = %+v, want the two snapshot items", newest.Items)
+	}
+	if newest.Items[0].Label != "Kabel" || newest.Items[0].Result != InspectionResultPass {
+		t.Errorf("items[0] = %+v, want the Kabel pass snapshot", newest.Items[0])
+	}
+	if newest.Items[1].Label != "Bohrfutter" || newest.Items[1].Result != InspectionResultFail {
+		t.Errorf("items[1] = %+v, want the Bohrfutter fail snapshot", newest.Items[1])
+	}
+	// The older pass_fail inspection carries an EMPTY item list.
+	if len(got.Inspections[1].Items) != 0 {
+		t.Errorf("older items = %+v, want none for a pass_fail inspection", got.Inspections[1].Items)
+	}
+	if got.Inspections[1].InspectorName != "Anna Muster" {
+		t.Errorf("older inspector = %q, want Anna Muster", got.Inspections[1].InspectorName)
+	}
+	// The reinstatement names the actor + reason.
+	rein := got.Reinstatements[0]
+	if rein.ActorName != "Anna Muster" || rein.Reason != "Ersatzteil eingetroffen" || rein.ActorID != actorID {
+		t.Errorf("reinstatement = %+v, want Anna Muster + the reason", rein)
+	}
+	if !rein.CreatedAt.Equal(time.Date(2026, 9, 16, 8, 0, 0, 0, time.UTC)) {
+		t.Errorf("reinstatement created_at = %v, want the seeded timestamp", rein.CreatedAt)
+	}
+	// ONE bulk name-resolution call (no N+1 user reads).
+	if names.calls != 1 {
+		t.Errorf("resolver calls = %d, want exactly 1 (one bulk resolution)", names.calls)
+	}
+}
+
+func TestListInspectionHistoryOrdering(t *testing.T) {
+	// HIST_ORDERING: the core preserves the store's reverse-chronological order
+	// (the SQL ORDER BY submitted_at DESC / created_at DESC is pinned by the
+	// postgres suite; the core never reorders — it names and passes through).
+	svc, store, _ := historyService()
+	store.inspections = historyInspections()
+	store.reinstatements = []reinstatementRecord{
+		{ToolID: "id-tool", ActorID: actorID, Reason: "zuerst", CreatedAt: time.Date(2026, 9, 14, 8, 0, 0, 0, time.UTC)},
+		{ToolID: "id-tool", ActorID: actorID, Reason: "spaeter", CreatedAt: time.Date(2026, 9, 16, 8, 0, 0, 0, time.UTC)},
+	}
+
+	got, err := svc.ListInspectionHistory(context.Background(), actorID, "id-tool")
+	if err != nil {
+		t.Fatalf("ListInspectionHistory err = %v", err)
+	}
+	if got.Reinstatements[0].Reason != "spaeter" || got.Reinstatements[1].Reason != "zuerst" {
+		t.Errorf("reinstatements order = [%s, %s], want [spaeter, zuerst] (newest first)", got.Reinstatements[0].Reason, got.Reinstatements[1].Reason)
+	}
+}
+
+func TestListInspectionHistoryEmpty(t *testing.T) {
+	// HIST_EMPTY: a tool with no records answers EMPTY arrays (nil-safe) and the
+	// display-name resolver is NEVER called — there are no user ids to resolve.
+	svc, _, names := historyService()
+	names.calls = 0
+	got, err := svc.ListInspectionHistory(context.Background(), actorID, "id-tool")
+	if err != nil {
+		t.Fatalf("ListInspectionHistory(empty) err = %v", err)
+	}
+	if got.Inspections == nil || len(got.Inspections) != 0 {
+		t.Errorf("inspections = %+v, want an empty (non-nil) list", got.Inspections)
+	}
+	if got.Reinstatements == nil || len(got.Reinstatements) != 0 {
+		t.Errorf("reinstatements = %+v, want an empty (non-nil) list", got.Reinstatements)
+	}
+	if names.calls != 0 {
+		t.Errorf("resolver calls = %d, want 0 (empty history needs no names)", names.calls)
+	}
+}
+
+func TestListInspectionHistoryGated(t *testing.T) {
+	// HIST_GATED: a caller without inspection.history.view → ErrForbidden (403,
+	// no data exposed, AD-6). An empty actor id never passes.
+	svc, store, _ := historyService()
+	svc.perms = &fakePerms{perms: []string{InspectionSubmitPermission}}
+	store.inspections = historyInspections()
+	if _, err := svc.ListInspectionHistory(context.Background(), actorID, "id-tool"); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("err = %v, want ErrForbidden", err)
+	}
+	if _, err := svc.ListInspectionHistory(context.Background(), "", "id-tool"); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("empty actor err = %v, want ErrForbidden", err)
+	}
+}
+
+func TestListInspectionHistoryToolNotFound(t *testing.T) {
+	// HIST_UNKNOWN / HIST_ARCHIVED: an unknown or archived tool id → the 404
+	// sentinel (German), even for a permission holder.
+	svc, _, _ := historyService()
+	if _, err := svc.ListInspectionHistory(context.Background(), actorID, "id-missing"); !errors.Is(err, ErrToolNotFound) {
+		t.Fatalf("unknown id err = %v, want ErrToolNotFound", err)
+	}
+	archived := *inspectionStore()
+	now := time.Now()
+	archived.tools[0].ArchivedAt = &now
+	svc.store = &archived
+	if _, err := svc.ListInspectionHistory(context.Background(), actorID, "id-tool"); !errors.Is(err, ErrToolNotFound) {
+		t.Fatalf("archived id err = %v, want ErrToolNotFound", err)
+	}
+}
+
+func TestListInspectionHistoryDeletedUser(t *testing.T) {
+	// HIST_DELETED_USER: an inspector/actor id with NO user row (a deleted
+	// account, Story 3.4 not yet built) renders the literal "Deleted User" —
+	// never a 404, never an empty string. This applies to BOTH the inspection
+	// inspector AND the reinstatement actor.
+	svc, store, _ := historyService()
+	store.inspections = historyInspections()
+	store.inspections[0].InspectorID = "u-deleted"
+	store.reinstatements = []reinstatementRecord{
+		{ToolID: "id-tool", ActorID: "u-deleted", Reason: "Ersatzteil", CreatedAt: time.Now()},
+	}
+
+	got, err := svc.ListInspectionHistory(context.Background(), actorID, "id-tool")
+	if err != nil {
+		t.Fatalf("ListInspectionHistory(deleted user) err = %v", err)
+	}
+	if got.Inspections[0].InspectorName != DeletedUserDisplayName {
+		t.Errorf("deleted inspector = %q, want %q", got.Inspections[0].InspectorName, DeletedUserDisplayName)
+	}
+	if got.Reinstatements[0].ActorName != DeletedUserDisplayName {
+		t.Errorf("deleted actor = %q, want %q", got.Reinstatements[0].ActorName, DeletedUserDisplayName)
+	}
+	// The KNOWN inspector's name still resolves (never a blanket "Deleted User").
+	if got.Inspections[1].InspectorName != "Anna Muster" {
+		t.Errorf("known inspector = %q, want Anna Muster", got.Inspections[1].InspectorName)
+	}
+	if DeletedUserDisplayName != "Deleted User" {
+		t.Errorf("DeletedUserDisplayName = %q, want the spec literal", DeletedUserDisplayName)
+	}
+}
+
+func TestListInspectionHistoryNilResolverFailsLoudly(t *testing.T) {
+	// A NIL DisplayNameResolver is a composition-root wiring defect: with
+	// HISTORY to name the history path must FAIL LOUDLY (a 500-style internal
+	// error, never a silent all-"Deleted User" list). (An empty history skips
+	// the seam and succeeds — pinned by TestListInspectionHistoryEmpty.)
+	svc, store, _ := historyService()
+	store.inspections = historyInspections()
+	svc.displayNames = nil
+	if _, err := svc.ListInspectionHistory(context.Background(), actorID, "id-tool"); err == nil {
+		t.Fatal("ListInspectionHistory(nil resolver, history present) err = nil, want internal error")
+	} else {
+		if errors.Is(err, ErrForbidden) {
+			t.Fatalf("err = %v, want a 500-style internal error, not ErrForbidden", err)
+		}
+	}
+}
+
+func TestListInspectionHistoryResolverErrorPropagates(t *testing.T) {
+	// A resolver failure surfaces as an internal error (500-style), never a
+	// partial/silent history — the names are unknown, so the history must not
+	// proceed with guessed names.
+	svc, store, names := historyService()
+	store.inspections = historyInspections()
+	names.err = errors.New("boom")
+	if _, err := svc.ListInspectionHistory(context.Background(), actorID, "id-tool"); err == nil {
+		t.Fatal("ListInspectionHistory(resolver error) err = nil, want internal error")
 	}
 }

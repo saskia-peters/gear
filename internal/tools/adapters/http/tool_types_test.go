@@ -111,6 +111,13 @@ func (f *fakeService) ReinstateTool(_ context.Context, _, _, _ string) (*toolsco
 	return nil, toolscore.ErrToolNotFound
 }
 
+func (f *fakeService) ListInspectionHistory(_ context.Context, _, _ string) (*toolscore.ToolHistory, error) {
+	return &toolscore.ToolHistory{
+		Inspections:    []*toolscore.ToolHistoryInspection{},
+		Reinstatements: []*toolscore.ToolHistoryReinstatement{},
+	}, nil
+}
+
 // toolTypeGateway wraps the REAL ToolTypeRoutes() behind the same
 // RequireAnyPermission gate the composition root uses (tool_types.manage), with
 // a fake session validator + permission resolver.

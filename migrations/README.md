@@ -31,6 +31,8 @@ The table below lists the current story set:
 | `000024_tools.up/down.sql` | 4.3 | Tool-owned `tools` (intra-module FK to `tool_types`, optional per-tool `schedule_id` override FK to Admin `schedules`, UNIQUE name, `attributes` JSONB, soft archive) + `tools_tool_type_id_idx`. |
 | `000025_tool_inventory_number.up/down.sql` | 4-3b | `tools.inventory_number` (text, NOT NULL, CHECK ≤ 16) + `tools_inventory_number_seq` + backfill of existing rows + UNIQUE across ALL rows (Story 4.5 import backstop) + `tool.edit` permission seeded/granted to admin/schirrmeister/fuehrende. |
 | `000026_app_settings.up/down.sql` | 5-2b | Admin-owned typed `app_settings` key/value store (one row per atomic setting, one of `duration_value`/`int_value`/`text_value` set per row, durations in seconds) seeded with the 14 proposal defaults (21 atomic rows) + `admin.settings.system` permission seeded/granted to admin. |
+| `000027_inspections.up/down.sql` | 5.3 | Tool-owned `inspections` + `inspection_items` (snapshotted checklist results) + `reinstatements` ledger (FR-12/FR-13/FR-15) — status stays DERIVED on read (AD-4), never stored — + the per-tool history/status indexes (FR-18). |
+| `000028_schirrmeister_inspection_history.up/down.sql` | 6.3 follow-up | Grants the EXISTING `inspection.history.view` permission (000010) to the `schirrmeister` base role (the frozen spec names Schirrmeister as a history viewer). Idempotent INSERT; the down only removes the schirrmeister grant row — the code itself is never deleted. |
 
 Naming: `NNNNNN_snake_case.up.sql` / `NNNNNN_snake_case.down.sql`.
 

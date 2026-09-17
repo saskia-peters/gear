@@ -780,6 +780,12 @@ func (s *compToolTypeService) ReinstateTool(_ context.Context, _, toolID, _ stri
 	return &toolscore.ReinstateResult{Status: toolscore.ToolStatus{Status: toolscore.ToolStatusCodeGreen}}, nil
 }
 
+func (s *compToolTypeService) ListInspectionHistory(_ context.Context, _, _ string) (*toolscore.ToolHistory, error) {
+	// An empty history fixture: the composed history mount-gate test only needs
+	// the service to be reached (the DTO shape is pinned in the http suite).
+	return &toolscore.ToolHistory{Inspections: []*toolscore.ToolHistoryInspection{}, Reinstatements: []*toolscore.ToolHistoryReinstatement{}}, nil
+}
+
 var _ toolports.Service = (*compToolTypeService)(nil)
 
 // newCompositionToolTypeRouter mirrors the main() mounts exactly for the Story
@@ -1184,12 +1190,14 @@ func newCompositionToolsRouter(perms []string, session *usercore.Session) http.H
 	dashboardToolsSurface := auth.RequirePermission(validator, resolver, toolscore.DashboardViewPermission)(toolHandler.DashboardToolsRoutes())
 	inspectionSurface := auth.RequirePermission(validator, resolver, toolscore.InspectionSubmitPermission)(toolHandler.InspectionRoutes())
 	reinstateSurface := auth.RequirePermission(validator, resolver, toolscore.ToolReinstatePermission)(toolHandler.ReinstateRoutes())
+	historySurface := auth.RequirePermission(validator, resolver, toolscore.InspectionHistoryViewPermission)(toolHandler.HistoryRoutes())
 	toolsSurface := chi.NewRouter()
 	toolsSurface.NotFound(httpapi.NotFoundHandler())
 	toolsSurface.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
 	toolsSurface.Handle("/", dashboardToolsSurface)
 	toolsSurface.Mount("/{id}/inspection", inspectionSurface)
 	toolsSurface.Mount("/{id}/reinstatement", reinstateSurface)
+	toolsSurface.Mount("/{id}/history", historySurface)
 
 	outer := chi.NewRouter()
 	outer.Get("/", func(w http.ResponseWriter, _ *http.Request) {
@@ -1415,6 +1423,62 @@ func TestCompositionReinstateMountGating(t *testing.T) {
 	}
 }
 
+// TestCompositionHistoryMountGating verifies the Story 6.3 composition-root
+// wiring: the per-tool history is a SIBLING sub-path of the SAME /api/v1/tools
+// router mounted at /{id}/history with ITS OWN `inspection.history.view` gate
+// (one permission per surface, AD-6) — it is NOT inherited from the dashboard
+// or inspection surfaces. A dashboard.view-but-not-inspection.history.view
+// caller can READ the Werkzeugliste but the history answers 403 (no data); an
+// inspection.history.view holder reaches it and the {id} path param round-trips
+// through the composed router.
+func TestCompositionHistoryMountGating(t *testing.T) {
+	// 401: no token.
+	if rec := doComposedJSONRequest(newCompositionToolsRouter([]string{}, nil), "", http.MethodGet, "/api/v1/tools/id-a/history", ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no token: status = %d, want 401 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// 200: an inspection.history.view holder reaches the history — the
+	// in-memory service answers the empty-history DTO (a real round-trip
+	// through the mounted surface).
+	historyRouter := newCompositionToolsRouter([]string{toolscore.InspectionHistoryViewPermission}, activeUser("u-fuehrung", "fuehrung@gear.local"))
+	rec := doComposedJSONRequest(historyRouter, "tok", http.MethodGet, "/api/v1/tools/id-a/history", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("inspection.history.view holder: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var body map[string]any
+	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
+		t.Fatalf("decoding history response err = %v", err)
+	}
+	insp, ok := body["inspections"].([]any)
+	if !ok || len(insp) != 0 {
+		t.Errorf("history inspections = %+v, want an empty array", body["inspections"])
+	}
+	if rein, ok := body["reinstatements"].([]any); !ok || len(rein) != 0 {
+		t.Errorf("history reinstatements = %+v, want an empty array", body["reinstatements"])
+	}
+
+	// 403 with NO data: a dashboard.view-but-not-inspection.history.view caller
+	// is denied the history (the sibling surface keeps its OWN gate), while the
+	// dashboard LIST still 200s for the same caller.
+	dashboardOnly := newCompositionToolsRouter([]string{toolscore.DashboardViewPermission}, activeUser("u-vol", "vol@gear.local"))
+	rec = doComposedJSONRequest(dashboardOnly, "tok", http.MethodGet, "/api/v1/tools/id-a/history", "")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("dashboard.view-only history: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(strings.ToLower(rec.Body.String()), "werkzeug") || strings.Contains(rec.Body.String(), "id-a") {
+		t.Errorf("403 body leaks tool data: %s", rec.Body.String())
+	}
+	if rec := doComposedJSONRequest(dashboardOnly, "tok", http.MethodGet, "/api/v1/tools", ""); rec.Code != http.StatusOK {
+		t.Errorf("dashboard.view-only list: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// REVERSE: the history holder (no dashboard.view) reaches the history but
+	// is denied the dashboard list — each surface has its OWN gate.
+	if rec := doComposedJSONRequest(historyRouter, "tok", http.MethodGet, "/api/v1/tools", ""); rec.Code != http.StatusForbidden {
+		t.Errorf("history-only list: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+}
+
 // ============================================================================
 // Story 4-3b real-wiring composed E2E (finding 9): the auto-assigned inventory
 // number must round-trip through the REAL composition path — gate → HTTP
@@ -1449,7 +1513,7 @@ func newComposedRealToolRouter(t *testing.T, log *slog.Logger) (http.Handler, *u
 	userRepo := userpostgres.NewRepository(userpostgres.New(pool))
 	sm := usercore.NewSessionManager(userRepo, time.Hour)
 	toolRepo := toolpostgres.NewRepository(toolpostgres.New(pool))
-	toolService := toolscore.NewService(toolRepo, nil, nil, userRepo, userRepo, log)
+	toolService := toolscore.NewService(toolRepo, nil, nil, userRepo, userRepo, userRepo, log)
 	toolHandler := toolhttp.NewHandler(toolService, sm, userRepo, log)
 	toolsSurface := auth.RequireAnyPermission(sm, userRepo,
 		[]string{toolscore.ToolsManagePermission, toolscore.ToolEditPermission},

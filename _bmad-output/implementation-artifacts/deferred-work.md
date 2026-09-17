@@ -2,6 +2,14 @@
 
 Triage output of review loops — real, non-story-blocking findings that are not caused by (or are deliberately out of scope for) the current story. Each entry records why it is real and where it should be picked up. This file is append-only; do not modify or delete existing entries.
 
+- source_spec: `_bmad-output/implementation-artifacts/spec-6-3-inspection-history-per-tool.md`
+  summary: The details page renders inspection/reinstatement timestamps in the browser's local timezone (formatTimestamp → toLocaleString('de-DE')), so displayed times vary per user/locale and the SPA tests are timezone-dependent.
+  evidence: Review finding — the wire contract is RFC3339 UTC (per spec), but display silently switches to local time; the tests compute expected strings with the same local tz, so assertions break if CI runs in a different timezone. A display timezone policy is a product decision, not a bug.
+  recommended: Pin a display timezone (or make the tests timezone-independent) when the dashboard/history display polish story lands.
+- source_spec: `_bmad-output/implementation-artifacts/spec-6-3-inspection-history-per-tool.md`
+  summary: Dashboard row rework — one-line layout (status chip, name, type, Gerätenummer, buttons) and clickable-row navigation to the tool details page.
+  evidence: Split from the 6.3 spec under the SCOPE STANDARD [S] decision — the spec exceeded the 1600-token ceiling and the row rework is independently shippable; the details page stands alone (reachable by URL), so the row rework is a separate UI/navigation deliverable.
+  recommended: Follow-up story (dashboard polish / 6.1) that flattens `DashboardPage` row CSS+JSX into one line and wires row-click navigation (with button stopPropagation) once the `/tools/:toolId` details route exists.
 - source_spec: `_bmad-output/implementation-artifacts/spec-1-1-project-scaffold-database-foundation.md`
   summary: SPA (`web/`) cannot call the Go API in `just dev` — no Vite dev proxy and no CORS middleware, so browser fetches between :5173 and :8080 are cross-origin blocked.
   evidence: Story 1.1 only requires API+SPA+DB all run and `/healthz` proves DB liveness; no in-SPA consumer action exists yet (Spend: defer directly from the Story 1.1 review; the first real cross-origin call arrives with Story 1.2 dashboard mount / 1.3 registration).
