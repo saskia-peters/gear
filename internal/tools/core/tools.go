@@ -354,7 +354,7 @@ func (s *Service) dashboardStatus(ctx context.Context, tool *Tool, schedules []*
 		statusInput = &ToolInspectionStatus{}
 	}
 	return deriveToolStatus(statusInput.LatestFailAt, statusInput.LastSuccessAt, statusInput.LastReinstatedAt,
-		interval, now, OrangeWindowDays)
+		interval, now)
 }
 
 // CreateTool persists a new tool (CREATE_VALID / CREATE_OVERRIDE /

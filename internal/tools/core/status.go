@@ -32,11 +32,13 @@ type ToolStatus struct {
 	NextDue *time.Time
 }
 
-// OrangeWindowDays is the static orange window: a tool is `orange` when its
-// next due lies within this many days of `now`. The consumer adoption of the
-// `inspection_orange_window_days` app_setting is deferred (deferred-work.md);
-// the follow-up story threads the value into this constant.
-const OrangeWindowDays = 14
+// orangeWindowFraction is the derived orange window: a tool is `orange` when
+// its next due lies within one QUARTER of its OWN inspection cycle of `now`
+// (user decision, 2026-09-17 — the window is proportional to each tool's
+// schedule, not a fixed day count, so a fresh inspection on ANY cycle reads
+// green/Einsatzbereit). The previously-deferred `inspection_orange_window_days`
+// app_setting (deferred-work.md) is superseded by this per-tool relative rule.
+const orangeWindowFraction = 4
 
 // scheduleInterval converts a schedule's interval unit + magnitude to a
 // time.Duration (AD-16). Calendar math is a DOCUMENTED approximation — a year
@@ -74,10 +76,12 @@ func scheduleInterval(unit string, magnitude int) time.Duration {
 //   - Otherwise `base = max(last successful inspection, latest reinstatement)`
 //     (both nil → never-inspected → `red`, NextDue nil, AD-5).
 //   - `next_due = base + interval`; `red` when next_due < now, `orange` when
-//     next_due <= now + orangeWindowDays, else `green`.
+//     next_due <= now + interval/4 (one QUARTER of the tool's own cycle —
+//     proportional, so a fresh inspection reads green on every schedule),
+//     else `green`.
 //
 // The inputs are read-only pointers; a nil pointer means "no such record".
-func deriveToolStatus(latestFailAt, lastSuccessAt, lastReinstatedAt *time.Time, interval time.Duration, now time.Time, orangeWindowDays int) ToolStatus {
+func deriveToolStatus(latestFailAt, lastSuccessAt, lastReinstatedAt *time.Time, interval time.Duration, now time.Time) ToolStatus {
 	if latestFailAt != nil && !latestFailAt.IsZero() {
 		if lastReinstatedAt == nil || !latestFailAt.Before(*lastReinstatedAt) {
 			return ToolStatus{Status: ToolStatusCodeOOS}
@@ -100,7 +104,7 @@ func deriveToolStatus(latestFailAt, lastSuccessAt, lastReinstatedAt *time.Time, 
 	}
 
 	nextDue := base.Add(interval)
-	window := time.Duration(orangeWindowDays) * 24 * time.Hour
+	window := interval / time.Duration(orangeWindowFraction)
 	switch {
 	case nextDue.Before(now):
 		return ToolStatus{Status: ToolStatusCodeRed, NextDue: &nextDue}

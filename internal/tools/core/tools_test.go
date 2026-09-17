@@ -950,7 +950,7 @@ func TestListToolsForDashboardStatusMatrix(t *testing.T) {
 		dashboardToolFixture("id-red", "Überfällig"),
 	}
 	greenAnchor := now.Add(-10 * 24 * time.Hour)  // next_due 20d out → green
-	orangeAnchor := now.Add(-20 * 24 * time.Hour) // next_due 10d out → orange
+	orangeAnchor := now.Add(-26 * 24 * time.Hour) // next_due 4d out → orange (within interval/4)
 	redAnchor := now.Add(-40 * 24 * time.Hour)    // next_due 10d past → red
 	oosAnchor := now.Add(-1 * 24 * time.Hour)
 	store.statusByTool = map[string]*ToolInspectionStatus{
@@ -985,7 +985,7 @@ func TestListToolsForDashboardStatusMatrix(t *testing.T) {
 		t.Errorf("green next_due = %v, want %v (pass + 30-day default interval)", green.NextDue, want)
 	}
 	if s := byID["id-orange"].Status; s.Status != ToolStatusCodeOrange || s.NextDue == nil {
-		t.Errorf("≤14d = %+v, want orange + a next_due", s)
+		t.Errorf("within quarter window = %+v, want orange + a next_due", s)
 	}
 	if s := byID["id-red"].Status; s.Status != ToolStatusCodeRed || s.NextDue == nil {
 		t.Errorf("past due = %+v, want red + a next_due", s)

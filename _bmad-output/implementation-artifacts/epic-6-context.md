@@ -15,7 +15,7 @@ Users see the current operational truth, and leadership reviews and exports it. 
 ## Requirements & Constraints
 
 - Tool status is always computed on read from inspection records and due-date math via a single shared clock/status function — never stored — and the same derived result feeds the dashboard, the PDF export, and tool detail. A never-inspected tool is Red (AD-4/AD-5).
-- Color thresholds: Red = past due or Out of Service (Out of Service tools also render Red); Orange = due within the next 14 calendar days; Green = current (due more than 14 days out).
+- Color thresholds: Red = past due or Out of Service (Out of Service tools also render Red); Orange = due within ONE QUARTER of the tool's OWN inspection cycle; Green = current (due beyond the quarter-cycle window). The orange window is proportional to each tool's schedule (user decision 2026-09-17 — a fresh inspection reads green/Einsatzbereit on every cycle, superseding the earlier fixed 14-day window).
 - The dashboard is visible to all authenticated users (gated by `dashboard.view`, granted to every base role). It shows a 2×2 summary count grid (totals per status) and filter chips that filter the visible list; counts are tappable and activate the matching filter, and multiple filters can be active at once.
 - Dashboard state (statuses, counts, colors) must reflect the current derived state whenever data changes (e.g. after an inspection or reinstatement).
 - PDF export is available to Fuehrung/Admin only (gated by `report.export`) and must reflect exactly the currently visible/filtered tool list with its derived statuses — no separate export configuration. Each entry includes tool name, tool type, current status, last inspection date, and last inspector.

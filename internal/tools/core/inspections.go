@@ -455,10 +455,10 @@ func (s *Service) SubmitInspection(ctx context.Context, actorID, toolID string, 
 			t := persisted.SubmittedAt
 			lastSuccessAt = &t
 		}
-		status = deriveToolStatus(latestFailAt, lastSuccessAt, nil, interval, time.Now(), OrangeWindowDays)
+		status = deriveToolStatus(latestFailAt, lastSuccessAt, nil, interval, time.Now())
 	} else {
 		status = deriveToolStatus(statusInput.LatestFailAt, statusInput.LastSuccessAt, statusInput.LastReinstatedAt,
-			interval, time.Now(), OrangeWindowDays)
+			interval, time.Now())
 	}
 
 	return &SubmitInspectionResult{Inspection: persisted, Status: status}, nil
@@ -630,7 +630,7 @@ func (s *Service) ReinstateTool(ctx context.Context, actorID, toolID, reason str
 		statusInput = &ToolInspectionStatus{}
 	}
 	status := deriveToolStatus(statusInput.LatestFailAt, statusInput.LastSuccessAt, statusInput.LastReinstatedAt,
-		interval, time.Now(), OrangeWindowDays)
+		interval, time.Now())
 	return &ReinstateResult{Status: status}, nil
 }
 

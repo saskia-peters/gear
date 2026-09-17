@@ -39,7 +39,7 @@ func TestDeriveToolStatusOOS(t *testing.T) {
 	// reinstatement (or none exists) → `oos`, NextDue nil (Red — OOS outranks
 	// the clock).
 	latestFailAt := fixedNow()
-	status := deriveToolStatus(&latestFailAt, nil, nil, 30*24*time.Hour, fixedNow(), OrangeWindowDays)
+	status := deriveToolStatus(&latestFailAt, nil, nil, 30*24*time.Hour, fixedNow())
 	if status.Status != ToolStatusCodeOOS {
 		t.Errorf("status = %q, want oos", status.Status)
 	}
@@ -55,7 +55,7 @@ func TestDeriveToolStatusPassAfterFailStillOOS(t *testing.T) {
 	// clock's last-success anchor AFTER a reinstatement releases OOS.
 	failAt := fixedNow().Add(-10 * 24 * time.Hour)
 	passAt := fixedNow().Add(-5 * 24 * time.Hour)
-	status := deriveToolStatus(&failAt, &passAt, nil, 30*24*time.Hour, fixedNow(), OrangeWindowDays)
+	status := deriveToolStatus(&failAt, &passAt, nil, 30*24*time.Hour, fixedNow())
 	if status.Status != ToolStatusCodeOOS {
 		t.Errorf("status = %q, want oos (a passing inspection must NOT clear OOS)", status.Status)
 	}
@@ -71,7 +71,7 @@ func TestDeriveToolStatusPassAfterFailThenReinstatementNotOOS(t *testing.T) {
 	failAt := fixedNow().Add(-20 * 24 * time.Hour)
 	passAt := fixedNow().Add(-15 * 24 * time.Hour)
 	reinstatedAt := fixedNow().Add(-5 * 24 * time.Hour)
-	status := deriveToolStatus(&failAt, &passAt, &reinstatedAt, 30*24*time.Hour, fixedNow(), OrangeWindowDays)
+	status := deriveToolStatus(&failAt, &passAt, &reinstatedAt, 30*24*time.Hour, fixedNow())
 	if status.Status != ToolStatusCodeGreen {
 		t.Errorf("status = %q, want green (reinstated since the fail — the clock reset)", status.Status)
 	}
@@ -90,7 +90,7 @@ func TestDeriveToolStatusFailBeforeReinstatementNotOOS(t *testing.T) {
 	// next_due = it + interval.
 	failAt := fixedNow().Add(-10 * 24 * time.Hour)
 	reinstatedAt := fixedNow().Add(-5 * 24 * time.Hour)
-	status := deriveToolStatus(&failAt, nil, &reinstatedAt, 30*24*time.Hour, fixedNow(), OrangeWindowDays)
+	status := deriveToolStatus(&failAt, nil, &reinstatedAt, 30*24*time.Hour, fixedNow())
 	if status.Status != ToolStatusCodeGreen {
 		t.Errorf("status = %q, want green (reinstated since the fail — the clock reset)", status.Status)
 	}
@@ -110,7 +110,7 @@ func TestDeriveToolStatusFailAtReinstatementIsOOS(t *testing.T) {
 	at := fixedNow()
 	latestFailAt := at
 	reinstatedAt := at
-	status := deriveToolStatus(&latestFailAt, nil, &reinstatedAt, 30*24*time.Hour, fixedNow(), OrangeWindowDays)
+	status := deriveToolStatus(&latestFailAt, nil, &reinstatedAt, 30*24*time.Hour, fixedNow())
 	if status.Status != ToolStatusCodeOOS {
 		t.Errorf("status = %q, want oos (fail at the exact reinstatement timestamp)", status.Status)
 	}
@@ -121,7 +121,7 @@ func TestDeriveToolStatusFailAtReinstatementIsOOS(t *testing.T) {
 
 func TestDeriveToolStatusNever(t *testing.T) {
 	// DERIVE_NEVER: no inspections, no reinstatement → `red`, NextDue nil (AD-5).
-	status := deriveToolStatus(nil, nil, nil, 30*24*time.Hour, fixedNow(), OrangeWindowDays)
+	status := deriveToolStatus(nil, nil, nil, 30*24*time.Hour, fixedNow())
 	if status.Status != ToolStatusCodeRed {
 		t.Errorf("status = %q, want red", status.Status)
 	}
@@ -131,44 +131,78 @@ func TestDeriveToolStatusNever(t *testing.T) {
 }
 
 func TestDeriveToolStatusDue(t *testing.T) {
-	// DERIVE_DUE: base + interval vs now — past due → red, ≤14d → orange,
-	// >14d → green. The base is max(last success, latest reinstatement).
+	// DERIVE_DUE: base + interval vs now — past due → red, within one QUARTER
+	// of the tool's own cycle → orange, beyond it → green. The base is max(last
+	// success, latest reinstatement). The orange window is interval/4 (user
+	// decision 2026-09-17): proportional to each tool's schedule, so a FRESH
+	// inspection reads green even on a short (2-week) cycle.
 	interval := 30 * 24 * time.Hour
+	window := interval / 4 // 7.5 days
 
 	// Past due: last success 40d ago → next_due 10d ago → red (NextDue set).
 	old := fixedNow().Add(-40 * 24 * time.Hour)
-	status := deriveToolStatus(nil, &old, nil, interval, fixedNow(), OrangeWindowDays)
+	status := deriveToolStatus(nil, &old, nil, interval, fixedNow())
 	if status.Status != ToolStatusCodeRed || status.NextDue == nil {
 		t.Errorf("past due: status = %+v, want red + a next_due", status)
 	}
 
-	// Orange: last success 20d ago → next_due 10d from now (≤14d).
-	orange := fixedNow().Add(-20 * 24 * time.Hour)
-	status = deriveToolStatus(nil, &orange, nil, interval, fixedNow(), OrangeWindowDays)
+	// Orange: last success 25d ago → next_due 5d from now (within the quarter
+	// window).
+	orange := fixedNow().Add(-25 * 24 * time.Hour)
+	status = deriveToolStatus(nil, &orange, nil, interval, fixedNow())
 	if status.Status != ToolStatusCodeOrange {
-		t.Errorf("≤14d: status = %q, want orange", status.Status)
+		t.Errorf("within quarter window: status = %q, want orange", status.Status)
 	}
 
-	// Green: last success 10d ago → next_due 20d from now (>14d).
+	// Green: last success 10d ago → next_due 20d from now (beyond the quarter
+	// window).
 	green := fixedNow().Add(-10 * 24 * time.Hour)
-	status = deriveToolStatus(nil, &green, nil, interval, fixedNow(), OrangeWindowDays)
+	status = deriveToolStatus(nil, &green, nil, interval, fixedNow())
 	if status.Status != ToolStatusCodeGreen {
-		t.Errorf(">14d: status = %q, want green", status.Status)
+		t.Errorf("beyond quarter window: status = %q, want green", status.Status)
 	}
 
-	// Orange boundary: next_due EXACTLY now + 14d is still orange (≤).
-	atBoundary := fixedNow().Add(-(interval - 14*24*time.Hour))
-	status = deriveToolStatus(nil, &atBoundary, nil, interval, fixedNow(), OrangeWindowDays)
+	// Orange boundary: next_due EXACTLY now + interval/4 is still orange (≤).
+	atBoundary := fixedNow().Add(-(interval - window))
+	status = deriveToolStatus(nil, &atBoundary, nil, interval, fixedNow())
 	if status.Status != ToolStatusCodeOrange {
-		t.Errorf("boundary = %q, want orange (≤ now + 14d)", status.Status)
+		t.Errorf("boundary = %q, want orange (≤ now + interval/4)", status.Status)
 	}
 
 	// The reinstatement anchor wins over an older success: a reinstatement 10d
 	// ago with a success 40d ago → next_due 20d from now → green (the clock
 	// reset to the reinstatement, AD-5).
 	reinstated := fixedNow().Add(-10 * 24 * time.Hour)
-	status = deriveToolStatus(nil, &old, &reinstated, interval, fixedNow(), OrangeWindowDays)
+	status = deriveToolStatus(nil, &old, &reinstated, interval, fixedNow())
 	if status.Status != ToolStatusCodeGreen {
 		t.Errorf("reinstatement anchor: status = %q, want green (max anchor)", status.Status)
+	}
+}
+
+func TestDeriveToolStatusShortCycleFreshIsGreen(t *testing.T) {
+	// User bug report (2026-09-17): a tool on a 2-WEEK (14-day) inspection cycle
+	// read "Ausstehend" after a passing inspection, because the OLD fixed 14-day
+	// orange window exactly swallowed the whole cycle. With the proportional
+	// window (interval/4 = 3.5 days), a FRESH pass reads green/Einsatzbereit.
+	interval := 14 * 24 * time.Hour
+	// Fresh pass: last success ~now → next_due = now + 14d, far beyond the
+	// 3.5-day quarter window → green.
+	fresh := fixedNow()
+	status := deriveToolStatus(nil, &fresh, nil, interval, fixedNow())
+	if status.Status != ToolStatusCodeGreen {
+		t.Errorf("fresh 2-week-cycle pass: status = %q, want green (Einsatzbereit)", status.Status)
+	}
+	// Approaching due: last success 11d ago → next_due 3d from now, within the
+	// quarter window → orange.
+	due := fixedNow().Add(-11 * 24 * time.Hour)
+	status = deriveToolStatus(nil, &due, nil, interval, fixedNow())
+	if status.Status != ToolStatusCodeOrange {
+		t.Errorf("due 2-week-cycle tool: status = %q, want orange", status.Status)
+	}
+	// Past due: last success 15d ago → next_due 1d past → red.
+	past := fixedNow().Add(-15 * 24 * time.Hour)
+	status = deriveToolStatus(nil, &past, nil, interval, fixedNow())
+	if status.Status != ToolStatusCodeRed {
+		t.Errorf("past-due 2-week-cycle tool: status = %q, want red", status.Status)
 	}
 }
