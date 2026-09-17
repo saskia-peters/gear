@@ -1,9 +1,15 @@
-import { useEffect, useState } from 'react'
+import { useEffect, useMemo, useState } from 'react'
 import { useLocation, useNavigate, useParams } from 'react-router-dom'
 import { Header } from '../components/Header.tsx'
 import { clearAuthState, hasPermission } from '../auth/authState.ts'
 import { HISTORY_PERMISSION, listDashboardTools, listToolHistory } from '../auth/tools.ts'
-import type { DashboardTool, InspectionResult, ToolHistory } from '../auth/tools.ts'
+import type {
+  DashboardTool,
+  InspectionResult,
+  ToolHistory,
+  ToolInspectionHistory,
+  ToolReinstatementHistory,
+} from '../auth/tools.ts'
 import { statusClassKey, statusLabel } from '../types/filters.ts'
 import styles from './ToolDetailsPage.module.css'
 
@@ -44,6 +50,22 @@ function formatTimestamp(ts: string): string {
   const d = new Date(ts)
   if (Number.isNaN(d.getTime())) return '–'
   return d.toLocaleString('de-DE')
+}
+
+// TrackRecordEntry is one row of the merged track record (Story 6.3 follow-up):
+// either an inspection (inspector, outcome, notes, mode, per-item results) or a
+// reinstatement (actor, reason), each carrying its timestamp as `at` for the
+// newest-first interleave (inspections use submitted_at, reinstatements use
+// created_at). The union keeps the two record shapes distinct.
+type TrackRecordEntry =
+  | ({ kind: 'inspection'; at: string } & ToolInspectionHistory)
+  | ({ kind: 'reinstatement'; at: string } & ToolReinstatementHistory)
+
+// trackRecordKey is the stable React key for one merged entry: the kind-prefixed
+// id (an inspection and a reinstatement never share an id, but the prefix keeps
+// the key collision-proof regardless).
+function trackRecordKey(entry: TrackRecordEntry): string {
+  return `${entry.kind}-${entry.id}`
 }
 
 // ToolDetailsPage is the per-tool details surface (Story 6.3, FR-18): the tool
@@ -170,6 +192,34 @@ export function ToolDetailsPage() {
   const currentHistory = history !== null && history.toolId === toolId ? history.history : null
   const historyErrorCurrent = historyError !== null && historyError.toolId === toolId ? historyError.message : null
 
+  // trackRecord is the merged ONE-track-record view (Story 6.3 follow-up): the
+  // tool's inspections AND reinstatements interleaved into a SINGLE newest-first
+  // timeline (each entry tagged by its kind), instead of two separate sections.
+  // Ordering is by timestamp desc (submitted_at for inspections, created_at for
+  // reinstatements), tiebroken by id desc for equal timestamps — the same
+  // deterministic convention the backend history queries use.
+  const trackRecord = useMemo(() => {
+    if (!currentHistory) return []
+    // Defensive: the client normalizes the payload (lists are always arrays),
+    // but a null here must never crash the merge.
+    const inspections: TrackRecordEntry[] = (currentHistory.inspections ?? []).map((insp) => ({
+      kind: 'inspection',
+      at: insp.submitted_at,
+      ...insp,
+    }))
+    const reinstatements: TrackRecordEntry[] = (currentHistory.reinstatements ?? []).map((rein) => ({
+      kind: 'reinstatement',
+      at: rein.created_at,
+      ...rein,
+    }))
+    return [...inspections, ...reinstatements].sort((a, b) => {
+      const ta = Date.parse(a.at) || 0
+      const tb = Date.parse(b.at) || 0
+      if (tb !== ta) return tb - ta
+      return a.id < b.id ? 1 : a.id > b.id ? -1 : 0
+    })
+  }, [currentHistory])
+
   const toolName = state.tool_name || headerTool?.name || toolId || ''
   const inventoryNumber = state.inventory_number || headerTool?.inventory_number || toolName
   const toolTypeName = state.tool_type_name || headerTool?.tool_type_name || '–'
@@ -181,7 +231,7 @@ export function ToolDetailsPage() {
       <main className={styles.main}>
         <section className={styles.titleSection}>
           <h2 className={styles.pageTitle}>Werkzeugdetails</h2>
-          <p className={styles.pageSubtitle}>Prüfhistorie und Wiederherstellungen dieses Geräts.</p>
+          <p className={styles.pageSubtitle}>Prüfungen und Wiederherstellungen dieses Geräts.</p>
         </section>
 
         <section className={styles.section} aria-label="Werkzeugdetails">
@@ -226,11 +276,14 @@ export function ToolDetailsPage() {
             </div>
           )}
 
-          {/* History section (Story 6.3, FR-18): gated by inspection.history.view.
-              The SPA pre-checks the permission and skips the fetch for non-holders
-              (the courtesy); the SERVER is the real gate (AD-6). */}
-          <section className={styles.historySection} aria-label="Prüfhistorie">
-            <h3 className={styles.historyTitle}>Prüfhistorie</h3>
+          {/* History section (Story 6.3 + follow-up, FR-18): gated by
+              inspection.history.view. The SPA pre-checks the permission and
+              skips the fetch for non-holders (the courtesy); the SERVER is the
+              real gate (AD-6). The inspections AND reinstatements render as ONE
+              merged track record (newest-first), each entry tagged by its kind
+              — a single complete audit trail instead of two separate sections. */}
+          <section className={styles.historySection} aria-label="Prüf- und Wiederherstellungshistorie">
+            <h3 className={styles.historyTitle}>Historie</h3>
             {!canViewHistory ? (
               <p className={styles.noPermission}>Du hast keine Berechtigung, die Prüfhistorie anzuzeigen.</p>
             ) : historyErrorCurrent ? (
@@ -238,48 +291,76 @@ export function ToolDetailsPage() {
                 {historyErrorCurrent}
               </p>
             ) : currentHistory ? (
-              currentHistory.inspections.length === 0 ? (
-                <p className={styles.emptyNote}>Keine Prüfungen vorhanden.</p>
+              trackRecord.length === 0 ? (
+                <p className={styles.emptyNote}>Keine Einträge vorhanden.</p>
               ) : (
-                <ul className={styles.inspectionList} aria-label="Prüfungen">
-                  {currentHistory.inspections.map((insp) => (
-                    <li key={insp.id} className={styles.historyCard}>
+                <ul className={styles.trackList} aria-label="Historie">
+                  {trackRecord.map((entry) => (
+                    <li key={trackRecordKey(entry)} className={styles.historyCard}>
+                      <span
+                        className={`${styles.entryBadge} ${
+                          entry.kind === 'inspection' ? styles.entryBadgeInspection : styles.entryBadgeReinstatement
+                        }`}
+                      >
+                        {entry.kind === 'inspection' ? 'Prüfung' : 'Wiederherstellung'}
+                      </span>
                       <dl className={styles.historyDetail}>
-                        <div className={styles.detailRow}>
-                          <dt className={styles.detailTerm}>Prüfer/in</dt>
-                          <dd className={styles.detailValue}>{insp.inspector_name}</dd>
-                        </div>
-                        <div className={styles.detailRow}>
-                          <dt className={styles.detailTerm}>Datum</dt>
-                          <dd className={styles.detailValue}>{formatTimestamp(insp.submitted_at)}</dd>
-                        </div>
-                        <div className={styles.detailRow}>
-                          <dt className={styles.detailTerm}>Ergebnis</dt>
-                          <dd className={styles.detailValue}>{outcomeLabel(insp.overall_result)}</dd>
-                        </div>
-                        <div className={styles.detailRow}>
-                          <dt className={styles.detailTerm}>Modus</dt>
-                          <dd className={styles.detailValue}>{modeLabel(insp.mode)}</dd>
-                        </div>
-                        {insp.notes && (
-                          <div className={styles.detailRow}>
-                            <dt className={styles.detailTerm}>Anmerkung</dt>
-                            <dd className={styles.detailValue}>{insp.notes}</dd>
-                          </div>
-                        )}
-                        {insp.mode === 'checklist' && insp.items.length > 0 && (
-                          <ul className={styles.itemsList} aria-label="Prüfpunkte">
-                            {insp.items.map((item) => (
-                              <li key={item.id} className={styles.itemRow}>
-                                <span className={styles.itemLabel}>{item.label}</span>
-                                <span
-                                  className={`${styles.itemResult} ${item.result === 'pass' ? styles.itemPass : styles.itemFail}`}
-                                >
-                                  {outcomeLabel(item.result)}
-                                </span>
-                              </li>
-                            ))}
-                          </ul>
+                        {entry.kind === 'inspection' ? (
+                          <>
+                            <div className={styles.detailRow}>
+                              <dt className={styles.detailTerm}>Prüfer/in</dt>
+                              <dd className={styles.detailValue}>{entry.inspector_name}</dd>
+                            </div>
+                            <div className={styles.detailRow}>
+                              <dt className={styles.detailTerm}>Datum</dt>
+                              <dd className={styles.detailValue}>{formatTimestamp(entry.at)}</dd>
+                            </div>
+                            <div className={styles.detailRow}>
+                              <dt className={styles.detailTerm}>Ergebnis</dt>
+                              <dd className={styles.detailValue}>{outcomeLabel(entry.overall_result)}</dd>
+                            </div>
+                            <div className={styles.detailRow}>
+                              <dt className={styles.detailTerm}>Modus</dt>
+                              <dd className={styles.detailValue}>{modeLabel(entry.mode)}</dd>
+                            </div>
+                            {entry.notes && (
+                              <div className={styles.detailRow}>
+                                <dt className={styles.detailTerm}>Anmerkung</dt>
+                                <dd className={styles.detailValue}>{entry.notes}</dd>
+                              </div>
+                            )}
+                            {entry.mode === 'checklist' && entry.items.length > 0 && (
+                              <ul className={styles.itemsList} aria-label="Prüfpunkte">
+                                {entry.items.map((item) => (
+                                  <li key={item.id} className={styles.itemRow}>
+                                    <span className={styles.itemLabel}>{item.label}</span>
+                                    <span
+                                      className={`${styles.itemResult} ${
+                                        item.result === 'pass' ? styles.itemPass : styles.itemFail
+                                      }`}
+                                    >
+                                      {outcomeLabel(item.result)}
+                                    </span>
+                                  </li>
+                                ))}
+                              </ul>
+                            )}
+                          </>
+                        ) : (
+                          <>
+                            <div className={styles.detailRow}>
+                              <dt className={styles.detailTerm}>Durchgeführt von</dt>
+                              <dd className={styles.detailValue}>{entry.actor_name}</dd>
+                            </div>
+                            <div className={styles.detailRow}>
+                              <dt className={styles.detailTerm}>Datum</dt>
+                              <dd className={styles.detailValue}>{formatTimestamp(entry.at)}</dd>
+                            </div>
+                            <div className={styles.detailRow}>
+                              <dt className={styles.detailTerm}>Grund</dt>
+                              <dd className={styles.detailValue}>{entry.reason}</dd>
+                            </div>
+                          </>
                         )}
                       </dl>
                     </li>
@@ -288,47 +369,7 @@ export function ToolDetailsPage() {
               )
             ) : (
               <div className={styles.loading} role="status" aria-live="polite">
-                Prüfhistorie wird geladen...
-              </div>
-            )}
-          </section>
-
-          <section className={styles.historySection} aria-label="Wiederherstellungen">
-            <h3 className={styles.historyTitle}>Wiederherstellungen</h3>
-            {!canViewHistory ? (
-              <p className={styles.noPermission}>Du hast keine Berechtigung, die Prüfhistorie anzuzeigen.</p>
-            ) : historyErrorCurrent ? (
-              <p role="alert" className={styles.error}>
-                {historyErrorCurrent}
-              </p>
-            ) : currentHistory ? (
-              currentHistory.reinstatements.length === 0 ? (
-                <p className={styles.emptyNote}>Keine Wiederherstellungen vorhanden.</p>
-              ) : (
-                <ul className={styles.inspectionList} aria-label="Wiederherstellungen">
-                  {currentHistory.reinstatements.map((rein) => (
-                    <li key={rein.id} className={styles.historyCard}>
-                      <dl className={styles.historyDetail}>
-                        <div className={styles.detailRow}>
-                          <dt className={styles.detailTerm}>Durchgeführt von</dt>
-                          <dd className={styles.detailValue}>{rein.actor_name}</dd>
-                        </div>
-                        <div className={styles.detailRow}>
-                          <dt className={styles.detailTerm}>Datum</dt>
-                          <dd className={styles.detailValue}>{formatTimestamp(rein.created_at)}</dd>
-                        </div>
-                        <div className={styles.detailRow}>
-                          <dt className={styles.detailTerm}>Grund</dt>
-                          <dd className={styles.detailValue}>{rein.reason}</dd>
-                        </div>
-                      </dl>
-                    </li>
-                  ))}
-                </ul>
-              )
-            ) : (
-              <div className={styles.loading} role="status" aria-live="polite">
-                Prüfhistorie wird geladen...
+                Historie wird geladen...
               </div>
             )}
           </section>

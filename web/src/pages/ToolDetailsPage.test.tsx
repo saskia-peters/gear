@@ -181,7 +181,7 @@ describe('ToolDetailsPage history (Story 6.3, FR-18)', () => {
     cleanup()
   })
 
-  it('HISTORY_RENDER: a holder sees the reverse-chronological inspections (inspector, date, outcome, notes, mode, per-item results) and the reinstatements', async () => {
+  it('HISTORY_RENDER: a holder sees the merged track record — inspections AND reinstatements newest-first in ONE list, each tagged by kind', async () => {
     setPermissions(['inspection.history.view'])
     const mock = stubFetch({ ok: true, status: 200, json: async () => historyFixture() })
     renderPage(HEADER_STATE)
@@ -193,6 +193,24 @@ describe('ToolDetailsPage history (Story 6.3, FR-18)', () => {
 
     // Inspector display names (server-resolved) render.
     expect(screen.getAllByText('Anna Muster').length).toBeGreaterThanOrEqual(3)
+
+    // ONE merged track record: the reinstatement (2026-09-16, newest) comes
+    // FIRST, then the checklist inspection (2026-09-15), then the pass_fail
+    // (2026-09-01, oldest) — newest-first across both kinds.
+    const list = screen.getByRole('list', { name: 'Historie' })
+    const cards = Array.from(list.children) as HTMLElement[]
+    expect(cards.length).toBe(3)
+    expect(cards[0]).toHaveTextContent('Wiederherstellung')
+    expect(cards[0]).toHaveTextContent('Ersatzteil eingetroffen')
+    expect(cards[0]).toHaveTextContent('Durchgeführt von')
+    expect(cards[1]).toHaveTextContent('Prüfung')
+    expect(cards[1]).toHaveTextContent('Bohrfutter locker')
+    expect(cards[2]).toHaveTextContent('Prüfung')
+    expect(cards[2]).toHaveTextContent('Alles ok')
+
+    // Badges tag each kind.
+    expect(screen.getAllByText('Prüfung').length).toBe(2)
+    expect(screen.getByText('Wiederherstellung')).toBeInTheDocument()
 
     // Newest checklist inspection: mode + outcome + notes + per-item results.
     expect(screen.getByText('Checkliste')).toBeInTheDocument()
@@ -217,25 +235,24 @@ describe('ToolDetailsPage history (Story 6.3, FR-18)', () => {
     expect(screen.getByText(new Date('2026-09-16T08:00:00Z').toLocaleString('de-DE'))).toBeInTheDocument()
   })
 
-  it('HISTORY_EMPTY: a tool with no records shows the German empty notes for both lists', async () => {
+  it('HISTORY_EMPTY: a tool with no records shows the German empty note for the merged track record', async () => {
     setPermissions(['inspection.history.view'])
     stubFetch({ ok: true, status: 200, json: async () => ({ inspections: [], reinstatements: [] }) })
     renderPage(HEADER_STATE)
 
-    expect(await screen.findByText('Keine Prüfungen vorhanden.')).toBeInTheDocument()
-    expect(screen.getByText('Keine Wiederherstellungen vorhanden.')).toBeInTheDocument()
+    expect(await screen.findByText('Keine Einträge vorhanden.')).toBeInTheDocument()
   })
 
-  it('HISTORY_NOPERMISSION: a non-holder sees the German no-permission note in BOTH history sections and the history is NEVER fetched', async () => {
+  it('HISTORY_NOPERMISSION: a non-holder sees the German no-permission note and the history is NEVER fetched', async () => {
     setPermissions([])
     const mock = stubFetch({ ok: true, status: 200, json: async () => historyFixture() })
     renderPage(HEADER_STATE)
 
-    // Both the Prüfhistorie AND the Wiederherstellungen sections carry the
-    // note (a bare heading would leak nothing but read as broken UX).
+    // The single merged history section carries the note (a bare heading would
+    // leak nothing but read as broken UX).
     expect(
       (await screen.findAllByText('Du hast keine Berechtigung, die Prüfhistorie anzuzeigen.')).length,
-    ).toBe(2)
+    ).toBe(1)
     // The header renders (from router state) but the history fetch is skipped —
     // no doomed 403 round-trip for a non-holder.
     expect(screen.getByText('Bohrmaschine-01')).toBeInTheDocument()
@@ -255,7 +272,7 @@ describe('ToolDetailsPage history (Story 6.3, FR-18)', () => {
     expect(localStorage.getItem('gear.session_token')).toBeNull()
   })
 
-  it('HISTORY_403: a server-side 403 (the permission cache went stale — the SERVER is the gate) shows the German message inline in both sections', async () => {
+  it('HISTORY_403: a server-side 403 (the permission cache went stale — the SERVER is the gate) shows the German message inline in the merged history section', async () => {
     setPermissions(['inspection.history.view'])
     stubFetch({
       ok: false,
@@ -265,7 +282,7 @@ describe('ToolDetailsPage history (Story 6.3, FR-18)', () => {
     renderPage(HEADER_STATE)
 
     const alerts = await screen.findAllByRole('alert')
-    expect(alerts.length).toBe(2)
+    expect(alerts.length).toBe(1)
     for (const alert of alerts) {
       expect(alert).toHaveTextContent('Keine Berechtigung.')
     }
@@ -283,7 +300,7 @@ describe('ToolDetailsPage history (Story 6.3, FR-18)', () => {
     renderPage(HEADER_STATE)
 
     const alerts = await screen.findAllByRole('alert')
-    expect(alerts.length).toBe(2)
+    expect(alerts.length).toBe(1)
     for (const alert of alerts) {
       expect(alert).toHaveTextContent('Das Werkzeug wurde nicht gefunden.')
     }
@@ -367,11 +384,12 @@ describe('ToolDetailsPage history (Story 6.3, FR-18)', () => {
     // [] — the page renders the surviving inspections without crashing.
     expect(await screen.findByText('Anna Muster')).toBeInTheDocument()
     expect(screen.getByText('Bernd Beispiel')).toBeInTheDocument()
-    // The coerced empty lists render the German empty notes instead of a crash.
-    expect(screen.getByText('Keine Wiederherstellungen vorhanden.')).toBeInTheDocument()
+    // The coerced empty reinstatement list means only the two inspections
+    // render in the merged track record (no crash, no separate section).
+    expect(screen.getAllByText('Prüfung').length).toBe(2)
   })
 
-  it('HISTORY_ERROR: a failed history fetch shows the German inline error in both sections (no crash, no confirmation)', async () => {
+  it('HISTORY_ERROR: a failed history fetch shows the German inline error in the merged history section (no crash, no confirmation)', async () => {
     setPermissions(['inspection.history.view'])
     stubFetch({
       ok: false,
@@ -381,7 +399,7 @@ describe('ToolDetailsPage history (Story 6.3, FR-18)', () => {
     renderPage(HEADER_STATE)
 
     const alerts = await screen.findAllByRole('alert')
-    expect(alerts.length).toBe(2)
+    expect(alerts.length).toBe(1)
     for (const alert of alerts) {
       expect(alert).toHaveTextContent('Ein interner Fehler ist aufgetreten.')
     }
@@ -420,7 +438,7 @@ describe('ToolDetailsPage history (Story 6.3, FR-18)', () => {
     expect(await screen.findByText('Bohrmaschine-01')).toBeInTheDocument()
     expect(
       screen.getAllByText('Du hast keine Berechtigung, die Prüfhistorie anzuzeigen.').length,
-    ).toBe(2)
+    ).toBe(1)
     const urls = mock.mock.calls.map((c) => c[0])
     expect(urls).toEqual(['/api/v1/tools'])
   })
@@ -504,7 +522,7 @@ describe('ToolDetailsPage history (Story 6.3, FR-18)', () => {
     expect(screen.queryByText('Bohrmaschine-01')).not.toBeInTheDocument()
     expect(screen.queryByText('Bohrfutter locker')).not.toBeInTheDocument()
     expect(screen.getByLabelText('Werkzeugdetails werden geladen')).toBeInTheDocument()
-    expect(screen.getAllByText('Prüfhistorie wird geladen...').length).toBe(2)
+    expect(screen.getByText('Historie wird geladen...')).toBeInTheDocument()
 
     // Release the held fetches → the id-w2 header + empty history render.
     resolveW2List!({
@@ -524,6 +542,6 @@ describe('ToolDetailsPage history (Story 6.3, FR-18)', () => {
     resolveW2History!({ ok: true, status: 200, json: async () => ({ inspections: [], reinstatements: [] }) })
     await act(async () => {})
     expect(await screen.findByText('Schleifmaschine-01')).toBeInTheDocument()
-    expect(screen.getByText('Keine Prüfungen vorhanden.')).toBeInTheDocument()
+    expect(screen.getByText('Keine Einträge vorhanden.')).toBeInTheDocument()
   })
 })
