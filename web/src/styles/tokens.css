@@ -195,6 +195,10 @@
   --gear-color-status-green-soft: rgba(46, 125, 50, 0.12);
   --gear-color-status-orange-soft: rgba(245, 130, 31, 0.12);
 
+  /* Brand soft tint — a very light brand-blue fill for brand-accented cards
+     (e.g. the inspection cards on the tool details track record). */
+  --gear-color-brand-soft: rgba(0, 51, 153, 0.07);
+
   /* Dark-mode values for the focus-ring and status-soft tokens. Defined once
      here and referenced by BOTH dark blocks (system + explicit) so the two
      never drift. */
@@ -203,6 +207,7 @@
   --gear-dark-status-red-soft: rgba(239, 83, 80, 0.14);
   --gear-dark-status-green-soft: rgba(76, 175, 80, 0.16);
   --gear-dark-status-orange-soft: rgba(255, 167, 38, 0.16);
+  --gear-dark-brand-soft: rgba(122, 162, 255, 0.12);
 }
 
 /* System Dark Mode (when not explicitly set to light) */
@@ -266,6 +271,7 @@
     --gear-color-status-red-soft: var(--gear-dark-status-red-soft);
     --gear-color-status-green-soft: var(--gear-dark-status-green-soft);
     --gear-color-status-orange-soft: var(--gear-dark-status-orange-soft);
+    --gear-color-brand-soft: var(--gear-dark-brand-soft);
   }
 }
 
@@ -329,6 +335,7 @@
   --gear-color-status-red-soft: var(--gear-dark-status-red-soft);
   --gear-color-status-green-soft: var(--gear-dark-status-green-soft);
   --gear-color-status-orange-soft: var(--gear-dark-status-orange-soft);
+  --gear-color-brand-soft: var(--gear-dark-brand-soft);
 }
 
 /* Explicit Light Mode */

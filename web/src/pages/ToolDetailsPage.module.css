@@ -241,6 +241,18 @@
   border-radius: var(--gear-radius-md);
 }
 
+/* The card kind tints (Story 6.3 follow-up): inspection cards carry a very
+   light brand-blue fill, reinstatement cards a very light status-green fill —
+   the two record kinds are distinguishable at a glance while staying within
+   the theme's soft-tint vocabulary. */
+.historyCardInspection {
+  background-color: var(--gear-color-brand-soft);
+}
+
+.historyCardReinstatement {
+  background-color: var(--gear-color-status-green-soft);
+}
+
 /* cardHeader is the compact top line of a track-record card: the kind badge on
    the left and the date on the right — one line instead of a stacked dl. */
 .cardHeader {

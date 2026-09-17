@@ -301,7 +301,14 @@ export function ToolDetailsPage() {
               ) : (
                 <ul className={styles.trackList} aria-label="Historie">
                   {trackRecord.map((entry) => (
-                    <li key={trackRecordKey(entry)} className={styles.historyCard}>
+                    <li
+                      key={trackRecordKey(entry)}
+                      className={`${styles.historyCard} ${
+                        entry.kind === 'inspection'
+                          ? styles.historyCardInspection
+                          : styles.historyCardReinstatement
+                      }`}
+                    >
                       <div className={styles.cardHeader}>
                         <span
                           className={`${styles.entryBadge} ${
