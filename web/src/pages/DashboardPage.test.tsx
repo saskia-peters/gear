@@ -1,8 +1,9 @@
 // @vitest-environment jsdom
+import { useLayoutEffect, useState, type ReactNode } from 'react'
 import { render, screen, within, cleanup, waitFor } from '@testing-library/react'
 import userEvent from '@testing-library/user-event'
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { MemoryRouter, Routes, Route, useParams, useLocation } from 'react-router-dom'
+import { MemoryRouter, Router, Routes, Route, useParams, useLocation, UNSAFE_createMemoryHistory } from 'react-router-dom'
 import { DashboardPage } from './DashboardPage.tsx'
 import { ThemeProvider } from '../context/ThemeContext.tsx'
 import type { ToolStatusInfo } from '../auth/tools.ts'
@@ -51,6 +52,29 @@ function InspectionStubRoute() {
   )
 }
 
+function DetailsStubRoute() {
+  const { toolId } = useParams()
+  const location = useLocation()
+  // The stub route captures the EXACT navigation-state object the dashboard
+  // builds (Story 6.1b), so the ROW_NAV/ROW_KEYBOARD cases can assert the
+  // real 6.3 ToolDetailsState passed along.
+  const state = (location.state ?? {}) as {
+    tool_name?: string
+    tool_type_name?: string
+    inventory_number?: string
+    status?: ToolStatusInfo
+  }
+  return (
+    <div>
+      DetailsStub <span data-testid="stub-details-tool-id">{toolId}</span>{' '}
+      <span data-testid="stub-details-tool-name">{state.tool_name}</span>{' '}
+      <span data-testid="stub-details-tool-type-name">{state.tool_type_name}</span>{' '}
+      <span data-testid="stub-details-inventory-number">{state.inventory_number}</span>{' '}
+      <span data-testid="stub-details-status">{state.status?.status}</span>
+    </div>
+  )
+}
+
 function renderPage() {
   return render(
     <ThemeProvider>
@@ -59,10 +83,67 @@ function renderPage() {
           <Route path="/" element={<DashboardPage />} />
           <Route path="/login" element={<div>Anmeldung</div>} />
           <Route path="/inspection/:toolId" element={<InspectionStubRoute />} />
+          <Route path="/tools/:toolId" element={<DetailsStubRoute />} />
         </Routes>
       </MemoryRouter>
     </ThemeProvider>,
   )
+}
+
+// renderPageWithHistory renders the same routes behind an explicit memory
+// history whose location changes are COUNTED — a double navigation (e.g. a
+// held/repeated key firing twice) shows up as navigation.count > 1, so the
+// "exactly once" keyboard cases can be asserted precisely.
+//
+// Notes on react-router v7 internals (why this wrapper exists):
+//   - the history must be created with v5Compat: true, otherwise push/replace
+//     never notify the listener (MemoryRouter always passes it internally);
+//   - the history holds a SINGLE listener slot, so the counting happens inside
+//     the same listener that re-renders the <Router> (a second listen() would
+//     silently overwrite it);
+//   - unstable_HistoryRouter is broken in this version, so the subscription +
+//     <Router> wiring is done explicitly here.
+function MemoryHistoryRouter({
+  history,
+  navigation,
+  children,
+}: {
+  history: ReturnType<typeof UNSAFE_createMemoryHistory>
+  navigation: { count: number }
+  children: ReactNode
+}) {
+  const [state, setState] = useState({ action: history.action, location: history.location })
+  useLayoutEffect(
+    () =>
+      history.listen((update) => {
+        navigation.count += 1
+        setState(update)
+      }),
+    [history, navigation],
+  )
+  return (
+    <Router location={state.location} navigationType={state.action} navigator={history}>
+      {children}
+    </Router>
+  )
+}
+
+function renderPageWithHistory() {
+  const history = UNSAFE_createMemoryHistory({ initialEntries: ['/'], v5Compat: true })
+  const navigation = { count: 0 }
+  render(
+    <ThemeProvider>
+      <MemoryHistoryRouter history={history} navigation={navigation}>
+        <Routes>
+          <Route path="/" element={<DashboardPage />} />
+          <Route path="/login" element={<div>Anmeldung</div>} />
+          <Route path="/inspection/:toolId" element={<InspectionStubRoute />} />
+          <Route path="/tools/:toolId" element={<DetailsStubRoute />} />
+        </Routes>
+      </MemoryHistoryRouter>
+    </ThemeProvider>,
+  )
+  return navigation
 }
 
 function stubFetchTools(body: unknown, status = 200) {
@@ -831,4 +912,236 @@ describe('DashboardPage out-of-service reinstatement (Story 5.6, FR-14/AD-4 + FR
     expect(alert).toHaveTextContent('Der Grund ist zu lang (maximal 2000 Zeichen).')
     expect(screen.queryByText('Das Gerät wurde wiederhergestellt.')).not.toBeInTheDocument()
   }, 20000)
+})
+
+describe('DashboardPage row details navigation (Story 6.1b, FR-16/6.3)', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    localStorage.setItem('gear.session_token', 'sesstoken123')
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    cleanup()
+  })
+
+  const rowTool = dashboardToolFixture('id-w1', 'Bohrmaschine-01', 'Bohrmaschine', 'GEAR000001', {
+    status: 'green',
+    next_due: '2027-01-01T00:00:00Z',
+  })
+
+  // Local reinstate stub: serves the Werkzeugliste list AND the reinstate POST
+  // (no navigation assertion needed here — only the dialog opening matters).
+  function stubFetchReinstate(listBody: unknown, reinstateStatus: number) {
+    const ok = reinstateStatus >= 200 && reinstateStatus < 300
+    const mock = vi.fn().mockImplementation(async (url: string) => {
+      if (url === DASHBOARD_TOOLS_URL) {
+        return { ok: true, status: 200, json: async () => listBody }
+      }
+      if (url.startsWith(`${DASHBOARD_TOOLS_URL}/`) && url.endsWith('/reinstatement')) {
+        return { ok, status: reinstateStatus, json: async () => null }
+      }
+      return { ok: false, status: 404, json: async () => ({ error: { code: 'not_found', message: 'nope' } }) }
+    })
+    vi.stubGlobal('fetch', mock)
+    return mock
+  }
+
+  // ROW_STRUCTURE pins the one-line INTENT structurally (jsdom has no flex
+  // engine, so a visual one-line assertion is impossible here — the true visual
+  // confirmation stays a manual check): the name, type and Gerätenummer spans
+  // are DIRECT CHILDREN of .rowInfo (siblings — no wrapping stacked element
+  // between the info column and its fields) and the status chip + info + action
+  // buttons all render inside the row.
+  it('ROW_STRUCTURE: the name, type and Gerätenummer are direct siblings in .rowInfo, and the chip + info + buttons all render in the row', async () => {
+    stubFetchTools([rowTool])
+    renderPage()
+    await screen.findByText('Bohrmaschine-01')
+
+    const row = screen.getByText('Bohrmaschine-01').closest('li')
+    expect(row).not.toBeNull()
+    const rowElement = row as HTMLElement
+    expect(rowElement).toHaveClass(styles.row)
+
+    const rowInfo = rowElement.querySelector(`.${styles.rowInfo}`)
+    expect(rowInfo).not.toBeNull()
+    const info = rowInfo as HTMLElement
+
+    // The three info fields are DIRECT children of .rowInfo — no stacked
+    // wrapper sits between the column and its fields (the one-line intent).
+    const name = within(info).getByText('Bohrmaschine-01')
+    const type = within(info).getByText('Bohrmaschine')
+    const inventory = within(info).getByText('GEAR000001')
+    expect(name.parentElement).toBe(info)
+    expect(type.parentElement).toBe(info)
+    expect(inventory.parentElement).toBe(info)
+
+    // The status chip + the action buttons render in the same row.
+    expect(within(rowElement).getByText('Einsatzbereit')).toBeInTheDocument()
+    expect(within(rowElement).getByRole('button', { name: 'Prüfung starten für Bohrmaschine-01' })).toBeInTheDocument()
+  })
+
+  it('ROW_NAV: clicking the row (not a button) opens /tools/:toolId with the 6.3 header state', async () => {
+    const user = userEvent.setup()
+    stubFetchTools([rowTool])
+    renderPage()
+    await screen.findByText('Bohrmaschine-01')
+
+    // Click the row's name text (not a button) → navigates to the details stub.
+    await user.click(screen.getByText('Bohrmaschine-01'))
+
+    expect(await screen.findByText('DetailsStub')).toBeInTheDocument()
+    expect(screen.getByTestId('stub-details-tool-id')).toHaveTextContent('id-w1')
+    expect(screen.getByTestId('stub-details-tool-name')).toHaveTextContent('Bohrmaschine-01')
+    expect(screen.getByTestId('stub-details-tool-type-name')).toHaveTextContent('Bohrmaschine')
+    expect(screen.getByTestId('stub-details-inventory-number')).toHaveTextContent('GEAR000001')
+    expect(screen.getByTestId('stub-details-status')).toHaveTextContent('green')
+  })
+
+  it('ROW_KEYBOARD_ENTER: pressing Enter on the focused row opens the details exactly once', async () => {
+    const user = userEvent.setup()
+    stubFetchTools([rowTool])
+    const navigation = renderPageWithHistory()
+    await screen.findByText('Bohrmaschine-01')
+
+    // The row is keyboard-operable (tabIndex 0) and carries the German label.
+    const row = screen.getByText('Bohrmaschine-01').closest('li')
+    expect(row).toHaveAttribute('tabindex', '0')
+    expect(row).toHaveAttribute('aria-label', 'Details für Bohrmaschine-01 öffnen')
+
+    row?.focus()
+    await user.keyboard('{Enter}')
+
+    // Navigated to the details stub — and EXACTLY once (no duplicate push from
+    // a repeated/held key).
+    expect(await screen.findByText('DetailsStub')).toBeInTheDocument()
+    expect(screen.getByTestId('stub-details-tool-id')).toHaveTextContent('id-w1')
+    expect(navigation.count).toBe(1)
+  })
+
+  it('ROW_KEYBOARD_SPACE: pressing Space on the focused row opens the details exactly once', async () => {
+    const user = userEvent.setup()
+    stubFetchTools([rowTool])
+    const navigation = renderPageWithHistory()
+    await screen.findByText('Bohrmaschine-01')
+
+    const row = screen.getByText('Bohrmaschine-01').closest('li')
+    row?.focus()
+    await user.keyboard(' ')
+
+    // Space activates the row just like Enter — one navigation, no duplicates.
+    expect(await screen.findByText('DetailsStub')).toBeInTheDocument()
+    expect(screen.getByTestId('stub-details-tool-id')).toHaveTextContent('id-w1')
+    expect(navigation.count).toBe(1)
+  })
+
+  it('ROW_CHIP_CLICK: clicking the status chip (not a button, inside the row) navigates to the details stub', async () => {
+    const user = userEvent.setup()
+    stubFetchTools([rowTool])
+    renderPage()
+    await screen.findByText('Bohrmaschine-01')
+
+    const row = screen.getByText('Bohrmaschine-01').closest('li')
+    await user.click(within(row as HTMLElement).getByText('Einsatzbereit'))
+
+    expect(await screen.findByText('DetailsStub')).toBeInTheDocument()
+    expect(screen.getByTestId('stub-details-tool-id')).toHaveTextContent('id-w1')
+  })
+
+  it('ROW_KEYBOARD_BUTTON: pressing Enter on a focused row button runs the button action WITHOUT details navigation (no keydown bubble)', async () => {
+    const user = userEvent.setup()
+    stubFetchStart(
+      [rowTool],
+      200,
+      { tool_id: 'id-w1', tool_name: 'Bohrmaschine-01', tool_type_id: 'id-t1', tool_type_name: 'Bohrmaschine', inspection_mode: 'checklist', checklist_items: [] },
+    )
+    renderPage()
+    await screen.findByText('Bohrmaschine-01')
+
+    const startButton = screen.getByRole('button', { name: 'Prüfung starten für Bohrmaschine-01' })
+    startButton.focus()
+    await user.keyboard('{Enter}')
+
+    // The start runs (inspection stub reached); the bubbled keydown must NOT
+    // have navigated to the details page.
+    expect(await screen.findByText('InspectionStub')).toBeInTheDocument()
+    expect(screen.queryByText('DetailsStub')).not.toBeInTheDocument()
+  })
+
+  it('ROW_KEYBOARD_BUTTON_SPACE: pressing Space on a focused row button runs the button action WITHOUT details navigation (no keydown bubble)', async () => {
+    const user = userEvent.setup()
+    stubFetchStart(
+      [rowTool],
+      200,
+      { tool_id: 'id-w1', tool_name: 'Bohrmaschine-01', tool_type_id: 'id-t1', tool_type_name: 'Bohrmaschine', inspection_mode: 'checklist', checklist_items: [] },
+    )
+    renderPage()
+    await screen.findByText('Bohrmaschine-01')
+
+    const startButton = screen.getByRole('button', { name: 'Prüfung starten für Bohrmaschine-01' })
+    startButton.focus()
+    await user.keyboard(' ')
+
+    // Space activates the start button (inspection stub reached); the bubbled
+    // keydown must NOT have navigated to the details page.
+    expect(await screen.findByText('InspectionStub')).toBeInTheDocument()
+    expect(screen.queryByText('DetailsStub')).not.toBeInTheDocument()
+  })
+
+  it('ROW_START: clicking "Prüfung starten" runs the start WITHOUT navigating to details', async () => {
+    const user = userEvent.setup()
+    stubFetchStart(
+      [rowTool],
+      200,
+      { tool_id: 'id-w1', tool_name: 'Bohrmaschine-01', tool_type_id: 'id-t1', tool_type_name: 'Bohrmaschine', inspection_mode: 'checklist', checklist_items: [] },
+    )
+    renderPage()
+    await screen.findByText('Bohrmaschine-01')
+
+    await user.click(screen.getByRole('button', { name: 'Prüfung starten für Bohrmaschine-01' }))
+
+    // The start navigates to the INSPECTION stub, not the details page.
+    expect(await screen.findByText('InspectionStub')).toBeInTheDocument()
+    expect(screen.queryByText('DetailsStub')).not.toBeInTheDocument()
+  })
+
+  it('ROW_REINSTATE: clicking "Wiederherstellen" opens the dialog WITHOUT row navigation', async () => {
+    const user = userEvent.setup()
+    localStorage.setItem('gear.permissions', JSON.stringify(['tool.reinstate']))
+    const oos = dashboardToolFixture('id-oos', 'Bohrmaschine-01', 'Bohrmaschine', 'GEAR000001', {
+      status: 'oos',
+      next_due: null,
+    })
+    stubFetchReinstate([oos], 200)
+    renderPage()
+    await screen.findByRole('list', { name: 'Werkzeuge' })
+
+    await user.click(screen.getByRole('button', { name: 'Wiederherstellen für Bohrmaschine-01' }))
+
+    // The dialog opens; no details navigation happened.
+    expect(screen.getByRole('dialog')).toBeInTheDocument()
+    expect(screen.queryByText('DetailsStub')).not.toBeInTheDocument()
+  })
+
+  it('ROW_ERROR: clicking the inline row error does not navigate to details', async () => {
+    const user = userEvent.setup()
+    stubFetchStart(
+      [rowTool],
+      403,
+      { error: { code: 'forbidden', message: 'Erforderliche Qualifikation fehlt.' } },
+    )
+    renderPage()
+    await screen.findByText('Bohrmaschine-01')
+
+    // Produce an inline row error, then click the error area itself.
+    await user.click(screen.getByRole('button', { name: 'Prüfung starten für Bohrmaschine-01' }))
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Erforderliche Qualifikation fehlt.')
+
+    await user.click(alert)
+
+    // No details navigation — still on the dashboard.
+    expect(screen.queryByText('DetailsStub')).not.toBeInTheDocument()
+    expect(screen.getByRole('list', { name: 'Werkzeuge' })).toBeInTheDocument()
+  })
 })

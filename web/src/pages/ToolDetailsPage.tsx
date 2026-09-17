@@ -7,12 +7,13 @@ import type { DashboardTool, InspectionResult, ToolHistory } from '../auth/tools
 import { statusClassKey, statusLabel } from '../types/filters.ts'
 import styles from './ToolDetailsPage.module.css'
 
-// ToolDetailsState is the router state a future dashboard row navigation can
-// carry here (Story 6.3 — the row-click navigation is a follow-up story; this
-// page is reachable by URL only in this story): the tool header fields the
-// dashboard list already has. On a direct visit / refresh the state is GONE,
-// so the page re-resolves the header from listDashboardTools() find-by-id.
-interface ToolDetailsState {
+// ToolDetailsState is the router state the dashboard row navigation carries
+// here (Story 6.1b — the row-click navigation; the page is also reachable by
+// URL): the tool header fields the dashboard list already has. On a direct
+// visit / refresh the state is GONE, so the page re-resolves the header from
+// listDashboardTools() find-by-id. Exported so the dashboard row navigation
+// types its navigate state with this exact shape (field drift → compile error).
+export interface ToolDetailsState {
   tool_name?: string
   inventory_number?: string
   tool_type_name?: string

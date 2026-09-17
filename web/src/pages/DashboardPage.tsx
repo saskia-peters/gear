@@ -10,6 +10,7 @@ import { clearAuthState, hasPermission } from '../auth/authState.ts'
 import { listDashboardTools, reinstateTool, REINSTATE_PERMISSION, startInspection } from '../auth/tools.ts'
 import type { DashboardTool } from '../auth/tools.ts'
 import { statusLabel, statusClassKey, type StatusCode } from '../types/filters.ts'
+import type { ToolDetailsState } from './ToolDetailsPage.tsx'
 import styles from './DashboardPage.module.css'
 
 // DashboardPage is the GEAR-module landing surface. The "Werkzeugliste"
@@ -239,6 +240,26 @@ export function DashboardPage() {
   // server's confirmation shows and the list refetches (the tool leaves OOS);
   // on error the dialog closes and the server's German message shows inline on
   // the row. 401 → login (stale/revoked session).
+  // handleOpenDetails (Story 6.1b, FR-16/6.3): the row is an interactive
+  // target — clicking anywhere except a button opens the tool's details page
+  // carrying the header data as router state in the EXACT 6.3 ToolDetailsState
+  // shape (tool_name / tool_type_name / inventory_number / status, typed so any
+  // field drift is a compile error) so the details page can render the header
+  // without a fetch. A deep-link/refresh has no state and the details page
+  // refetches the dashboard list — unchanged. The in-flight guard: navigating
+  // away while a start or reinstate for this tool is pending would drop the
+  // in-flight confirmation/dialog state, so the navigation is skipped.
+  const handleOpenDetails = (tool: DashboardTool): void => {
+    if (pendingStarts.has(tool.id) || reinstateBusy) return
+    const state: ToolDetailsState = {
+      tool_name: tool.name,
+      tool_type_name: tool.tool_type_name,
+      inventory_number: tool.inventory_number,
+      status: tool.status,
+    }
+    navigate(`/tools/${tool.id}`, { state })
+  }
+
   // handleReinstate POSTs the reinstatement (Story 5.6, FR-15/AD-9) with the
   // reason the PromptDialog collected. The target comes from the CAPTURED
   // reinstateDialog (set at open time — never a live list lookup, so a refetch
@@ -322,7 +343,33 @@ export function DashboardPage() {
           ) : (
             <ul className={styles.list} aria-label="Werkzeuge">
               {visibleTools.map((tool) => (
-                <li key={tool.id} className={styles.row}>
+                // Story 6.1b (FR-16): the row is ONE horizontal line (status
+                // chip, name, type, Gerätenummer, action buttons) and an
+                // INTERACTIVE target: clicking anywhere except a button opens
+                // the tool details page /tools/:toolId with the EXISTING 6.3
+                // ToolDetailsState (the fast header path; a deep-link still
+                // refetches). Enter/Space activate the same navigation
+                // (keyboard parity, WCAG AA). Every interactive child that
+                // must NOT navigate stops propagation.
+                <li
+                  key={tool.id}
+                  className={styles.row}
+                  onClick={() => handleOpenDetails(tool)}
+                  onKeyDown={(e) => {
+                    // Only the row ITSELF (tabIndex 0) activates the details —
+                    // a keydown that bubbles from a child control (e.g. the
+                    // start/reinstate button) must NOT also navigate. A HELD
+                    // key fires repeated keydowns (e.repeat) — only the first
+                    // press may navigate.
+                    if (e.target !== e.currentTarget || e.repeat) return
+                    if (e.key === 'Enter' || e.key === ' ') {
+                      e.preventDefault()
+                      handleOpenDetails(tool)
+                    }
+                  }}
+                  tabIndex={0}
+                  aria-label={`Details für ${tool.name} öffnen`}
+                >
                   <div className={styles.rowMain}>
                     <div className={styles.rowInfo}>
                       <span className={styles.rowName}>{tool.name}</span>
@@ -349,7 +396,12 @@ export function DashboardPage() {
                             pendingStarts.has(tool.id)
                           }
                           aria-label={`Prüfung starten für ${tool.name}`}
-                          onClick={() => void handleStart(tool)}
+                          // stopPropagation: the start action runs WITHOUT row
+                          // navigation (Story 6.1b, ROW_START).
+                          onClick={(e) => {
+                            e.stopPropagation()
+                            void handleStart(tool)
+                          }}
                         >
                           Prüfung starten
                         </button>
@@ -359,7 +411,12 @@ export function DashboardPage() {
                             className={styles.reinstateButton}
                             disabled={reinstateBusy}
                             aria-label={`Wiederherstellen für ${tool.name}`}
-                            onClick={() => setReinstateDialog({ toolId: tool.id, toolName: tool.name })}
+                            // stopPropagation: the reinstate dialog opens
+                            // WITHOUT row navigation (Story 6.1b, ROW_REINSTATE).
+                            onClick={(e) => {
+                              e.stopPropagation()
+                              setReinstateDialog({ toolId: tool.id, toolName: tool.name })
+                            }}
                           >
                             Wiederherstellen
                           </button>
@@ -368,7 +425,13 @@ export function DashboardPage() {
                     </div>
                   </div>
                   {rowErrors[tool.id] && (
-                    <p role="alert" className={styles.rowError}>
+                    // stopPropagation: a row error never triggers navigation
+                    // (Story 6.1b, ROW_ERROR).
+                    <p
+                      role="alert"
+                      className={styles.rowError}
+                      onClick={(e) => e.stopPropagation()}
+                    >
                       {rowErrors[tool.id]}
                     </p>
                   )}
