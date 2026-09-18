@@ -1234,6 +1234,91 @@ const SYSTEM_SETTING_META: Record<string, SystemSettingMeta> = {
   },
 }
 
+// SYSTEM_SETTING_GROUPS is the display grouping of the System settings (user
+// decision 2026-09-18): the 21 atomic settings are rendered under 8 German
+// category headings instead of one flat table. Keys within a group keep the
+// server's seed order (groups list them in that order). Every seeded key must
+// appear in EXACTLY one group; the render falls back to an "Weitere" group for
+// any future key not listed here (server-authoritative value/type unchanged).
+interface SystemSettingGroup {
+  label: string
+  keys: readonly string[]
+}
+
+const SYSTEM_SETTING_GROUPS: readonly SystemSettingGroup[] = [
+  {
+    label: 'E-Mail-Versand',
+    keys: ['smtp_dial_timeout', 'smtp_protocol_timeout'],
+  },
+  {
+    label: 'Backup',
+    keys: ['backup_dial_timeout', 'backup_protocol_timeout'],
+  },
+  {
+    label: 'Passwort & Kontowiederherstellung',
+    keys: ['password_reset_ttl', 'admin_recovery_ttl', 'forgot_throttle_interval'],
+  },
+  {
+    label: 'Zwei-Faktor-Authentifizierung (MFA)',
+    keys: ['otp_ttl', 'otp_length', 'mfa_enrollment_window'],
+  },
+  {
+    label: 'Anmeldesperre',
+    keys: [
+      'lockout_threshold_short',
+      'lockout_threshold_long',
+      'lockout_duration_short',
+      'lockout_duration_long',
+      'lockout_max_failed_count',
+    ],
+  },
+  {
+    label: 'Attribute',
+    keys: ['attribute_key_max_runes', 'attributes_max_size'],
+  },
+  {
+    label: 'Inventarnummern',
+    keys: ['inventory_prefix', 'inventory_width'],
+  },
+  {
+    label: 'Prüfung & Qualifikation',
+    keys: ['inspection_orange_window_days', 'qualification_expiring_soon_window'],
+  },
+]
+
+// settingsByGroup partitions the loaded settings into the SYSTEM_SETTING_GROUPS
+// buckets (a map keyed by the group's label), keeping the server seed order
+// within each group. A setting whose key is not in any group lands in the
+// "Weitere Einstellungen" bucket so an unknown/drifted key is still editable,
+// never hidden (matches the server-authoritative contract).
+function settingsByGroup(settings: SystemSetting[]): Array<{ label: string; items: SystemSetting[] }> {
+  const byLabel = new Map<string, SystemSetting[]>()
+  for (const group of SYSTEM_SETTING_GROUPS) {
+    byLabel.set(group.label, [])
+  }
+  const rest: SystemSetting[] = []
+  const grouped = new Set<string>()
+  for (const group of SYSTEM_SETTING_GROUPS) {
+    for (const key of group.keys) {
+      const setting = settings.find((s) => s.key === key)
+      if (setting) {
+        byLabel.get(group.label)!.push(setting)
+        grouped.add(key)
+      }
+    }
+  }
+  for (const setting of settings) {
+    if (!grouped.has(setting.key)) rest.push(setting)
+  }
+  const out: Array<{ label: string; items: SystemSetting[] }> = []
+  for (const group of SYSTEM_SETTING_GROUPS) {
+    const items = byLabel.get(group.label)!
+    if (items.length > 0) out.push({ label: group.label, items })
+  }
+  if (rest.length > 0) out.push({ label: 'Weitere Einstellungen', items: rest })
+  return out
+}
+
 // formatDuration renders a whole-second duration as a friendly German label
 // (e.g. "30 Minuten", "15 Minuten", "30 Tage", "10 Sekunden").
 function formatDuration(totalSeconds: number): string {
@@ -1377,101 +1462,108 @@ function SystemSettingsTab({ onApiError }: { onApiError: (err: unknown) => boole
           Keine System-Einstellungen vorhanden.
         </p>
       ) : (
-        <table className={styles.systemTable} aria-label="System-Einstellungen">
-          <thead>
-            <tr>
-              <th scope="col" className={styles.systemTh}>
-                Einstellung
-              </th>
-              <th scope="col" className={styles.systemTh}>
-                Aktueller Wert
-              </th>
-              <th scope="col" className={styles.systemTh}>
-                Neuer Wert
-              </th>
-              <th scope="col" className={styles.systemTh}>
-                <span className={styles.visuallyHidden}>Info</span>
-              </th>
-            </tr>
-          </thead>
-          <tbody>
-            {settings.map((setting) => {
-              const meta = SYSTEM_SETTING_META[setting.key] ?? { label: setting.key, help: '' }
-              const busy = busyKeys.has(setting.key)
-              const rowFeedback = feedback[setting.key]
-              return (
-                <tr key={setting.key} className={styles.systemRow}>
-                  <td className={styles.systemCell}>
-                    <span className={styles.systemName}>{meta.label}</span>
-                    <span className={styles.systemKey}>{setting.key}</span>
-                  </td>
-                  <td className={styles.systemCell}>
-                    <span className={styles.systemValue}>{formatCurrentValue(setting)}</span>
-                  </td>
-                  <td className={styles.systemCell}>
-                    <div className={styles.systemEdit}>
-                      <label className={styles.visuallyHidden} htmlFor={`setting-${setting.key}`}>
-                        {meta.label} bearbeiten
-                      </label>
-                      {setting.value_type === 'text' ? (
-                        <input
-                          id={`setting-${setting.key}`}
-                          className={styles.input}
-                          value={drafts[setting.key] ?? String(setting.value)}
-                          disabled={busy}
-                          onChange={(e) => {
-                            setDrafts((prev) => ({ ...prev, [setting.key]: e.target.value }))
-                            setRowFeedback(setting.key, null)
-                          }}
-                          maxLength={64}
-                          autoComplete="off"
-                        />
-                      ) : (
-                        <input
-                          id={`setting-${setting.key}`}
-                          className={styles.input}
-                          type="number"
-                          min={0}
-                          step={1}
-                          value={drafts[setting.key] ?? String(setting.value)}
-                          disabled={busy}
-                          onChange={(e) => {
-                            setDrafts((prev) => ({ ...prev, [setting.key]: e.target.value }))
-                            setRowFeedback(setting.key, null)
-                          }}
-                        />
-                      )}
-                      {setting.value_type === 'duration' && (
-                        <span className={styles.hint}>in Sekunden</span>
-                      )}
-                      {rowFeedback && (
-                        <p
-                          role={rowFeedback.kind === 'error' ? 'alert' : 'status'}
-                          className={rowFeedback.kind === 'error' ? styles.systemFeedbackError : styles.systemFeedbackSuccess}
-                        >
-                          {rowFeedback.message}
-                        </p>
-                      )}
-                    </div>
-                  </td>
-                  <td className={styles.systemCell}>
-                    <div className={styles.systemActions}>
-                      <InfoPopup title={meta.label} description={meta.help} />
-                      <button
-                        type="button"
-                        className={styles.rowButton}
-                        disabled={busy}
-                        onClick={() => void saveRow(setting)}
-                      >
-                        {busy ? 'Speichert...' : 'Speichern'}
-                      </button>
-                    </div>
-                  </td>
-                </tr>
-              )
-            })}
-          </tbody>
-        </table>
+        <>
+          {settingsByGroup(settings).map((group) => (
+            <section key={group.label} className={styles.systemGroup} aria-label={group.label}>
+              <h4 className={styles.systemGroupTitle}>{group.label}</h4>
+              <table className={styles.systemTable} aria-label={group.label}>
+                <thead>
+                  <tr>
+                    <th scope="col" className={styles.systemTh}>
+                      Einstellung
+                    </th>
+                    <th scope="col" className={styles.systemTh}>
+                      Aktueller Wert
+                    </th>
+                    <th scope="col" className={styles.systemTh}>
+                      Neuer Wert
+                    </th>
+                    <th scope="col" className={styles.systemTh}>
+                      <span className={styles.visuallyHidden}>Info</span>
+                    </th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {group.items.map((setting) => {
+                    const meta = SYSTEM_SETTING_META[setting.key] ?? { label: setting.key, help: '' }
+                    const busy = busyKeys.has(setting.key)
+                    const rowFeedback = feedback[setting.key]
+                    return (
+                      <tr key={setting.key} className={styles.systemRow}>
+                        <td className={styles.systemCell}>
+                          <span className={styles.systemName}>{meta.label}</span>
+                          <span className={styles.systemKey}>{setting.key}</span>
+                        </td>
+                        <td className={styles.systemCell}>
+                          <span className={styles.systemValue}>{formatCurrentValue(setting)}</span>
+                        </td>
+                        <td className={styles.systemCell}>
+                          <div className={styles.systemEdit}>
+                            <label className={styles.visuallyHidden} htmlFor={`setting-${setting.key}`}>
+                              {meta.label} bearbeiten
+                            </label>
+                            {setting.value_type === 'text' ? (
+                              <input
+                                id={`setting-${setting.key}`}
+                                className={styles.input}
+                                value={drafts[setting.key] ?? String(setting.value)}
+                                disabled={busy}
+                                onChange={(e) => {
+                                  setDrafts((prev) => ({ ...prev, [setting.key]: e.target.value }))
+                                  setRowFeedback(setting.key, null)
+                                }}
+                                maxLength={64}
+                                autoComplete="off"
+                              />
+                            ) : (
+                              <input
+                                id={`setting-${setting.key}`}
+                                className={styles.input}
+                                type="number"
+                                min={0}
+                                step={1}
+                                value={drafts[setting.key] ?? String(setting.value)}
+                                disabled={busy}
+                                onChange={(e) => {
+                                  setDrafts((prev) => ({ ...prev, [setting.key]: e.target.value }))
+                                  setRowFeedback(setting.key, null)
+                                }}
+                              />
+                            )}
+                            {setting.value_type === 'duration' && (
+                              <span className={styles.hint}>in Sekunden</span>
+                            )}
+                            {rowFeedback && (
+                              <p
+                                role={rowFeedback.kind === 'error' ? 'alert' : 'status'}
+                                className={rowFeedback.kind === 'error' ? styles.systemFeedbackError : styles.systemFeedbackSuccess}
+                              >
+                                {rowFeedback.message}
+                              </p>
+                            )}
+                          </div>
+                        </td>
+                        <td className={styles.systemCell}>
+                          <div className={styles.systemActions}>
+                            <InfoPopup title={meta.label} description={meta.help} />
+                            <button
+                              type="button"
+                              className={styles.rowButton}
+                              disabled={busy}
+                              onClick={() => void saveRow(setting)}
+                            >
+                              {busy ? 'Speichert...' : 'Speichern'}
+                            </button>
+                          </div>
+                        </td>
+                      </tr>
+                    )
+                  })}
+                </tbody>
+              </table>
+            </section>
+          ))}
+        </>
       )}
     </>
   )

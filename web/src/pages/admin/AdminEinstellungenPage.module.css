@@ -474,6 +474,23 @@
   box-sizing: border-box;
 }
 
+/* System-settings grouping (user decision 2026-09-18): the 21 settings render
+   under 8 German category headings instead of one flat table. Each group is a
+   labelled section with its own table. */
+.systemGroup {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-2);
+}
+
+.systemGroupTitle {
+  margin: 0;
+  font-size: var(--gear-font-subheading-size);
+  font-weight: var(--gear-font-subheading-weight);
+  line-height: var(--gear-font-subheading-line-height);
+  color: var(--gear-color-ink-primary);
+}
+
 .systemTh {
   text-align: left;
   padding: var(--gear-space-3) var(--gear-space-4);

@@ -808,11 +808,36 @@ describe('AdminEinstellungenPage System tab', () => {
     stubFetchRoutes([stubSystemList(systemSettingsFixture())])
     renderPage()
 
-    expect(await screen.findByRole('table', { name: 'System-Einstellungen' })).toBeInTheDocument()
+    // The settings render under category headings; the first table is the
+    // E-Mail-Versand group.
+    expect(await screen.findByRole('table', { name: 'E-Mail-Versand' })).toBeInTheDocument()
+    expect(screen.getByRole('heading', { name: 'E-Mail-Versand' })).toBeInTheDocument()
     expect(screen.getByRole('tab', { name: 'System' })).toBeInTheDocument()
     expect(screen.queryByRole('tab', { name: 'E-Mail' })).not.toBeInTheDocument()
     expect(screen.queryByRole('tab', { name: 'Backup' })).not.toBeInTheDocument()
     expect(screen.queryByRole('tab', { name: 'Zeitpläne' })).not.toBeInTheDocument()
+  })
+
+  it('SPA_CATEGORIES: the 21 settings are grouped under the 8 German category headings', async () => {
+    stubFetchRoutes([stubSystemList(systemSettingsFixture())])
+    renderPage()
+
+    await screen.findByRole('table', { name: 'E-Mail-Versand' })
+    const headings = [
+      'E-Mail-Versand',
+      'Backup',
+      'Passwort & Kontowiederherstellung',
+      'Zwei-Faktor-Authentifizierung (MFA)',
+      'Anmeldesperre',
+      'Attribute',
+      'Inventarnummern',
+      'Prüfung & Qualifikation',
+    ]
+    for (const heading of headings) {
+      expect(screen.getByRole('heading', { name: heading })).toBeInTheDocument()
+    }
+    // Every one of the 21 settings still renders (one save button each).
+    expect(screen.getAllByRole('button', { name: 'Speichern' })).toHaveLength(21)
   })
 
   it('SPA_TABLE: every setting row renders German name, formatted value, typed input and a "?" button', async () => {
