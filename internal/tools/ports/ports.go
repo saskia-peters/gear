@@ -107,4 +107,13 @@ type Service interface {
 	// through the DisplayNameResolver seam (a missing user row maps to the
 	// literal "Deleted User", Story 3.4 forward-compat).
 	ListInspectionHistory(ctx context.Context, actorID, toolID string) (*core.ToolHistory, error)
+	// ExportStatusReport returns the status-report PDF rows (Story 6.2, FR-17):
+	// every ACTIVE tool's derived status (the same clock function the dashboard
+	// renders) + the latest-inspection inputs, filtered to filterCodes (empty =
+	// "Alle"). The server re-derives every status (never trusts the client, only
+	// the filter codes travel). Re-checks `report.export` defense-in-depth
+	// (AD-6): a non-holder answers ErrForbidden with no report data. Inspector
+	// display names resolve through the DisplayNameResolver seam in ONE call (a
+	// missing user row maps to the literal "Deleted User").
+	ExportStatusReport(ctx context.Context, actorID string, filterCodes []string) ([]*core.ReportRow, error)
 }

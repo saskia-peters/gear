@@ -1,6 +1,7 @@
 package main
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -14,13 +15,13 @@ import (
 	"testing"
 	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/go-chi/chi/v5"
+	"github.com/jackc/pgx/v5/pgxpool"
 
 	adminhttp "github.com/saskia-peters/gear/internal/admin/adapters/http"
+	admsmtp "github.com/saskia-peters/gear/internal/admin/adapters/smtp"
 	admcore "github.com/saskia-peters/gear/internal/admin/core"
 	adminports "github.com/saskia-peters/gear/internal/admin/ports"
-	admsmtp "github.com/saskia-peters/gear/internal/admin/adapters/smtp"
 	"github.com/saskia-peters/gear/internal/platform/auth"
 	"github.com/saskia-peters/gear/internal/platform/crypto"
 	"github.com/saskia-peters/gear/internal/platform/httpapi"
@@ -676,6 +677,7 @@ func TestCompositionScheduleWriteVerbs(t *testing.T) {
 		t.Errorf("email-only POST archive: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
 	}
 }
+
 // TestCompositionSystemWriteVerbs verifies the Story 5-2b write verb through
 // the REAL RequireAnyPermission mount: a admin.settings.system holder can PUT
 // a per-setting update on the composed system surface (200 + German
@@ -784,6 +786,13 @@ func (s *compToolTypeService) ListInspectionHistory(_ context.Context, _, _ stri
 	// An empty history fixture: the composed history mount-gate test only needs
 	// the service to be reached (the DTO shape is pinned in the http suite).
 	return &toolscore.ToolHistory{Inspections: []*toolscore.ToolHistoryInspection{}, Reinstatements: []*toolscore.ToolHistoryReinstatement{}}, nil
+}
+
+func (s *compToolTypeService) ExportStatusReport(_ context.Context, _ string, _ []string) ([]*toolscore.ReportRow, error) {
+	// An empty report fixture: the composed report mount-gate test only needs
+	// the service to be reached (the PDF magic + content type are pinned in the
+	// http suite).
+	return []*toolscore.ReportRow{}, nil
 }
 
 var _ toolports.Service = (*compToolTypeService)(nil)
@@ -1191,6 +1200,7 @@ func newCompositionToolsRouter(perms []string, session *usercore.Session) http.H
 	inspectionSurface := auth.RequirePermission(validator, resolver, toolscore.InspectionSubmitPermission)(toolHandler.InspectionRoutes())
 	reinstateSurface := auth.RequirePermission(validator, resolver, toolscore.ToolReinstatePermission)(toolHandler.ReinstateRoutes())
 	historySurface := auth.RequirePermission(validator, resolver, toolscore.InspectionHistoryViewPermission)(toolHandler.HistoryRoutes())
+	reportSurface := auth.RequirePermission(validator, resolver, toolscore.ReportExportPermission)(toolHandler.ReportRoutes())
 	toolsSurface := chi.NewRouter()
 	toolsSurface.NotFound(httpapi.NotFoundHandler())
 	toolsSurface.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
@@ -1198,6 +1208,7 @@ func newCompositionToolsRouter(perms []string, session *usercore.Session) http.H
 	toolsSurface.Mount("/{id}/inspection", inspectionSurface)
 	toolsSurface.Mount("/{id}/reinstatement", reinstateSurface)
 	toolsSurface.Mount("/{id}/history", historySurface)
+	toolsSurface.Mount("/report.pdf", reportSurface)
 
 	outer := chi.NewRouter()
 	outer.Get("/", func(w http.ResponseWriter, _ *http.Request) {
@@ -1639,4 +1650,81 @@ func TestComposedToolCreateAutoAssignsInventory(t *testing.T) {
 	if !found {
 		t.Errorf("created tool %s missing from the GET list", created.ID)
 	}
+}
+
+// TestCompositionReportMountGating verifies the Story 6.2 composition-root
+// wiring: the status report is a SIBLING sub-path of the SAME /api/v1/tools
+// router mounted at /report.pdf with ITS OWN `report.export` gate (one
+// permission per surface, AD-6) — it is NOT inherited from the dashboard or
+// inspection surfaces. A dashboard.view-but-not-report.export caller can READ
+// the Werkzeugliste but the export answers 403 with NO PDF bytes; a
+// report.export holder reaches it (application/pdf + the %PDF magic).
+func TestCompositionReportMountGating(t *testing.T) {
+	// 401: no token.
+	rec := doComposedRawRequest(newCompositionToolsRouter([]string{}, nil), "", http.MethodGet, "/api/v1/tools/report.pdf")
+	if rec.Code != http.StatusUnauthorized {
+		t.Errorf("no token: status = %d, want 401 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// 200: a report.export holder reaches the report — the in-memory service
+	// answers an empty row set and the handler renders a real PDF (a round-trip
+	// through the mounted surface: application/pdf + the %PDF magic).
+	reportRouter := newCompositionToolsRouter([]string{toolscore.ReportExportPermission}, activeUser("u-fuehrung", "fuehrung@gear.local"))
+	rec = doComposedRawRequest(reportRouter, "tok", http.MethodGet, "/api/v1/tools/report.pdf")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("report.export holder: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if ct := rec.Header().Get("Content-Type"); ct != "application/pdf" {
+		t.Errorf("Content-Type = %q, want application/pdf", ct)
+	}
+	if rec.Body.Len() == 0 || !bytes.HasPrefix(rec.Body.Bytes(), []byte("%PDF")) {
+		t.Errorf("report body does not carry the %%PDF magic (len %d)", rec.Body.Len())
+	}
+
+	// 403 with NO PDF bytes: a dashboard.view-but-not-report.export caller is
+	// denied the export (the sibling surface keeps its OWN gate), while the
+	// dashboard LIST still 200s for the same caller.
+	dashboardOnly := newCompositionToolsRouter([]string{toolscore.DashboardViewPermission}, activeUser("u-vol", "vol@gear.local"))
+	rec = doComposedRawRequest(dashboardOnly, "tok", http.MethodGet, "/api/v1/tools/report.pdf")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("dashboard.view-only report: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	if bytes.HasPrefix(rec.Body.Bytes(), []byte("%PDF")) {
+		t.Errorf("403 body leaks PDF bytes: %s", rec.Body.String())
+	}
+	if rec := doComposedJSONRequest(dashboardOnly, "tok", http.MethodGet, "/api/v1/tools", ""); rec.Code != http.StatusOK {
+		t.Errorf("dashboard.view-only list: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// REVERSE: the report holder (no dashboard.view) reaches the report but is
+	// denied the dashboard list — each surface has its OWN gate.
+	if rec := doComposedJSONRequest(reportRouter, "tok", http.MethodGet, "/api/v1/tools", ""); rec.Code != http.StatusForbidden {
+		t.Errorf("report-only list: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// REPORT_BAD_CODE through the REAL mounted router: a malformed status value
+	// (here: an empty element between commas) answers the German 400 envelope —
+	// the handler-level validation works end-to-end through the mount.
+	rec = doComposedRawRequest(reportRouter, "tok", http.MethodGet, "/api/v1/tools/report.pdf?status=green,,oos")
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("bad status filter: status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"code":"invalid_request"`) {
+		t.Errorf("bad status filter: body lacks the uniform 400 envelope: %s", rec.Body.String())
+	}
+	if bytes.HasPrefix(rec.Body.Bytes(), []byte("%PDF")) {
+		t.Errorf("bad status filter: 400 body leaks PDF bytes: %s", rec.Body.String())
+	}
+}
+
+// doComposedRawRequest issues an authenticated RAW request through the REAL
+// composed router (no JSON parsing — the report endpoint answers PDF bytes).
+func doComposedRawRequest(h http.Handler, token, method, path string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(method, path, nil)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
 }

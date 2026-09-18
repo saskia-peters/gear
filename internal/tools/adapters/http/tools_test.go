@@ -39,11 +39,11 @@ type fakeToolService struct {
 	// ReinstateTool fixture (Story 5.6): reinstateErr drives the error rows;
 	// reinstateStatus is the derived status of a success; reinstateNil simulates
 	// a nil-returning service path (a clean 500); lastReason captures the reason.
-	reinstateErr     error
-	reinstateStatus  toolscore.ToolStatus
-	reinstateNil     bool
-	lastReinstateID  string
-	lastReason       string
+	reinstateErr    error
+	reinstateStatus toolscore.ToolStatus
+	reinstateNil    bool
+	lastReinstateID string
+	lastReason      string
 	// ListInspectionHistory fixture (Story 6.3): historyErr drives the error
 	// rows; history is the returned payload (defaults to an empty history);
 	// historyNil simulates a nil-returning service path (a clean 500);
@@ -52,6 +52,16 @@ type fakeToolService struct {
 	history       *toolscore.ToolHistory
 	historyNil    bool
 	lastHistoryID string
+	// ExportStatusReport fixture (Story 6.2): reportRows is the returned rows;
+	// reportErr drives the error rows; reportNil simulates a nil-returning
+	// service path (a clean 500); lastReportFilters captures the filter codes;
+	// reportCalls counts the invocations (a malformed-filter 400 must never
+	// reach the service).
+	reportRows        []*toolscore.ReportRow
+	reportErr         error
+	reportNil         bool
+	lastReportFilters []string
+	reportCalls       int
 }
 
 func (f *fakeToolService) ListToolTypes(context.Context, string) ([]*toolscore.ToolType, error) {
@@ -227,6 +237,24 @@ func (f *fakeToolService) ListInspectionHistory(_ context.Context, _, toolID str
 	}
 	f.lastHistoryID = toolID
 	return f.history, nil
+}
+
+// ExportStatusReport serves the Story 6.2 report surface from the in-memory
+// fixture. It captures the filter codes the handler parsed from ?status= so a
+// test can assert the round-trip; reportErr/reportNil drive the error rows.
+func (f *fakeToolService) ExportStatusReport(_ context.Context, _ string, filterCodes []string) ([]*toolscore.ReportRow, error) {
+	f.reportCalls++
+	if f.reportErr != nil {
+		return nil, f.reportErr
+	}
+	if f.reportNil {
+		return nil, nil
+	}
+	f.lastReportFilters = filterCodes
+	if f.reportRows == nil {
+		return []*toolscore.ReportRow{}, nil
+	}
+	return f.reportRows, nil
 }
 
 var _ toolports.Service = (*fakeToolService)(nil)

@@ -2,7 +2,7 @@
 title: 'Status Report Export (PDF) (FR-17/AD-6)'
 type: 'feature'
 created: '2026-09-17'
-status: 'in-progress'
+status: 'done'
 review_loop_iteration: 0
 baseline_commit: 'af02dadff8c4484459ba65e1c3636f9e36b07a96'
 context:
@@ -71,9 +71,9 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] Backend: report core + store read + HTTP/PDF + mount/gate -- backend
-- [ ] SPA: export button (gated) + blob download + filter params -- SPA
-- [ ] Tests -- backend (core/order/filter/403/400/Deleted-User/never) + http (pdf magic, 403/400/401) + composition + SPA (button/blob/401/403) -- verification
+- [x] Backend: report core + store read + HTTP/PDF + mount/gate -- backend
+- [x] SPA: export button (gated) + blob download + filter params -- SPA
+- [x] Tests -- backend (core/order/filter/403/400/Deleted-User/never) + http (pdf magic, 403/400/401) + composition + SPA (button/blob/401/403) -- verification
 
 **Acceptance Criteria:**
 - Given a `report.export` holder with active filters, when they export, then a PDF of the currently filtered tool list downloads, each row naming tool, type, status, last inspection date and last inspector (FR-17/AD-5).
@@ -81,6 +81,8 @@ context:
 - Given the report renders, when a tool was never inspected or its inspector was deleted, then the columns read "–" / "Deleted User" without error.
 
 ## Spec Change Log
+
+- **Review patches (review 1, 2026-09-17):** the row box height includes bottom padding (descenders no longer overflow); the column header repeats on every page break (`SetAutoPageBreak(false)` + manual pre-check, so a row can never split without its header); an empty report renders a German empty row instead of a bare header; the PDF BODY is now content-asserted (Flate-inflated stream checks the fixture names, German labels incl. umlauts, the date, the "–" and "Deleted User" cells, the caption, and a header-repeat == page-count test) instead of only `%PDF` magic; the handler sends `Cache-Control: no-store`; `?status=`/whitespace/empty-element params answer 400 and repeated codes are deduped; timestamps render consistently in UTC with a noted timezone; the dead inspector-id guard was removed; the "service not called" assertion uses a call counter; the SPA defers `URL.revokeObjectURL`; the composed mount test now covers the 400 path; caption/label helpers are asserted directly. KEEP: the server-side fpdf table, the one-call name resolution, the shared-clock statuses, and the filter-params contract all stand as implemented. Deferred: cp1252 mangling of non-Latin-1 names (recorded in deferred-work).
 
 ## Design Notes
 
@@ -97,3 +99,37 @@ context:
 
 **Manual checks (if no CLI):**
 - As Fuehrung/Admin on the dashboard: the export button downloads a PDF; filtering by a status then exporting yields only those tools; a Helfer*in sees no button and a direct URL answers 403.
+
+## Suggested Review Order
+
+**Core report logic (entry point)**
+
+- `ExportStatusReport`: permission re-check, one schedule-catalog read, per-tool shared-clock status + latest-inspection, filter, one name resolution.
+  [`tools.go:297`](../../internal/tools/core/tools.go#L297)
+
+- The `GetLatestInspectionByTool` store read (newest + tiebreak; nil for never-inspected).
+  [`inspections_repo.go:88`](../../internal/tools/adapters/postgres/inspections_repo.go#L88)
+
+**PDF rendering + HTTP**
+
+- The fpdf renderer (title, caption, wrapping columns, header-repeat on page breaks, empty row, UTC timestamps).
+  [`report.go:193`](../../internal/tools/adapters/http/report.go#L193)
+
+- The handler (filter-param validation + dedupe, `Cache-Control: no-store`, error mapping).
+  [`report.go:103`](../../internal/tools/adapters/http/report.go#L103)
+
+- The gated mount.
+  [`main.go:201`](../../cmd/server/main.go#L201)
+
+**SPA**
+
+- The export button (gated), filter-param build, blob download, deferred revoke.
+  [`DashboardPage.tsx:330`](../../web/src/pages/DashboardPage.tsx#L330)
+
+**Tests**
+
+- The PDF-content assertions (Flate stream: names, labels, "–", Deleted User, caption, header-repeat).
+  [`report_content_test.go:1`](../../internal/tools/adapters/http/report_content_test.go#L1)
+
+- Filter validation + dedupe + composed 400 path.
+  [`report_test.go:57`](../../internal/tools/adapters/http/report_test.go#L57)

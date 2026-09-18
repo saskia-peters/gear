@@ -1145,3 +1145,206 @@ describe('DashboardPage row details navigation (Story 6.1b, FR-16/6.3)', () => {
     expect(screen.getByRole('list', { name: 'Werkzeuge' })).toBeInTheDocument()
   })
 })
+
+describe('DashboardPage status report export (Story 6.2, FR-17/AD-6)', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    localStorage.setItem('gear.session_token', 'sesstoken123')
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+    cleanup()
+  })
+
+  // stubFetchReport serves the Werkzeugliste list AND the Story 6.2 report
+  // endpoint (GET /api/v1/tools/report.pdf). reportStatus/reportBody drive the
+  // report response; the mock records the requested report URLs so the
+  // ?status= param round-trip can be asserted.
+  function stubFetchReport(listBody: unknown, reportStatus: number, reportBody: unknown = null) {
+    const ok = reportStatus >= 200 && reportStatus < 300
+    const reportUrls: string[] = []
+    const mock = vi.fn().mockImplementation(async (url: string) => {
+      if (url === DASHBOARD_TOOLS_URL) {
+        return { ok: true, status: 200, json: async () => listBody }
+      }
+      if (url.startsWith(`${DASHBOARD_TOOLS_URL}/report.pdf`)) {
+        reportUrls.push(url)
+        if (ok) {
+          return {
+            ok,
+            status: reportStatus,
+            blob: async () => new Blob(['%PDF-1.4 test'], { type: 'application/pdf' }),
+          }
+        }
+        return {
+          ok,
+          status: reportStatus,
+          json: async () => reportBody ?? { error: { code: 'forbidden', message: 'Keine Berechtigung.' } },
+        }
+      }
+      return { ok: false, status: 404, json: async () => ({ error: { code: 'not_found', message: 'nope' } }) }
+    })
+    vi.stubGlobal('fetch', mock)
+    return { mock, reportUrls }
+  }
+
+  it('SPA_BUTTON_HOLDER: a report.export holder sees "Als PDF exportieren"', async () => {
+    localStorage.setItem('gear.permissions', JSON.stringify(['dashboard.view', 'report.export']))
+    stubFetchReport([dashboardToolFixture('id-w1', 'Bohrmaschine-01')], 200)
+    renderPage()
+    await screen.findByText('Bohrmaschine-01')
+
+    expect(screen.getByRole('button', { name: 'Als PDF exportieren' })).toBeInTheDocument()
+  })
+
+  it('SPA_BUTTON_NONHOLDER: a caller without report.export never sees the button (the 403 IS the gate, AD-6)', async () => {
+    localStorage.setItem('gear.permissions', JSON.stringify(['dashboard.view', 'inspection.submit']))
+    stubFetchReport([dashboardToolFixture('id-w1', 'Bohrmaschine-01')], 200)
+    renderPage()
+    await screen.findByText('Bohrmaschine-01')
+
+    expect(screen.queryByRole('button', { name: 'Als PDF exportieren' })).not.toBeInTheDocument()
+  })
+
+  it('SPA_DOWNLOAD: clicking the export downloads the server PDF with the ACTIVE filters in ?status=', async () => {
+    const user = userEvent.setup()
+    localStorage.setItem('gear.permissions', JSON.stringify(['report.export']))
+    const mixed = [
+      dashboardToolFixture('id-red', 'Rot', 'Bohrmaschine', 'GEAR000001', { status: 'red', next_due: '2026-09-01T00:00:00Z' }),
+      dashboardToolFixture('id-orange', 'Orange', 'Bohrmaschine', 'GEAR000002', { status: 'orange', next_due: '2026-09-20T00:00:00Z' }),
+    ]
+    const { reportUrls } = stubFetchReport(mixed, 200)
+    const createObjectURL = vi.fn(() => 'blob:test-pdf')
+    const revokeObjectURL = vi.fn()
+    // jsdom lacks URL.createObjectURL/revokeObjectURL — attach them to the real
+    // URL constructor so `new URL(...)` still works and the download path is
+    // observable.
+    vi.stubGlobal('URL', Object.assign(URL, { createObjectURL, revokeObjectURL }))
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    renderPage()
+    await screen.findByRole('list', { name: 'Werkzeuge' })
+
+    // Activate two filters (multi-status union), then export.
+    await user.click(screen.getByRole('button', { name: 'Überfällig' }))
+    await user.click(screen.getByRole('button', { name: 'Ausstehend' }))
+    await user.click(screen.getByRole('button', { name: 'Als PDF exportieren' }))
+
+    // The fetch carried the ACTIVE filter codes as ?status=… (red,orange in
+    // selection order, URL-encoded by URLSearchParams — the server decodes it
+    // back to a comma list and re-derives/filters, never trusts the client).
+    await waitFor(() => expect(reportUrls).toHaveLength(1))
+    expect(reportUrls[0]).toBe(`${DASHBOARD_TOOLS_URL}/report.pdf?status=red%2Corange`)
+    // The param round-trips to the server as the comma list red,orange.
+    expect(new URL(reportUrls[0], 'http://localhost').searchParams.get('status')).toBe('red,orange')
+    // The blob download fired: an object URL was created, an <a download>
+    // anchor was clicked and the URL revoked.
+    expect(createObjectURL).toHaveBeenCalledTimes(1)
+    expect(clickSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('SPA_NO_FILTER: an EMPTY filter set omits the status param (absent = "Alle")', async () => {
+    const user = userEvent.setup()
+    localStorage.setItem('gear.permissions', JSON.stringify(['report.export']))
+    const { reportUrls } = stubFetchReport([dashboardToolFixture('id-w1', 'Bohrmaschine-01')], 200)
+    vi.stubGlobal('URL', Object.assign(URL, { createObjectURL: vi.fn(() => 'blob:test'), revokeObjectURL: vi.fn() }))
+    const clickSpy = vi.spyOn(HTMLAnchorElement.prototype, 'click').mockImplementation(() => {})
+    renderPage()
+    await screen.findByText('Bohrmaschine-01')
+
+    await user.click(screen.getByRole('button', { name: 'Als PDF exportieren' }))
+
+    await waitFor(() => expect(reportUrls).toHaveLength(1))
+    expect(reportUrls[0]).toBe(`${DASHBOARD_TOOLS_URL}/report.pdf`)
+    expect(clickSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('SPA_403: a 403 on the export shows the server German message inline (stale permission cache)', async () => {
+    const user = userEvent.setup()
+    localStorage.setItem('gear.permissions', JSON.stringify(['report.export']))
+    stubFetchReport(
+      [dashboardToolFixture('id-w1', 'Bohrmaschine-01')],
+      403,
+      { error: { code: 'forbidden', message: 'Keine Berechtigung.' } },
+    )
+    renderPage()
+    await screen.findByText('Bohrmaschine-01')
+
+    await user.click(screen.getByRole('button', { name: 'Als PDF exportieren' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Keine Berechtigung.')
+    // NOT a navigation — the caller stays on the dashboard (the 403 is the gate).
+    expect(screen.queryByText('Anmeldung')).not.toBeInTheDocument()
+    expect(localStorage.getItem('gear.session_token')).toBe('sesstoken123')
+  })
+
+  it('SPA_401: a 401 on the export clears auth state and redirects to /login', async () => {
+    const user = userEvent.setup()
+    localStorage.setItem('gear.permissions', JSON.stringify(['report.export']))
+    stubFetchReport(
+      [dashboardToolFixture('id-w1', 'Bohrmaschine-01')],
+      401,
+      { error: { code: 'unauthorized', message: 'Authentifizierung erforderlich.' } },
+    )
+    renderPage()
+    await screen.findByText('Bohrmaschine-01')
+
+    await user.click(screen.getByRole('button', { name: 'Als PDF exportieren' }))
+
+    expect(await screen.findByText('Anmeldung')).toBeInTheDocument()
+    expect(localStorage.getItem('gear.session_token')).toBeNull()
+  })
+
+  it('SPA_OTHER: a non-auth export failure shows an inline German error', async () => {
+    const user = userEvent.setup()
+    localStorage.setItem('gear.permissions', JSON.stringify(['report.export']))
+    stubFetchReport(
+      [dashboardToolFixture('id-w1', 'Bohrmaschine-01')],
+      500,
+      { error: { code: 'internal_error', message: 'Ein interner Fehler ist aufgetreten.' } },
+    )
+    renderPage()
+    await screen.findByText('Bohrmaschine-01')
+
+    await user.click(screen.getByRole('button', { name: 'Als PDF exportieren' }))
+
+    const alert = await screen.findByRole('alert')
+    expect(alert).toHaveTextContent('Ein interner Fehler ist aufgetreten.')
+    expect(localStorage.getItem('gear.session_token')).toBe('sesstoken123')
+  })
+
+  it('SPA_BUSY: the export button is disabled while the fetch is in flight', async () => {
+    const user = userEvent.setup()
+    localStorage.setItem('gear.permissions', JSON.stringify(['report.export']))
+    let resolveReport: (r: unknown) => void = () => {}
+    const reportPromise = new Promise<unknown>((resolve) => {
+      resolveReport = resolve
+    })
+    const mock = vi.fn().mockImplementation(async (url: string) => {
+      if (url === DASHBOARD_TOOLS_URL) {
+        return { ok: true, status: 200, json: async () => [dashboardToolFixture('id-w1', 'Bohrmaschine-01')] }
+      }
+      if (url.startsWith(`${DASHBOARD_TOOLS_URL}/report.pdf`)) {
+        return reportPromise
+      }
+      return { ok: false, status: 404, json: async () => ({ error: { code: 'not_found', message: 'nope' } }) }
+    })
+    vi.stubGlobal('fetch', mock)
+    renderPage()
+    await screen.findByText('Bohrmaschine-01')
+
+    const button = screen.getByRole('button', { name: 'Als PDF exportieren' })
+    await user.click(button)
+
+    // While in flight the button is disabled (no double export).
+    expect(button).toBeDisabled()
+
+    resolveReport({
+      ok: true,
+      status: 200,
+      blob: async () => new Blob(['%PDF'], { type: 'application/pdf' }),
+    })
+    await waitFor(() => expect(button).not.toBeDisabled())
+  })
+})

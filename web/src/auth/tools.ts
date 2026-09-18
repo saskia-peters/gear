@@ -10,6 +10,7 @@
 // archived_at) — the client never hard-deletes.
 
 import { ApiError, request, authTokenHeaders } from './http.ts'
+import type { StatusCode } from '../types/filters.ts'
 
 // Permission codes gating the two Tool surfaces (AD-6, server-side source of
 // truth). Kept here so the per-tab gating cannot drift from the server code.
@@ -34,6 +35,11 @@ export const REINSTATE_PERMISSION = 'tool.reinstate'
 // for non-holders as a courtesy; the SERVER is the gate (a non-holder answers
 // the uniform 403 with no data).
 export const HISTORY_PERMISSION = 'inspection.history.view'
+// REPORT_EXPORT_PERMISSION (Story 6.2, FR-17/AD-6) is the status-report gate
+// code: only Fuehrung/Admin holders (the base roles seed it) see the "Als PDF
+// exportieren" button, mirroring the server const ReportExportPermission. The
+// SERVER is the gate (a non-holder answers the uniform 403 with no PDF bytes).
+export const REPORT_EXPORT_PERMISSION = 'report.export'
 
 export type InspectionMode = 'pass_fail' | 'checklist'
 
@@ -536,6 +542,46 @@ export async function listToolHistory(toolId: string): Promise<ToolHistory> {
     ? raw.reinstatements.filter(isHistoryRecord)
     : []) as unknown as ToolReinstatementHistory[]
   return { inspections, reinstatements }
+}
+
+// ============================================================================
+// Status report export (Story 6.2, FR-17/AD-6/AD-5): GET /api/v1/tools/report.pdf
+// renders the dashboard's CURRENT view as a shareable PDF. Gated by
+// `report.export` on the server — the SPA shows the button ONLY to holders (the
+// server is the gate; a non-holder answers the uniform 403 with no PDF bytes).
+// The active status filter codes travel as ?status=… (absent = "Alle"); the
+// server RE-DERIVES every status itself — the client never sends statuses.
+// ============================================================================
+
+// exportStatusReportPdf fetches the status report PDF as a Blob (Story 6.2):
+// the active status filter codes build ?status=… (an EMPTY set omits the param
+// — "Alle"). The server renders the PDF (pure server-side — the client only
+// downloads); the caller triggers the download. 200 → the blob; 401 →
+// ApiError (stale/revoked session, the caller logs in again); 403 → ApiError
+// with the server's German message (stale permission cache — no PDF data,
+// AD-6); other → ApiError with the server's German message.
+export async function exportStatusReportPdf(filterCodes: readonly StatusCode[]): Promise<Blob> {
+  const params = new URLSearchParams()
+  if (filterCodes.length > 0) {
+    params.set('status', filterCodes.join(','))
+  }
+  const qs = params.toString()
+  const url = `${DASHBOARD_TOOLS_URL}/report.pdf${qs ? `?${qs}` : ''}`
+  let res: Response
+  try {
+    res = await fetch(url, { headers: authTokenHeaders() })
+  } catch {
+    throw new ApiError(0, 'Verbindung zum Server fehlgeschlagen. Bitte prüfe deine Internetverbindung.')
+  }
+  if (!res.ok) {
+    const body = await res.json().catch(() => null)
+    const msg = (body as { error?: { message?: unknown } } | null)?.error?.message
+    throw new ApiError(
+      res.status,
+      typeof msg === 'string' && msg !== '' ? msg : 'Der Export ist fehlgeschlagen.',
+    )
+  }
+  return res.blob()
 }
 
 export { ApiError, DASHBOARD_TOOLS_URL }

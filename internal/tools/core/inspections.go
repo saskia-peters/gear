@@ -45,6 +45,15 @@ const ToolReinstatePermission = "tool.reinstate"
 // route mount, the core re-check and the SPA-facing documentation never drift.
 const InspectionHistoryViewPermission = "inspection.history.view"
 
+// ReportExportPermission is the server-authoritative gate code for the status
+// report export surface (Story 6.2, FR-17/AD-6): `GET /api/v1/tools/report.pdf`.
+// Only Fuehrung/Admin holders (the base roles seed report.export) reach it —
+// the PDF is a SHAREABLE artifact of the dashboard's current view and must not
+// leak to non-holders (a non-holder answers the uniform 403 with NO PDF bytes,
+// AD-6). One Go const so the route mount, the core re-check and the
+// SPA-facing documentation never drift.
+const ReportExportPermission = "report.export"
+
 // DeletedUserDisplayName is the literal name shown for an inspector/actor whose
 // user account no longer exists (Story 3.4 DSGVO forward-compat, AD-8): the
 // plain FK-less inspector_id/actor_id resolves through the DisplayNameResolver
@@ -310,6 +319,16 @@ type ToolInspectionStatus struct {
 	LastReinstatedAt *time.Time
 }
 
+// LatestInspection is the status-report read input (Story 6.2, FR-17): the
+// LATEST inspection of a tool (ANY result — pass OR fail) → its submitted_at
+// (the "Zuletzt geprüft" column) + the inspector_id (the "Prüfer/in" column,
+// resolved through the DisplayNameResolver seam at the core, AD-8). A tool with
+// no inspections answers nil (the PDF renders "–" in both columns).
+type LatestInspection struct {
+	SubmittedAt time.Time
+	InspectorID string
+}
+
 // InspectionStore is the outbound persistence port over the Tool-owned
 // inspections + inspection_items + reinstatements tables (AD-10/AD-11).
 // InsertInspection persists an inspection AND its snapshot items in ONE
@@ -339,6 +358,13 @@ type InspectionStore interface {
 	// deterministic). A tool with no reinstatements answers an EMPTY list,
 	// nil-safe.
 	ListReinstatementsByTool(ctx context.Context, toolID string) ([]*Reinstatement, error)
+	// GetLatestInspectionByTool reads the LATEST inspection of a tool (ANY
+	// result — Story 6.2, FR-17): the report's "Zuletzt geprüft" + "Prüfer/in"
+	// inputs. The submitted_at DESC, id DESC tiebreak is deterministic (the
+	// 000027 index inspections_tool_id_submitted_at_idx serves it). A tool with
+	// no inspections answers (nil, nil) — never an error (the report renders
+	// "–").
+	GetLatestInspectionByTool(ctx context.Context, toolID string) (*LatestInspection, error)
 }
 
 // SubmitInspection persists one inspection (SUBMIT_PASSFAIL / SUBMIT_CHECKLIST,

@@ -2,6 +2,10 @@
 
 Triage output of review loops — real, non-story-blocking findings that are not caused by (or are deliberately out of scope for) the current story. Each entry records why it is real and where it should be picked up. This file is append-only; do not modify or delete existing entries.
 
+- source_spec: `_bmad-output/implementation-artifacts/spec-6-2-status-report-export-pdf.md`
+  summary: The PDF report renders all cells through fpdf's built-in Helvetica cp1252 translation — a tool/inspector/type name containing a character outside cp1252 (Cyrillic, emoji, …) silently degrades to a placeholder glyph with no fallback policy.
+  evidence: Review finding — the report is German throughout (all current glyphs covered, verified), but user-entered names are the risk surface; embedding a Unicode TTF font is the only robust fix.
+  recommended: Embed a UTF-8 TTF (addUTF8Font) or define a sanitization policy when the report's data can carry non-Latin-1 names.
 - source_spec: `_bmad-output/implementation-artifacts/epic-5-retro-2026-09-17.md`
   summary: `inspections.go` has grown to 863 lines (history surface appended in 6.3) — over the ~800-line standing convention.
   evidence: Epic 5 retrospective G1; the file is cohesive but a one-domain file crossing the convention; splitting later is cheaper than untangling.

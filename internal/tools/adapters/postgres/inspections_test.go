@@ -525,3 +525,109 @@ func TestPostgresToolHistoryEqualTimestampTiebreak(t *testing.T) {
 		t.Fatalf("rein tiebreak order = [%s, %s], want [%s, ...] (id DESC for equal created_at)", rein[0].ID, rein[1].ID, wantFirstRein)
 	}
 }
+
+// TestPostgresGetLatestInspectionByTool exercises the Story 6.2 store read over
+// the dev database: the LATEST inspection of a tool (ANY result) with the
+// submitted_at DESC, id DESC deterministic tiebreak, a nil (nil, nil) answer
+// for a never-inspected tool and the 404 sentinel for a malformed id.
+func TestPostgresGetLatestInspectionByTool(t *testing.T) {
+	pool := toolTestPool(t)
+	ctx := context.Background()
+	t.Cleanup(func() { pool.Close() })
+
+	repo := NewRepository(New(pool))
+	toolTypeID, _ := seedToolRefs(t, ctx, pool)
+	tool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Report-Werkzeug", ToolTypeID: toolTypeID})
+	if err != nil {
+		t.Fatalf("CreateTool err = %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, "DELETE FROM inspections WHERE tool_id = $1", tool.ID)
+	})
+
+	// EMPTY: a tool with no inspections answers (nil, nil) — never an error (the
+	// report renders "–").
+	latest, err := repo.GetLatestInspectionByTool(ctx, tool.ID)
+	if err != nil {
+		t.Fatalf("GetLatestInspectionByTool(empty) err = %v", err)
+	}
+	if latest != nil {
+		t.Errorf("latest = %+v, want nil for a never-inspected tool", latest)
+	}
+
+	// NEWEST: two inspections (any result) — the newer submitted_at must win.
+	older, err := repo.InsertInspection(ctx, &core.Inspection{
+		ToolID: tool.ID, InspectorID: "00000000-0000-0000-0000-0000000000ff",
+		Mode: core.InspectionModePassFail, OverallResult: core.InspectionResultPass,
+	})
+	if err != nil {
+		t.Fatalf("InsertInspection(older) err = %v", err)
+	}
+	// Backdate the first row so the second insert deterministically wins the
+	// submitted_at DESC order.
+	if _, err := pool.Exec(ctx, "UPDATE inspections SET submitted_at = $1 WHERE id = $2",
+		older.SubmittedAt.Add(-24*time.Hour), older.ID); err != nil {
+		t.Fatalf("backdating older inspection err = %v", err)
+	}
+	newer, err := repo.InsertInspection(ctx, &core.Inspection{
+		ToolID: tool.ID, InspectorID: "00000000-0000-0000-0000-0000000000ff",
+		Mode: core.InspectionModePassFail, OverallResult: core.InspectionResultFail,
+	})
+	if err != nil {
+		t.Fatalf("InsertInspection(newer) err = %v", err)
+	}
+
+	latest, err = repo.GetLatestInspectionByTool(ctx, tool.ID)
+	if err != nil {
+		t.Fatalf("GetLatestInspectionByTool err = %v", err)
+	}
+	if latest == nil {
+		t.Fatal("latest = nil, want the newest inspection")
+	}
+	if !latest.SubmittedAt.Equal(newer.SubmittedAt) {
+		t.Errorf("latest.SubmittedAt = %v, want the newer inspection's %v", latest.SubmittedAt, newer.SubmittedAt)
+	}
+	if latest.InspectorID != "00000000-0000-0000-0000-0000000000ff" {
+		t.Errorf("latest.InspectorID = %q, want the inspector id", latest.InspectorID)
+	}
+
+	// TIEBREAK: two inspections at the EXACT same submitted_at → the id DESC
+	// tiebreak decides. The DB-generated uuidv7 ids are monotonic, so the second
+	// insert carries the lexicographically-greater id. The winner is made
+	// observable via distinct inspector ids on the two equal-timestamp rows.
+	inspectorHigh := "00000000-0000-0000-0000-0000000000aa"
+	inspectorLow := "00000000-0000-0000-0000-0000000000bb"
+	for _, row := range []struct {
+		id        string
+		inspector string
+		submitted string
+	}{
+		{older.ID, inspectorLow, "2026-01-01T00:00:00Z"},
+		{newer.ID, inspectorHigh, "2026-01-01T00:00:00Z"},
+	} {
+		if _, err := pool.Exec(ctx,
+			"UPDATE inspections SET submitted_at = $1, inspector_id = $2 WHERE id = $3",
+			row.submitted, row.inspector, row.id); err != nil {
+			t.Fatalf("pinning equal submitted_at err = %v", err)
+		}
+	}
+	wantInspector := inspectorHigh
+	if older.ID > newer.ID {
+		wantInspector = inspectorLow
+	}
+	latest, err = repo.GetLatestInspectionByTool(ctx, tool.ID)
+	if err != nil {
+		t.Fatalf("GetLatestInspectionByTool(tiebreak) err = %v", err)
+	}
+	if latest == nil {
+		t.Fatal("latest = nil, want the tiebroken newest inspection")
+	}
+	if latest.InspectorID != wantInspector {
+		t.Errorf("tiebreak latest.InspectorID = %q, want %q (id DESC for equal submitted_at)", latest.InspectorID, wantInspector)
+	}
+
+	// A malformed tool id answers the 404 sentinel (never a raw parse error).
+	if _, err := repo.GetLatestInspectionByTool(ctx, "nonsense"); !errors.Is(err, core.ErrToolNotFound) {
+		t.Fatalf("malformed id err = %v, want ErrToolNotFound", err)
+	}
+}

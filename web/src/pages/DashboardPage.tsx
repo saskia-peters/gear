@@ -7,7 +7,7 @@ import { FilterChips } from '../components/FilterChips.tsx'
 import { EmptyState } from '../components/EmptyState.tsx'
 import { PromptDialog } from '../components/PromptDialog.tsx'
 import { clearAuthState, hasPermission } from '../auth/authState.ts'
-import { listDashboardTools, reinstateTool, REINSTATE_PERMISSION, startInspection } from '../auth/tools.ts'
+import { listDashboardTools, reinstateTool, REINSTATE_PERMISSION, startInspection, exportStatusReportPdf, REPORT_EXPORT_PERMISSION } from '../auth/tools.ts'
 import type { DashboardTool } from '../auth/tools.ts'
 import { statusLabel, statusClassKey, type StatusCode } from '../types/filters.ts'
 import type { ToolDetailsState } from './ToolDetailsPage.tsx'
@@ -87,6 +87,15 @@ export function DashboardPage() {
   // canReinstate (Story 5.6, FR-15/AD-9): the "Wiederherstellen" button renders
   // ONLY for tool.reinstate holders — mirroring the server gate (AD-6).
   const canReinstate = hasPermission(REINSTATE_PERMISSION)
+  // canExportReport (Story 6.2, FR-17/AD-6): the "Als PDF exportieren" button
+  // renders ONLY for report.export holders — mirroring the server gate (AD-6).
+  const canExportReport = hasPermission(REPORT_EXPORT_PERMISSION)
+  // exportBusy disables the export button while the fetch is in flight
+  // (double-submit guard); exportError is the inline German error (a stale
+  // 403 permission cache, a server failure, ...). The export downloads the
+  // server-rendered PDF — the SPA never generates one.
+  const [exportBusy, setExportBusy] = useState(false)
+  const [exportError, setExportError] = useState('')
 
   // loadTools fetches the dashboard list (shared by the mount effect and the
   // post-reinstate refresh, Story 5.6): statuses/colors/counts update because
@@ -295,15 +304,75 @@ export function DashboardPage() {
     }
   }
 
+  // handleExport downloads the status report PDF (Story 6.2, FR-17): the ACTIVE
+  // status filters travel as ?status=… (the EMPTY set omits the param → "Alle");
+  // the server RE-DERIVES the statuses and renders the PDF — the SPA only
+  // triggers the download (a[download] + URL.createObjectURL). 401 → login
+  // (stale/revoked session); 403 → inline German error (stale permission cache
+  // — the server is the gate, AD-6); other → inline German error. The button is
+  // disabled while the fetch is in flight.
+  const handleExport = async (): Promise<void> => {
+    if (exportBusy) return
+    setExportBusy(true)
+    setExportError('')
+    // A new action starts → a stale success confirmation must not linger next
+    // to the upcoming outcome.
+    setConfirmMessage('')
+    try {
+      const blob = await exportStatusReportPdf([...selectedFilters])
+      const url = URL.createObjectURL(blob)
+      const a = document.createElement('a')
+      a.href = url
+      a.download = 'statusbericht.pdf'
+      document.body.appendChild(a)
+      a.click()
+      document.body.removeChild(a)
+      // The revoke is DEFERRED: revoking synchronously right after click() can
+      // race the browser's download initiation (e.g. Safari drops the file).
+      window.setTimeout(() => URL.revokeObjectURL(url), 0)
+    } catch (err) {
+      const status = err instanceof Error && 'status' in err ? (err as { status: number }).status : 0
+      if (status === 401) {
+        clearAuthState()
+        navigate('/login', { replace: true })
+        return
+      }
+      const message =
+        err instanceof Error && err.message !== '' ? err.message : 'Der Export ist fehlgeschlagen.'
+      setExportError(message)
+    } finally {
+      setExportBusy(false)
+    }
+  }
+
   return (
     <div className={styles.page}>
       <Header />
       <main className={styles.main}>
         <section className={styles.titleSection}>
-          <h2 className={styles.pageTitle}>Übersicht</h2>
-          <p className={styles.pageSubtitle}>
-            G.E.A.R. (Geräte-Einsatz-Assistenz &amp; Readiness) — Geräteverwaltung &amp; Einsatzbereitschaft
-          </p>
+          <div className={styles.headerRow}>
+            <div className={styles.headerText}>
+              <h2 className={styles.pageTitle}>Übersicht</h2>
+              <p className={styles.pageSubtitle}>
+                G.E.A.R. (Geräte-Einsatz-Assistenz &amp; Readiness) — Geräteverwaltung &amp; Einsatzbereitschaft
+              </p>
+            </div>
+            {/* Story 6.2 (FR-17/AD-6): the "Als PDF exportieren" control renders
+                ONLY for report.export holders (hide = the UX half of AD-6; the
+                SERVER is the gate — a non-holder answers 403 with no PDF bytes).
+                On click it downloads the server-rendered PDF of the CURRENTLY
+                FILTERED tool list (?status=… from the active filters). */}
+            {canExportReport && (
+              <button
+                type="button"
+                className={styles.exportButton}
+                disabled={exportBusy}
+                onClick={() => void handleExport()}
+              >
+                Als PDF exportieren
+              </button>
+            )}
+          </div>
         </section>
 
         <SummaryGrid counts={counts} onToggleFilter={toggleStatusFilter} />
@@ -317,6 +386,13 @@ export function DashboardPage() {
           {loadError && (
             <p role="alert" className={styles.error}>
               {loadError}
+            </p>
+          )}
+          {exportError && (
+            // Story 6.2: an inline German error when the export fails (e.g. a
+            // stale 403 permission cache — the server is the gate, AD-6).
+            <p role="alert" className={styles.error}>
+              {exportError}
             </p>
           )}
           {confirmMessage && (

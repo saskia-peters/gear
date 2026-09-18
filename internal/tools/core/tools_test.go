@@ -46,6 +46,12 @@ type fakeToolStore struct {
 	// fields above.
 	statusByTool    map[string]*ToolInspectionStatus
 	statusErrByTool map[string]error
+	// latestByTool drives the PER-TOOL latest-inspection fixtures for the status
+	// report (Story 6.2): keyed by tool id; a tool ABSENT from the map reads as
+	// never-inspected (nil latest — the report renders "–"). latestByToolErr
+	// lets tests simulate a read failure.
+	latestByTool    map[string]*LatestInspection
+	latestByToolErr error
 	// reinstatements / reinstateErr back the Story 5.6 InsertReinstatement
 	// write: tests assert the persisted actor + reason; an error simulates a
 	// storage failure.
@@ -183,6 +189,17 @@ func (f *fakeToolStore) ListReinstatementsByTool(_ context.Context, toolID strin
 		return out[i].CreatedAt.After(out[j].CreatedAt)
 	})
 	return out, nil
+}
+
+// GetLatestInspectionByTool returns the tool's latest-inspection fixture (Story
+// 6.2): the per-tool latestByTool map, with a tool ABSENT from the map reading
+// as never-inspected (nil — the report renders "–"). latestByToolErr lets tests
+// simulate a read failure.
+func (f *fakeToolStore) GetLatestInspectionByTool(_ context.Context, toolID string) (*LatestInspection, error) {
+	if f.latestByToolErr != nil {
+		return nil, f.latestByToolErr
+	}
+	return f.latestByTool[toolID], nil
 }
 
 func (f *fakeToolStore) ListTools(context.Context) ([]*Tool, error) {
@@ -648,7 +665,7 @@ func TestUpdateToolKeepsItsName(t *testing.T) {
 	svc, store, _ := newToolService()
 	store.tools = []*Tool{toolFixture("id-a", "Bohrmaschine-01")}
 
-	input := toolInput() // name "Bohrmaschine-01" == the stored name
+	input := toolInput()       // name "Bohrmaschine-01" == the stored name
 	input.ScheduleID = "id-s1" // change only the override
 	got, err := svc.UpdateTool(context.Background(), actorID, "id-a", input)
 	if err != nil {
@@ -725,7 +742,7 @@ func TestUpdateToolArchivedSentinelWinsOverInvalidFK(t *testing.T) {
 	store.tools = []*Tool{archived}
 
 	input := toolInput()
-	input.ToolTypeID = "id-missing-type"   // invalid: would 400 a live tool
+	input.ToolTypeID = "id-missing-type"     // invalid: would 400 a live tool
 	input.ScheduleID = "id-missing-schedule" // invalid: would 400 a live tool
 	if _, err := svc.UpdateTool(context.Background(), actorID, "id-arch", input); !errors.Is(err, ErrToolNotFound) {
 		var inv *InvalidToolError
@@ -752,7 +769,7 @@ func TestUpdateToolArchivedSentinelWinsOverInvalidInventory(t *testing.T) {
 	store.tools = []*Tool{archived}
 
 	for _, mutate := range []func(*ToolInput){
-		func(in *ToolInput) { in.InventoryNumber = "" },        // UPDATE_CLEAR: would 400 a live tool
+		func(in *ToolInput) { in.InventoryNumber = "" },                      // UPDATE_CLEAR: would 400 a live tool
 		func(in *ToolInput) { in.InventoryNumber = strings.Repeat("x", 17) }, // over-long: would 400 a live tool
 	} {
 		input := toolInput()
@@ -1581,5 +1598,201 @@ func TestUpdateToolArchivedSentinelWinsOverInvalidAttributes(t *testing.T) {
 	}
 	if _, err := svc.UpdateTool(context.Background(), actorID, "id-missing", input); !errors.Is(err, ErrToolNotFound) {
 		t.Fatalf("unknown id with invalid attributes: err = %v, want ErrToolNotFound", err)
+	}
+}
+
+// ============================================================================
+// Story 6.2 — status report export (FR-17/AD-6/AD-5): the report re-derives
+// every status server-side (never trusts the client), filters to the active
+// codes and resolves ALL inspector names in ONE bulk call.
+// ============================================================================
+
+// reportService wires a Service over ONE ACTIVE schedule (id-s1, 30 days) and a
+// tool type whose default schedule is id-s1 — so report tools derive real
+// statuses. perms defaults to the report.export holder; display names resolve
+// through a fake resolver (absent ids → "Deleted User").
+func reportService(perms ...string) (*Service, *fakeToolStore, *fakeDisplayNames) {
+	store := &fakeToolStore{
+		types: []*ToolType{{
+			ID: "id-t1", Name: "Bohrmaschine", DefaultScheduleID: "id-s1",
+			InspectionMode: InspectionModePassFail,
+		}},
+	}
+	if len(perms) == 0 {
+		perms = []string{ReportExportPermission}
+	}
+	names := &fakeDisplayNames{names: map[string]string{"u-anna": "Anna Muster"}}
+	svc := NewService(
+		store,
+		&fakeSchedulesPort{schedules: []*admcore.Schedule{{
+			ID: "id-s1", Name: "30 Tage", IntervalUnit: admcore.IntervalUnitDay, IntervalMagnitude: 30,
+		}}},
+		&fakeQualificationPort{},
+		&fakePerms{perms: perms},
+		names,
+		&fakeAudit{},
+		nil,
+	)
+	return svc, store, names
+}
+
+// reportToolFixture builds an ACTIVE tool inheriting the type's default
+// schedule (id-s1), so the report derives a real status.
+func reportToolFixture(id, name string) *Tool {
+	return &Tool{
+		ID:                id,
+		Name:              name,
+		ToolTypeID:        "id-t1",
+		ToolTypeName:      "Bohrmaschine",
+		DefaultScheduleID: "id-s1",
+		InventoryNumber:   "GEAR00000X",
+	}
+}
+
+func TestExportStatusReportGated(t *testing.T) {
+	// REPORT_GATED: a caller lacking report.export answers ErrForbidden with no
+	// report data (AD-6 — the server is the gate, never the SPA).
+	svc, store, _ := reportService("dashboard.view")
+	store.tools = []*Tool{reportToolFixture("id-a", "Bohrmaschine-01")}
+	if _, err := svc.ExportStatusReport(context.Background(), actorID, nil); !errors.Is(err, ErrForbidden) {
+		t.Fatalf("err = %v, want ErrForbidden", err)
+	}
+}
+
+func TestExportStatusReportEmptyFleet(t *testing.T) {
+	// REPORT_OK (empty fleet): no tools → an empty list WITHOUT touching the
+	// schedule catalog or the name resolver (mirroring the dashboard).
+	svc, _, names := reportService()
+	rows, err := svc.ExportStatusReport(context.Background(), actorID, nil)
+	if err != nil {
+		t.Fatalf("ExportStatusReport(empty) err = %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("rows = %d, want 0", len(rows))
+	}
+	if names.calls != 0 {
+		t.Errorf("ResolveDisplayNames calls = %d, want 0 for an empty fleet", names.calls)
+	}
+}
+
+func TestExportStatusReportAllAndFilter(t *testing.T) {
+	now := time.Now()
+	greenAnchor := now.Add(-10 * 24 * time.Hour)
+	oosAnchor := now.Add(-1 * 24 * time.Hour)
+	svc, store, _ := reportService()
+	store.tools = []*Tool{
+		reportToolFixture("id-green", "Grün"),
+		reportToolFixture("id-oos", "Oos"),
+	}
+	store.statusByTool = map[string]*ToolInspectionStatus{
+		"id-green": {LastSuccessAt: &greenAnchor},
+		"id-oos":   {LatestFailAt: &oosAnchor},
+	}
+	inspected := now.Add(-5 * 24 * time.Hour)
+	store.latestByTool = map[string]*LatestInspection{
+		"id-green": {SubmittedAt: inspected, InspectorID: "u-anna"},
+		"id-oos":   {SubmittedAt: inspected, InspectorID: "u-anna"},
+	}
+
+	// REPORT_OK: no filter → ALL tools, list order preserved, each with the
+	// server-DERIVED status + the latest-inspection inputs.
+	rows, err := svc.ExportStatusReport(context.Background(), actorID, nil)
+	if err != nil {
+		t.Fatalf("ExportStatusReport(no filter) err = %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(rows))
+	}
+	if rows[0].Tool.ID != "id-green" || rows[1].Tool.ID != "id-oos" {
+		t.Errorf("row order = %+v, want the list order preserved", rows)
+	}
+	if rows[0].Tool.Status.Status != ToolStatusCodeGreen || rows[1].Tool.Status.Status != ToolStatusCodeOOS {
+		t.Errorf("derived statuses = %q/%q, want green/oos", rows[0].Tool.Status.Status, rows[1].Tool.Status.Status)
+	}
+	if rows[0].LastInspectedAt == nil || !rows[0].LastInspectedAt.Equal(inspected) {
+		t.Errorf("rows[0].LastInspectedAt = %v, want %v", rows[0].LastInspectedAt, inspected)
+	}
+	if rows[0].LastInspectorName != "Anna Muster" {
+		t.Errorf("rows[0].LastInspectorName = %q, want the resolved display name", rows[0].LastInspectorName)
+	}
+
+	// REPORT_FILTERED: ?status=green → only the matching tool (server-derived).
+	rows, err = svc.ExportStatusReport(context.Background(), actorID, []string{"green"})
+	if err != nil {
+		t.Fatalf("ExportStatusReport(green) err = %v", err)
+	}
+	if len(rows) != 1 || rows[0].Tool.ID != "id-green" {
+		t.Fatalf("green filter rows = %+v, want only id-green", rows)
+	}
+
+	// ?status=green,oos → both tools (the union of the codes).
+	rows, err = svc.ExportStatusReport(context.Background(), actorID, []string{"green", "oos"})
+	if err != nil {
+		t.Fatalf("ExportStatusReport(green,oos) err = %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("green,oos filter rows = %d, want 2", len(rows))
+	}
+
+	// REPORT_UNKNOWN_CODE: an unknown filter code matches nothing server-side
+	// (the HTTP layer rejects it with a 400 BEFORE the core; here the core just
+	// returns no matching rows — never an error, never a leak of other tools).
+	rows, err = svc.ExportStatusReport(context.Background(), actorID, []string{"neon"})
+	if err != nil {
+		t.Fatalf("ExportStatusReport(unknown) err = %v", err)
+	}
+	if len(rows) != 0 {
+		t.Errorf("unknown filter rows = %d, want 0", len(rows))
+	}
+}
+
+func TestExportStatusReportNeverInspectedAndDeletedUser(t *testing.T) {
+	now := time.Now()
+	svc, store, names := reportService()
+	store.tools = []*Tool{
+		reportToolFixture("id-never", "Nie-geprüft"),
+		reportToolFixture("id-deleted", "Gelöscht"),
+	}
+	greenAnchor := now.Add(-10 * 24 * time.Hour)
+	store.statusByTool = map[string]*ToolInspectionStatus{
+		"id-never":   {},
+		"id-deleted": {LastSuccessAt: &greenAnchor},
+	}
+	inspected := now.Add(-5 * 24 * time.Hour)
+	store.latestByTool = map[string]*LatestInspection{
+		"id-deleted": {SubmittedAt: inspected, InspectorID: "u-gone"},
+	}
+
+	rows, err := svc.ExportStatusReport(context.Background(), actorID, nil)
+	if err != nil {
+		t.Fatalf("ExportStatusReport err = %v", err)
+	}
+	if len(rows) != 2 {
+		t.Fatalf("rows = %d, want 2", len(rows))
+	}
+
+	// REPORT_NEVER: a never-inspected tool → LastInspectedAt nil (the PDF
+	// renders "–" in the Zuletzt geprüft AND Prüfer/in columns) and its derived
+	// status reads red (AD-5).
+	if rows[0].LastInspectedAt != nil {
+		t.Errorf("rows[0].LastInspectedAt = %v, want nil (never inspected)", rows[0].LastInspectedAt)
+	}
+	if rows[0].Tool.Status.Status != ToolStatusCodeRed {
+		t.Errorf("rows[0] status = %q, want red (never-inspected derives red)", rows[0].Tool.Status.Status)
+	}
+
+	// REPORT_DELETED_USER: an inspector id with no user row → the literal
+	// "Deleted User".
+	if rows[1].LastInspectorName != DeletedUserDisplayName {
+		t.Errorf("rows[1].LastInspectorName = %q, want %q", rows[1].LastInspectorName, DeletedUserDisplayName)
+	}
+	if rows[1].LastInspectedAt == nil || !rows[1].LastInspectedAt.Equal(inspected) {
+		t.Errorf("rows[1].LastInspectedAt = %v, want %v", rows[1].LastInspectedAt, inspected)
+	}
+
+	// The spec's one-call invariant: BOTH inspector ids resolve in ONE
+	// ResolveDisplayNames call (no N+1 user reads).
+	if names.calls != 1 {
+		t.Errorf("ResolveDisplayNames calls = %d, want 1", names.calls)
 	}
 }

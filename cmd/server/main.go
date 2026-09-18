@@ -18,17 +18,17 @@ import (
 
 	"github.com/go-chi/chi/v5"
 
+	admbck "github.com/saskia-peters/gear/internal/admin/adapters/backup"
+	adminhttp "github.com/saskia-peters/gear/internal/admin/adapters/http"
+	adminpostgres "github.com/saskia-peters/gear/internal/admin/adapters/postgres"
+	admsmtp "github.com/saskia-peters/gear/internal/admin/adapters/smtp"
+	admcore "github.com/saskia-peters/gear/internal/admin/core"
 	"github.com/saskia-peters/gear/internal/platform/auth"
 	"github.com/saskia-peters/gear/internal/platform/config"
 	"github.com/saskia-peters/gear/internal/platform/crypto"
 	"github.com/saskia-peters/gear/internal/platform/httpapi"
 	"github.com/saskia-peters/gear/internal/platform/logger"
 	"github.com/saskia-peters/gear/internal/platform/router"
-	admcore "github.com/saskia-peters/gear/internal/admin/core"
-	admbck "github.com/saskia-peters/gear/internal/admin/adapters/backup"
-	adminhttp "github.com/saskia-peters/gear/internal/admin/adapters/http"
-	adminpostgres "github.com/saskia-peters/gear/internal/admin/adapters/postgres"
-	admsmtp "github.com/saskia-peters/gear/internal/admin/adapters/smtp"
 	toolhttp "github.com/saskia-peters/gear/internal/tools/adapters/http"
 	toolpostgres "github.com/saskia-peters/gear/internal/tools/adapters/postgres"
 	toolscore "github.com/saskia-peters/gear/internal/tools/core"
@@ -200,15 +200,26 @@ func main() {
 	// read the Werkzeugliste and start/submit but 403s on the history.
 	historySurface := auth.RequirePermission(sessionManager, userRepo, toolscore.InspectionHistoryViewPermission)(toolHandler.HistoryRoutes())
 
+	// Story 6.2 — the status-report surface under /api/v1/tools with its OWN
+	// gate — one permission per surface (AD-6, FR-17): only `report.export`
+	// holders (Fuehrung/Admin, the base roles seed it) reach the PDF. The core
+	// re-checks the exact code defense-in-depth (AD-6). It deliberately does NOT
+	// widen the dashboard.view / inspection.submit / tool.reinstate /
+	// inspection.history.view gates — a report-less caller can still read the
+	// Werkzeugliste and start/submit/reinstate but 403s on the export with no
+	// PDF bytes.
+	reportSurface := auth.RequirePermission(sessionManager, userRepo, toolscore.ReportExportPermission)(toolHandler.ReportRoutes())
+
 	// The two /api/v1/tools surfaces are combined into ONE router: the dashboard
 	// list (GET /, dashboard.view), the inspection start + submit (POST
 	// /{id}/inspection/start and POST /{id}/inspection, inspection.submit), the
-	// reinstatement (POST /{id}/reinstatement, tool.reinstate) and the history
-	// (GET /{id}/history, inspection.history.view). Each surface is mounted at
+	// reinstatement (POST /{id}/reinstatement, tool.reinstate), the history
+	// (GET /{id}/history, inspection.history.view) and the status report (GET
+	// /report.pdf, report.export). Each surface is mounted at
 	// the full path prefix (chi Mount strips it and preserves the {id} param) —
-	// InspectionRoutes/ReinstateRoutes/HistoryRoutes own the route patterns,
-	// never duplicated here. Each surface keeps ITS OWN gate — no shared
-	// middleware.
+	// InspectionRoutes/ReinstateRoutes/HistoryRoutes/ReportRoutes own the route
+	// patterns, never duplicated here. Each surface keeps ITS OWN gate — no
+	// shared middleware.
 	toolsSurface := chi.NewRouter()
 	toolsSurface.NotFound(httpapi.NotFoundHandler())
 	toolsSurface.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
@@ -216,6 +227,7 @@ func main() {
 	toolsSurface.Mount("/{id}/inspection", inspectionSurface)
 	toolsSurface.Mount("/{id}/reinstatement", reinstateSurface)
 	toolsSurface.Mount("/{id}/history", historySurface)
+	toolsSurface.Mount("/report.pdf", reportSurface)
 
 	// Demo route for the gateway composition tests: any active user holding
 	// `dashboard.view` (all base roles) can reach /api/v1/protected/me.

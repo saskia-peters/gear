@@ -266,6 +266,32 @@ func (q *Queries) GetLatestFailedInspection(ctx context.Context, toolID pgtype.U
 	return submitted_at, err
 }
 
+const getLatestInspectionByTool = `-- name: GetLatestInspectionByTool :one
+SELECT submitted_at, inspector_id
+FROM inspections
+WHERE tool_id = $1
+ORDER BY submitted_at DESC, id DESC
+LIMIT 1
+`
+
+type GetLatestInspectionByToolRow struct {
+	SubmittedAt pgtype.Timestamptz `json:"submitted_at"`
+	InspectorID pgtype.UUID        `json:"inspector_id"`
+}
+
+// The LATEST inspection of a tool (ANY result — Story 6.2, FR-17): the status
+// report's "Zuletzt geprüft" + "Prüfer/in" inputs. The submitted_at DESC,
+// id DESC tiebreak is deterministic (the existing 000027 index
+// inspections_tool_id_submitted_at_idx already supports it). No row →
+// pgx.ErrNoRows (the repository maps it to a nil latest, and the report renders
+// "–").
+func (q *Queries) GetLatestInspectionByTool(ctx context.Context, toolID pgtype.UUID) (GetLatestInspectionByToolRow, error) {
+	row := q.db.QueryRow(ctx, getLatestInspectionByTool, toolID)
+	var i GetLatestInspectionByToolRow
+	err := row.Scan(&i.SubmittedAt, &i.InspectorID)
+	return i, err
+}
+
 const getLatestPassInspection = `-- name: GetLatestPassInspection :one
 SELECT submitted_at
 FROM inspections

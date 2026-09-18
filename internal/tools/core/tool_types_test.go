@@ -45,14 +45,14 @@ func (f *fakeAudit) InsertAuditEvent(_ context.Context, userID, operation, detai
 // Update/Archive refuse a missing OR already-archived row with
 // ErrToolTypeNotFound (the archived row is non-existent to the surface).
 type fakeToolTypeStore struct {
-	types      []*ToolType
-	listErr    error
-	getErr     error
-	createErr  error
-	updateErr  error
-	archiveErr error
-	created    []*ToolType
-	updated    []*ToolType
+	types       []*ToolType
+	listErr     error
+	getErr      error
+	createErr   error
+	updateErr   error
+	archiveErr  error
+	created     []*ToolType
+	updated     []*ToolType
 	archivedIDs []string
 }
 
@@ -139,10 +139,18 @@ func (f *fakeToolTypeStore) ArchiveToolType(_ context.Context, id string) (*Tool
 // too. The tool-type fakes never exercise the tool surface — these stubs keep
 // the shared constructor compilable without touching tool-type tests.
 func (f *fakeToolTypeStore) ListTools(context.Context) ([]*Tool, error) { return []*Tool{}, nil }
-func (f *fakeToolTypeStore) ToolExistsActive(context.Context, string) (bool, error) { return false, nil }
-func (f *fakeToolTypeStore) CreateTool(_ context.Context, _ *Tool) (*Tool, error) { return nil, ErrToolNotFound }
-func (f *fakeToolTypeStore) UpdateTool(_ context.Context, _ *Tool) (*Tool, error) { return nil, ErrToolNotFound }
-func (f *fakeToolTypeStore) ArchiveTool(_ context.Context, _ string) (*Tool, error) { return nil, ErrToolNotFound }
+func (f *fakeToolTypeStore) ToolExistsActive(context.Context, string) (bool, error) {
+	return false, nil
+}
+func (f *fakeToolTypeStore) CreateTool(_ context.Context, _ *Tool) (*Tool, error) {
+	return nil, ErrToolNotFound
+}
+func (f *fakeToolTypeStore) UpdateTool(_ context.Context, _ *Tool) (*Tool, error) {
+	return nil, ErrToolNotFound
+}
+func (f *fakeToolTypeStore) ArchiveTool(_ context.Context, _ string) (*Tool, error) {
+	return nil, ErrToolNotFound
+}
 func (f *fakeToolTypeStore) GetToolWithTypeQualification(_ context.Context, _ string) (*ToolWithTypeQualification, error) {
 	return nil, ErrToolNotFound
 }
@@ -165,6 +173,9 @@ func (f *fakeToolTypeStore) ListInspectionsByTool(_ context.Context, _ string) (
 }
 func (f *fakeToolTypeStore) ListReinstatementsByTool(_ context.Context, _ string) ([]*Reinstatement, error) {
 	return []*Reinstatement{}, nil
+}
+func (f *fakeToolTypeStore) GetLatestInspectionByTool(_ context.Context, _ string) (*LatestInspection, error) {
+	return nil, nil
 }
 
 // fakeSchedulesPort is an adminports.SchedulesPort over a fixed ACTIVE catalog.

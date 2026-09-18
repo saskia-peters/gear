@@ -118,6 +118,10 @@ func (f *fakeService) ListInspectionHistory(_ context.Context, _, _ string) (*to
 	}, nil
 }
 
+func (f *fakeService) ExportStatusReport(_ context.Context, _ string, _ []string) ([]*toolscore.ReportRow, error) {
+	return []*toolscore.ReportRow{}, nil
+}
+
 // toolTypeGateway wraps the REAL ToolTypeRoutes() behind the same
 // RequireAnyPermission gate the composition root uses (tool_types.manage), with
 // a fake session validator + permission resolver.

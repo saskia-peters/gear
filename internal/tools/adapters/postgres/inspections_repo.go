@@ -160,6 +160,30 @@ func (r *Repository) InsertReinstatement(ctx context.Context, toolID, actorID, r
 	return err
 }
 
+// GetLatestInspectionByTool reads the LATEST inspection of a tool (ANY result —
+// Story 6.2, FR-17): the status report's "Zuletzt geprüft" + "Prüfer/in"
+// inputs. The submitted_at DESC, id DESC tiebreak is deterministic (the 000027
+// index inspections_tool_id_submitted_at_idx serves it). A malformed tool id
+// answers core.ErrToolNotFound; a tool with no inspections answers (nil, nil) —
+// the report renders "–".
+func (r *Repository) GetLatestInspectionByTool(ctx context.Context, toolID string) (*core.LatestInspection, error) {
+	uid, err := parseOptionalUUID(toolID)
+	if err != nil {
+		return nil, err
+	}
+	row, err := r.queries.GetLatestInspectionByTool(ctx, uid)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &core.LatestInspection{
+		SubmittedAt: row.SubmittedAt.Time,
+		InspectorID: row.InspectorID.String(),
+	}, nil
+}
+
 // ListInspectionsByTool reads the FULL inspection history of a tool (Story 6.3,
 // FR-18): every row reverse-chronological (submitted_at DESC, id DESC — the SQL
 // ORDER BY guarantees it) EACH WITH its snapshotted ordered checklist items. The

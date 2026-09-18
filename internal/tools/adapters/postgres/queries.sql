@@ -278,6 +278,19 @@ WHERE tool_id = $1
 ORDER BY created_at DESC, id DESC
 LIMIT 1;
 
+-- name: GetLatestInspectionByTool :one
+-- The LATEST inspection of a tool (ANY result — Story 6.2, FR-17): the status
+-- report's "Zuletzt geprüft" + "Prüfer/in" inputs. The submitted_at DESC,
+-- id DESC tiebreak is deterministic (the existing 000027 index
+-- inspections_tool_id_submitted_at_idx already supports it). No row →
+-- pgx.ErrNoRows (the repository maps it to a nil latest, and the report renders
+-- "–").
+SELECT submitted_at, inspector_id
+FROM inspections
+WHERE tool_id = $1
+ORDER BY submitted_at DESC, id DESC
+LIMIT 1;
+
 -- name: InsertReinstatement :one
 -- Persist one reinstatement (Story 5.6, FR-15/AD-9): tool, actor and the
 -- MANDATORY reason, created_at = DB now(). The reason was validated by the
