@@ -2,6 +2,10 @@
 
 Triage output of review loops — real, non-story-blocking findings that are not caused by (or are deliberately out of scope for) the current story. Each entry records why it is real and where it should be picked up. This file is append-only; do not modify or delete existing entries.
 
+- source_spec: `_bmad-output/implementation-artifacts/epic-5-retro-2026-09-17.md`
+  summary: `inspections.go` has grown to 863 lines (history surface appended in 6.3) — over the ~800-line standing convention.
+  evidence: Epic 5 retrospective G1; the file is cohesive but a one-domain file crossing the convention; splitting later is cheaper than untangling.
+  recommended: Extract the inspection-history surface (and validation helpers) into sibling files in the next inspection-domain story (e.g. an idempotency-key story or the 6.3 history follow-ups).
 - source_spec: `_bmad-output/implementation-artifacts/spec-6-3-inspection-history-per-tool.md`
   summary: The details page renders inspection/reinstatement timestamps in the browser's local timezone (formatTimestamp → toLocaleString('de-DE')), so displayed times vary per user/locale and the SPA tests are timezone-dependent.
   evidence: Review finding — the wire contract is RFC3339 UTC (per spec), but display silently switches to local time; the tests compute expected strings with the same local tz, so assertions break if CI runs in a different timezone. A display timezone policy is a product decision, not a bug.
