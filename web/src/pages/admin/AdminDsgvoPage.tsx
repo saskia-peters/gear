@@ -157,6 +157,11 @@ function ReportTab({ onApiError }: { onApiError: (err: unknown) => boolean }) {
 
   useEffect(() => {
     let cancelled = false
+    // Reset the mounted flag at the START of each effect run: React StrictMode
+    // double-invokes effects in dev (mount → cleanup → mount), so the previous
+    // run's cleanup set mounted.current = false; without this reset the guard in
+    // generate() would silently drop every response (and busy would never clear).
+    mounted.current = true
     async function run() {
       try {
         const rows = await listUsers()
