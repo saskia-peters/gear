@@ -175,9 +175,19 @@ function renderPage() {
   )
 }
 
+// selectUser types into the searchable combobox and selects the first matching
+// user by its option name (the combobox filters as you type; Enter picks the
+// active option).
+async function selectUser(user: ReturnType<typeof userEvent.setup>, query: string, optionName: string) {
+  const input = screen.getByRole('combobox', { name: 'Benutzer' })
+  await user.click(input)
+  await user.type(input, query)
+  await user.click(screen.getByRole('option', { name: new RegExp(optionName) }))
+}
+
 async function generateReportForTim() {
   const user = userEvent.setup()
-  await user.selectOptions(screen.getByLabelText('Benutzer'), 'u-tim')
+  await selectUser(user, 'Tim', 'Tim Müller')
   await user.click(screen.getByRole('button', { name: 'Bericht erstellen' }))
 }
 
@@ -254,7 +264,7 @@ describe('AdminDsgvoPage', () => {
     await screen.findByRole('combobox', { name: 'Benutzer' })
 
     const user = userEvent.setup()
-    await user.selectOptions(screen.getByLabelText('Benutzer'), 'u-lena')
+    await selectUser(user, 'Lena', 'Lena Schmidt')
     await user.click(screen.getByRole('button', { name: 'Bericht erstellen' }))
 
     const report = await screen.findByRole('region', { name: 'Datenauskunft' })
@@ -358,6 +368,7 @@ describe('AdminDsgvoPage', () => {
           body: {
             users: [
               { id: 'u-tim', vorname: 'Tim', nachname: 'Müller', email: 'tim@gear.local', status: 'active', user_groups: [] },
+              { id: 'u-lena', vorname: 'Lena', nachname: 'Schmidt', email: 'lena@gear.local', status: 'active', user_groups: [] },
               // A tombstone leaks into the payload (e.g. a stale cache): the
               // picker must defensively omit it (Story 3.4 Never rule).
               { id: 'u-dead', vorname: 'Gelöscht', nachname: 'Person', email: 'deleted.u-dead@deleted.local', status: 'deleted', user_groups: [] },
@@ -368,11 +379,15 @@ describe('AdminDsgvoPage', () => {
       stubDeletedList([]),
     ])
     renderPage()
-    await openDeleteTab()
+    const user = await openDeleteTab()
     await screen.findByRole('combobox', { name: 'Benutzer' })
 
+    // Two live users exist (no auto-select), so focusing opens the listbox:
+    // the tombstone must never appear and both live users must.
+    await user.click(screen.getByRole('combobox', { name: 'Benutzer' }))
     expect(screen.queryByRole('option', { name: /Gelöscht Person/ })).not.toBeInTheDocument()
     expect(screen.getByRole('option', { name: /Tim Müller/ })).toBeInTheDocument()
+    expect(screen.getByRole('option', { name: /Lena Schmidt/ })).toBeInTheDocument()
   })
 
   it('SPA_TWO_STEP: the delete button stays disabled until the name matches AND the reason is non-empty', async () => {
@@ -388,7 +403,7 @@ describe('AdminDsgvoPage', () => {
 
     // Pick Tim → the exact name is revealed; the button stays disabled until
     // BOTH the name AND the reason are valid.
-    await user.selectOptions(screen.getByLabelText('Benutzer'), 'u-tim')
+    await selectUser(user, 'Tim', 'Tim Müller')
     expect(screen.getByText('Tim Müller')).toBeInTheDocument()
     const deleteBtn = screen.getByRole('button', { name: 'Endgültig löschen' })
     expect(deleteBtn).toBeDisabled()
@@ -410,7 +425,7 @@ describe('AdminDsgvoPage', () => {
     await screen.findByRole('combobox', { name: 'Benutzer' })
 
     const user = userEvent.setup()
-    await user.selectOptions(screen.getByLabelText('Benutzer'), 'u-tim')
+    await selectUser(user, 'Tim', 'Tim Müller')
     const nameInput = screen.getByLabelText('Name bestätigen')
     await user.type(nameInput, 'Tim Falsch')
     expect(screen.getByRole('alert')).toHaveTextContent('Der Name stimmt nicht überein.')
@@ -425,7 +440,7 @@ describe('AdminDsgvoPage', () => {
     await screen.findByRole('combobox', { name: 'Benutzer' })
 
     const user = userEvent.setup()
-    await user.selectOptions(screen.getByLabelText('Benutzer'), 'u-tim')
+    await selectUser(user, 'Tim', 'Tim Müller')
     await user.type(screen.getByLabelText('Name bestätigen'), 'Tim Müller')
     expect(screen.getByRole('button', { name: 'Endgültig löschen' })).toBeDisabled()
   })
@@ -457,7 +472,7 @@ describe('AdminDsgvoPage', () => {
     await screen.findByRole('combobox', { name: 'Benutzer' })
 
     const user = userEvent.setup()
-    await user.selectOptions(screen.getByLabelText('Benutzer'), 'u-tim')
+    await selectUser(user, 'Tim', 'Tim Müller')
     await user.type(screen.getByLabelText('Name bestätigen'), 'Tim Müller')
     await user.type(screen.getByLabelText('Begründung'), 'Doppelkonto')
     await user.click(screen.getByRole('button', { name: 'Endgültig löschen' }))
@@ -465,7 +480,8 @@ describe('AdminDsgvoPage', () => {
     // The server confirmation renders and the archived account appears.
     expect(await screen.findByText('Konto u-tim wurde gelöscht.')).toBeInTheDocument()
     expect(await screen.findByText(/tim@gear\.local · gelöscht am/)).toBeInTheDocument()
-    // The picker no longer offers Tim (option u-tim gone).
+    // The picker no longer offers Tim (option u-tim gone): focus it and check.
+    await user.click(screen.getByRole('combobox', { name: 'Benutzer' }))
     expect(screen.queryByRole('option', { name: /Tim Müller/ })).not.toBeInTheDocument()
     // The delete request carried the trimmed reason via POST (the reason travels
     // in the body — never a DELETE with a stripped body).
@@ -528,7 +544,7 @@ describe('AdminDsgvoPage', () => {
     await screen.findByRole('combobox', { name: 'Benutzer' })
 
     const user = userEvent.setup()
-    await user.selectOptions(screen.getByLabelText('Benutzer'), 'u-tim')
+    await selectUser(user, 'Tim', 'Tim Müller')
     await user.type(screen.getByLabelText('Name bestätigen'), 'Tim Müller')
     await user.type(screen.getByLabelText('Begründung'), 'Doppelkonto')
     await user.click(screen.getByRole('button', { name: 'Endgültig löschen' }))
@@ -548,7 +564,7 @@ describe('AdminDsgvoPage', () => {
     await screen.findByRole('combobox', { name: 'Benutzer' })
 
     const user = userEvent.setup()
-    await user.selectOptions(screen.getByLabelText('Benutzer'), 'u-tim')
+    await selectUser(user, 'Tim', 'Tim Müller')
     await user.type(screen.getByLabelText('Name bestätigen'), 'Tim Müller')
     await user.type(screen.getByLabelText('Begründung'), 'Doppelkonto')
     await user.click(screen.getByRole('button', { name: 'Endgültig löschen' }))

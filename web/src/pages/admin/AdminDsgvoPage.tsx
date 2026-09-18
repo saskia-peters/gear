@@ -6,6 +6,7 @@ import { adminForbiddenHandled, clearAuthState, getPermissions } from '../../aut
 import { filteredAdminNav } from '../../auth/permissions.ts'
 import { deleteUserAccount, getDsgvoReport, listDeletedAccounts, listUsers, purgeDeletedAccount } from '../../auth/users.ts'
 import type { AccessReport, AdminUserSummary, DeletedAccountRow } from '../../auth/users.ts'
+import { SearchableUserSelect } from '../../components/SearchableUserSelect.tsx'
 import styles from './AdminDsgvoPage.module.css'
 
 // DSGVO permission codes (AD-6): the tabs are gated per code — Datenauskunft
@@ -235,26 +236,17 @@ function ReportTab({ onApiError }: { onApiError: (err: unknown) => boolean }) {
       ) : (
         <>
           <div className={styles.picker}>
-            <label className={styles.label} htmlFor="dsgvo-user">
-              Benutzer
-            </label>
+            <SearchableUserSelect
+              id="dsgvo-user"
+              users={users}
+              value={selectedId}
+              onChange={(id) => {
+                setSelectedId(id)
+                setFeedback(null)
+              }}
+              label="Benutzer"
+            />
             <div className={styles.pickerRow}>
-              <select
-                id="dsgvo-user"
-                className={styles.select}
-                value={selectedId}
-                onChange={(e) => {
-                  setSelectedId(e.target.value)
-                  setFeedback(null)
-                }}
-              >
-                <option value="">— Bitte wählen —</option>
-                {users.map((u) => (
-                  <option key={u.id} value={u.id}>
-                    {`${displayNameOf(u, u.id)} (${u.email})`}
-                  </option>
-                ))}
-              </select>
               <button
                 type="button"
                 className={styles.saveButton}
@@ -640,28 +632,19 @@ function DeleteTab({ onApiError }: { onApiError: (err: unknown) => boolean }) {
       ) : (
         <>
           <div className={styles.deleteForm}>
-            <label className={styles.label} htmlFor="dsgvo-delete-user">
-              Benutzer
-            </label>
-            <select
+            <SearchableUserSelect
               id="dsgvo-delete-user"
-              className={styles.select}
+              users={users}
               value={selectedId}
-              disabled={busy}
-              onChange={(e) => {
-                setSelectedId(e.target.value)
+              onChange={(id) => {
+                setSelectedId(id)
                 setTypedName('')
                 setReason('')
                 setFeedback(null)
               }}
-            >
-              <option value="">— Bitte wählen —</option>
-              {users.map((u) => (
-                <option key={u.id} value={u.id}>
-                  {`${displayNameOf(u, u.id)} (${u.email})`}
-                </option>
-              ))}
-            </select>
+              label="Benutzer"
+              disabled={busy}
+            />
 
             {selectedUser && (
               <>
