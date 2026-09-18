@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-04-2026 19:40
-last_updated: 09-18-2026 14:00
+last_updated: 09-18-2026 22:00
 project: gear
 project_key: NOKEY
 tracking_system: file-system
@@ -64,15 +64,15 @@ development_status:
   2-10-admin-rework-effort-2-spreadsheet-ui: done
   epic-2-retrospective: done
 
-  epic-3: paused
+  epic-3: done
   3-1-smtp-configuration-admin-settings-email: done
   3-2-backup-destination-configuration-admin-settings-backup: done
   3-3-dsgvo-data-access-report: done
   3-4-dsgvo-account-deletion: done
-  epic-3-retrospective: optional
-  5-2c-tool-settings-adoption-and-schedule-polish: in-progress
+  epic-3-retrospective: in-progress
+  5-2c-tool-settings-adoption-and-schedule-polish: done
 
-  epic-4: in-progress
+  epic-4: done
   4-1-schedule-catalog-management: done
   4-2-tool-type-management: done
   4-3-tool-management: done
@@ -92,14 +92,14 @@ development_status:
   5-6-out-of-service-reinstatement: done
   epic-5-retrospective: done
 
-  epic-6: in-progress
+  epic-6: done
   6-1-color-coded-status-dashboard: done
   6-1b-dashboard-row-details-navigation: done
   6-2-status-report-export-pdf: done
   6-3-inspection-history-per-tool: done
   6-3b-tool-details-track-record: done
   6-3c-tool-details-condensed-back: done
-  epic-6-retrospective: optional
+  epic-6-retrospective: in-progress
 action_items:
   - id: "epic-1-retro-item-1-extract-a-shared-authheaders-helper-into"
     epic: 1

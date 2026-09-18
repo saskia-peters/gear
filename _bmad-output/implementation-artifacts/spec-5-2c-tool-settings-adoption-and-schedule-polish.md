@@ -2,7 +2,7 @@
 title: 'Tool Settings Adoption + Schedule Catalog Polish (D1/C2/FR-30)'
 type: 'feature'
 created: '2026-09-18'
-status: 'in-progress'
+status: 'done'
 review_loop_iteration: 0
 baseline_commit: '6102028643e2db89d11a9b7161da74f4fc4d6575'
 context:
@@ -70,11 +70,11 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] Migration 000031 (setting rename + width-9-if-6 + `1 Woche` seed) -- backend
-- [ ] Admin core + schedules sort (D1 percent default, width 9, duration-ascending query) -- backend
-- [ ] Tool adoption (AppSettingsPort into NewService; CreateTool prefix/width; deriveToolStatus percent) -- backend
-- [ ] SPA System-tab D1 label/help + schedule order -- SPA
-- [ ] Tests -- admin/tool core+postgres, schedules order, migration, SPA -- verification
+- [x] Migration 000031 (setting rename + width-9-if-6 + `1 Woche` seed) -- backend
+- [x] Admin core + schedules sort (D1 percent default, width 9, duration-ascending query) -- backend
+- [x] Tool adoption (AppSettingsPort into NewService; CreateTool prefix/width; deriveToolStatus percent) -- backend
+- [x] SPA System-tab D1 label/help + schedule order -- SPA
+- [x] Tests -- admin/tool core+postgres, schedules order, migration, SPA -- verification
 
 **Acceptance Criteria:**
 - Given a tool creation, when settings carry `inventory_prefix` + `inventory_width`, then the auto-assigned number uses them (default `GEAR` + 9 digits) (C2/adoption).
