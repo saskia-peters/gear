@@ -12,6 +12,15 @@
   width: 100%;
 }
 
+/* Tablet and wide: the admin nav sits as a persistent sidebar to the left,
+   matching every other admin page (UX-DR10). Without this the 240px nav
+   stacks above the main column on desktop, leaving a tall white strip. */
+@media (min-width: 641px) {
+  .body {
+    flex-direction: row;
+  }
+}
+
 .main {
   flex: 1;
   width: 100%;
