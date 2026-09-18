@@ -134,3 +134,18 @@ type Service interface {
 type DSGVOInspectionExportPort interface {
 	ExportUserInspectionData(ctx context.Context, userID string) (*UserInspectionDataExport, error)
 }
+
+// DSGVODeletionPort is the account-deletion anonymization seam (Story 3.4,
+// FR-24/AD-8) the DSGVO orchestrator consumes: given the erased user id it
+// rewrites EVERY inspection/reinstatement reference to the canonical
+// core.DeletedUserID sentinel in ONE transaction (idempotent — no matching rows
+// is a no-op), so the history/status report render "Deleted User" with every
+// timestamp/result/item/OOS state intact (FR-18). Implemented by the Tool core
+// Service. The port is deliberately UNGATED: the orchestrator re-checks
+// `dsgvo.delete` defense-in-depth (AD-6) before calling it, and the actor id is
+// NOT threaded — the orchestrator audits the operation (the tool lifecycle call
+// needs only the target id). All writes are intra-module (Tool-owned tables,
+// AD-8/AD-11).
+type DSGVODeletionPort interface {
+	AnonymizeUserReferences(ctx context.Context, userID string) error
+}

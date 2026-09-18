@@ -69,8 +69,9 @@ type mockService struct {
 	assignUserQualificationFunc   func(ctx context.Context, actor *core.User, userID, qualificationID string, expiresAt *time.Time) (*core.UserQualificationAssignResult, error)
 	revokeUserQualificationFunc   func(ctx context.Context, actor *core.User, userID, qualificationID string) (*core.UserQualificationAssignResult, error)
 	updateUserQualificationExpiryFunc func(ctx context.Context, actor *core.User, userID, qualificationID string, expiresAt *time.Time) (*core.UserQualificationAssignResult, error)
-	revokeOtherCalls     *int
-	revokeAllCalls       *int
+	softDeleteAndArchiveFunc          func(ctx context.Context, actor *core.User, targetUserID, reason string) error
+	revokeOtherCalls                  *int
+	revokeAllCalls                    *int
 }
 
 func (m *mockService) Register(ctx context.Context, input core.RegisterInput) (*ports.RegisterResult, error) {
@@ -433,6 +434,16 @@ func (m *mockService) UpdateUserQualificationExpiry(ctx context.Context, actor *
 		return m.updateUserQualificationExpiryFunc(ctx, actor, userID, qualificationID, expiresAt)
 	}
 	return &core.UserQualificationAssignResult{Message: core.MsgQualificationValidUntilUpdated, UserID: userID, QualificationID: qualificationID}, nil
+}
+
+// SoftDeleteAndArchive satisfies the ports.Service DSGVO deletion method (Story
+// 3.4): the user HTTP handler surface does not serve deletion, so the mock
+// answers a nil error (a defensive failure would never be exercised here).
+func (m *mockService) SoftDeleteAndArchive(ctx context.Context, actor *core.User, targetUserID, reason string) error {
+	if m.softDeleteAndArchiveFunc != nil {
+		return m.softDeleteAndArchiveFunc(ctx, actor, targetUserID, reason)
+	}
+	return nil
 }
 
 // stubValidator always authenticates the caller as an active user. Used to
@@ -1975,6 +1986,18 @@ func (r *changePasswordRepo) UpdateUserQualificationExpiry(_ context.Context, _,
 func (r *changePasswordRepo) ListUserQualificationAssignments(_ context.Context, _ string) ([]core.QualificationAssignment, error) {
 	return []core.QualificationAssignment{}, nil
 }
+
+// The DSGVO account-deletion repo methods (Story 3.4) are never exercised by
+// the user HTTP surface tests — the surface does not serve deletion.
+func (r *changePasswordRepo) SoftDeleteAndArchive(_ context.Context, _, _, _ string) (*core.User, error) {
+	return nil, nil
+}
+
+func (r *changePasswordRepo) ListDeletedAccounts(_ context.Context) ([]*core.DeletedAccount, error) {
+	return []*core.DeletedAccount{}, nil
+}
+
+func (r *changePasswordRepo) PurgeDeletedAccount(_ context.Context, _ string) error { return nil }
 
 func (r *changePasswordRepo) InsertAuditEvent(_ context.Context, _ string, operation, _, _ string) error {
 	r.audit = append(r.audit, operation)

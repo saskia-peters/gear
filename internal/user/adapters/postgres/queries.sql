@@ -637,9 +637,14 @@ SELECT EXISTS (
 -- filter (active/pending_approval/deactivated) narrows the set; a NULL status
 -- returns all users (Spec 2.9 status filter). No secret material (password
 -- hash, tokens) is selected — the listing never exposes credentials (NFR-O1).
+-- DELETED tombstones are EXCLUDED from BOTH branches (the Story 3.4 Never
+-- rule: a `deleted` account is non-existent to the admin surface — no
+-- re-activation path, and the DSGVO delete picker must not offer one as a
+-- target).
 SELECT id, email, first_name, last_name, state
 FROM users
 WHERE (sqlc.narg('status')::text IS NULL OR state = sqlc.narg('status')::text)
+  AND state <> 'deleted'
 ORDER BY last_name, first_name, email;
 
 -- name: GetUserByID :one
@@ -1145,3 +1150,111 @@ SELECT $1, u.id
 FROM users u
 WHERE u.id = ANY($2::uuid[])
 ON CONFLICT DO NOTHING;
+
+-- ============================================================================
+-- DSGVO account deletion (Story 3.4, FR-24/AD-8): the User-owned lifecycle
+-- persistence behind the DSGVODeletionPort. Deletion NEVER hard-deletes — the
+-- target's personal data moves into the dsgvo_deleted_accounts ARCHIVE and the
+-- users row flips to a scrubbed `deleted` tombstone in ONE transaction; the
+-- archive + tombstone are hard-purged ONLY on admin demand (the sole hard
+-- delete, PURGE).
+-- ============================================================================
+
+-- name: GetUserFullForArchive :one
+-- The FULL personal-data snapshot read for the archive (Story 3.4): the
+-- columns the archive row copies — email, names, attributes — PLUS the live
+-- state so the repo can reject an already-deleted tombstone. The secret
+-- columns (password_hash, totp_secret_encrypted, pending_totp_secret_encrypted,
+-- one_time_password_hash) are deliberately NOT selected — the archive snapshot
+-- excludes secrets. A zero-row read (unknown id) maps to the uniform not-found.
+SELECT id, email, display_name, first_name, last_name, attributes, state
+FROM users
+WHERE id = $1;
+
+-- name: InsertDeletedAccount :one
+-- Move the erased user's personal snapshot into the archive. The id is the DB
+-- uuidv7; deleted_at = DB now(). deleted_by is the deleting admin (plain uuid,
+-- no FK — the archive must survive the users hard delete on purge).
+INSERT INTO dsgvo_deleted_accounts (original_user_id, email, display_name, first_name, last_name, attributes, reason, deleted_by)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+RETURNING id, original_user_id, email, display_name, first_name, last_name, attributes, reason, deleted_by, created_at, deleted_at;
+
+-- name: SetUserDeletedAndScrub :one
+-- Flip the user row to the `deleted` tombstone AND scrub the live personal
+-- fields in ONE statement: email becomes the `deleted.<id>@deleted.local`
+-- placeholder (freeing the UNIQUE email for re-registration while the tombstone
+-- stays addressable only by its id), the password hash and the names clear,
+-- attributes reset to '{}', MFA + the encrypted TOTP/pending/OTP secrets clear
+-- and pending_email/must_change_password reset. The `state <> 'deleted'` guard
+-- makes an already-deleted tombstone (or an unknown id) affect zero rows → the
+-- caller maps it to the uniform not-found (the surface treats `deleted` as
+-- non-existent). No hard delete ever happens here.
+UPDATE users
+SET state                            = 'deleted',
+    email                            = 'deleted.' || id::text || '@deleted.local',
+    password_hash                    = '',
+    display_name                     = '',
+    first_name                       = '',
+    last_name                        = '',
+    attributes                       = '{}'::jsonb,
+    is_mfa_enabled                   = false,
+    totp_secret_encrypted            = NULL,
+    pending_totp_secret_encrypted    = NULL,
+    pending_totp_expires_at          = NULL,
+    pending_email                    = NULL,
+    must_change_password             = false,
+    one_time_password_hash           = '',
+    one_time_password_expires_at     = NULL,
+    updated_at                       = now()
+WHERE id = $1 AND state <> 'deleted'
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password, one_time_password_hash, one_time_password_expires_at;
+
+-- name: DeleteLoginAttemptsByEmail :exec
+-- Remove the erased email's login-attempt rows (Story 3.4): the email is
+-- scrubbed from the user row (the placeholder frees the address), so the
+-- per-email failure/lockout state must follow. A zero-row delete (no tracked
+-- attempts) is a no-op.
+DELETE FROM login_attempts
+WHERE email = $1;
+
+-- name: ListDeletedAccounts :many
+-- Every archived (soft-deleted) account for the admin "Gelöschte Konten"
+-- surface (Story 3.4), newest first (deleted_at DESC, id DESC — the 000030
+-- index dsgvo_deleted_accounts_deleted_at_idx serves the sort). Bounded by a
+-- V1 admin-scale cap (500 rows): the surface never renders an unbounded list,
+-- and the purge is per-row so a huge backlog is worked in the UI. No secret
+-- material is selected.
+SELECT id, original_user_id, email, display_name, first_name, last_name, attributes, reason, deleted_by, created_at, deleted_at
+FROM dsgvo_deleted_accounts
+ORDER BY deleted_at DESC, id DESC
+LIMIT 500;
+
+-- name: GetDeletedAccount :one
+-- One archived account by its archive id (Story 3.4 purge): the purge
+-- transaction reads it FIRST to resolve the original user id for the users
+-- tombstone delete. A zero-row read (unknown or already-purged id) maps to the
+-- uniform not-found.
+SELECT id, original_user_id, email, display_name, first_name, last_name, attributes, reason, deleted_by, created_at, deleted_at
+FROM dsgvo_deleted_accounts
+WHERE id = $1;
+
+-- name: DeleteDeletedAccount :execrows
+-- Remove one archived account row (Story 3.4 purge). Called in the SAME
+-- transaction as DeleteUserByID so the archive + tombstone are hard-deleted
+-- all-or-nothing (the ONLY hard delete — admin-initiated on demand). The
+-- affected-row count is reported so a CONCURRENT purge (the row vanished
+-- between GetDeletedAccount and this delete) maps to the uniform 404 instead of
+-- a false success.
+DELETE FROM dsgvo_deleted_accounts
+WHERE id = $1;
+
+-- name: DeleteUserByID :execrows
+-- Hard-delete the (already-scrubbed) `deleted` users tombstone (Story 3.4
+-- purge). This is the ONLY hard delete in the account lifecycle; the CASCADEs
+-- remove any remaining sessions/reset tokens/role memberships and the
+-- audit_log/admin_recovery references auto-SET-NULL (migrations 000006/000009).
+-- The `AND state = 'deleted'` guard means a corrupted archive row pointing at a
+-- NON-deleted account can NEVER hard-delete a live user — a zero-row delete
+-- maps to the uniform 404.
+DELETE FROM users
+WHERE id = $1 AND state = 'deleted';

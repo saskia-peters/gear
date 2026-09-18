@@ -211,13 +211,15 @@ func main() {
 	// PDF bytes.
 	reportSurface := auth.RequirePermission(sessionManager, userRepo, toolscore.ReportExportPermission)(toolHandler.ReportRoutes())
 
-	// Story 3.3 — the DSGVO orchestrator (AD-8): the composition-root assembly
-	// point for the data-access report. It consumes the User module's read-only
-	// export port (userService) and the Tool module's read-only export port
-	// (toolService) plus the User repository READ-ONLY for the defense-in-depth
-	// permission re-check (AD-6/AD-12) and the audit trail (NFR-O1/NFR-O2) — it
-	// never authors another module's SQL (AD-8/AD-11).
-	dsgvoService := dsgvocore.NewService(userService, toolService, userRepo, userRepo, log)
+	// Story 3.3 + 3.4 — the DSGVO orchestrator (AD-8): the composition-root
+	// assembly point for the data-access report AND the account-deletion
+	// lifecycle. It consumes the User module's read-only export port + lifecycle
+	// deletion port (userService) and the Tool module's read-only export port +
+	// anonymization port (toolService), plus the User repository READ-ONLY for
+	// the defense-in-depth permission re-check (AD-6/AD-12), the actor
+	// resolution (GetUserByID) and the audit trail (NFR-O1/NFR-O2) — it never
+	// authors another module's SQL (AD-8/AD-11).
+	dsgvoService := dsgvocore.NewService(userService, toolService, userService, toolService, userRepo, userRepo, userRepo, log)
 	dsgvoHandler := adminhttp.NewDsgvoHandler(dsgvoService, log)
 
 	// The DSGVO surface mounts under /api/v1/admin/dsgvo with its OWN gate —

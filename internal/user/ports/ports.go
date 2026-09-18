@@ -25,6 +25,10 @@ type ResetCompleteResult = core.ResetCompleteResult
 // UserDataExport is the DSGVO data-access export payload (Story 3.3, FR-24).
 type UserDataExport = core.UserDataExport
 
+// DeletedAccount is one archived (soft-deleted) account row (Story 3.4,
+// FR-24/AD-8): the personal-data snapshot moved into dsgvo_deleted_accounts.
+type DeletedAccount = core.DeletedAccount
+
 // Service is the User Directory & Auth inbound port (AD-2).
 type Service interface {
 	Register(ctx context.Context, input core.RegisterInput) (*core.RegisterResult, error)
@@ -160,6 +164,20 @@ type Service interface {
 	AssignUserQualification(ctx context.Context, actor *core.User, userID, qualificationID string, expiresAt *time.Time) (*core.UserQualificationAssignResult, error)
 	RevokeUserQualification(ctx context.Context, actor *core.User, userID, qualificationID string) (*core.UserQualificationAssignResult, error)
 	UpdateUserQualificationExpiry(ctx context.Context, actor *core.User, userID, qualificationID string, expiresAt *time.Time) (*core.UserQualificationAssignResult, error)
+	// SoftDeleteAndArchive is the DSGVO account-deletion lifecycle step (Story
+	// 3.4, FR-24/AD-8): in ONE transaction it (a) copies the target's personal
+	// data into `dsgvo_deleted_accounts` (original_user_id, email, names,
+	// attributes, reason, deleted_by — a full snapshot EXCLUDING secrets), (b)
+	// flips the user row state → `deleted` and scrubs the live personal fields
+	// (email → `deleted.<id>@deleted.local` placeholder freeing the UNIQUE key,
+	// password_hash → '', names/attributes → '', totp/otp/pending_email/
+	// must_change_password cleared) and (c) deletes the email's login-attempt
+	// rows. Re-login is permanently rejected — only `active` authenticates
+	// (auth.go) and sessions reject non-active (session.go). An unknown target
+	// (or an already-deleted tombstone) maps to ErrAdminUserNotFound (uniform
+	// 404); NO hard delete ever happens here (the archive + tombstone are
+	// hard-purged only on admin demand).
+	SoftDeleteAndArchive(ctx context.Context, actor *core.User, targetUserID, reason string) error
 }
 
 // DSGVOExportPort is the read-only data-access export seam (Story 3.3, FR-24/
@@ -171,6 +189,23 @@ type Service interface {
 // `dsgvo.access_report` defense-in-depth (AD-6) before calling it.
 type DSGVOExportPort interface {
 	ExportUserData(ctx context.Context, userID string) (*UserDataExport, error)
+}
+
+// DSGVODeletionPort is the account-deletion lifecycle seam (Story 3.4,
+// FR-24/AD-8) the DSGVO orchestrator consumes: SoftDeleteAndArchive moves the
+// target's personal data into the dsgvo_deleted_accounts archive and flips the
+// users row to the scrubbed `deleted` tombstone (ONE transaction, no hard
+// delete); ListDeletedAccounts returns the archived rows newest-first; and
+// PurgeDeletedAccount hard-deletes an archived row AND its users tombstone in
+// ONE transaction (the ONLY hard delete — admin-initiated on demand). A purge
+// of an already-purged archive id maps to core.ErrDeletedAccountNotFound
+// (uniform 404). Implemented by the User core Service. The port is deliberately
+// UNGATED: the orchestrator re-checks `dsgvo.delete` defense-in-depth (AD-6)
+// before calling it.
+type DSGVODeletionPort interface {
+	SoftDeleteAndArchive(ctx context.Context, actor *core.User, targetUserID, reason string) error
+	ListDeletedAccounts(ctx context.Context) ([]*DeletedAccount, error)
+	PurgeDeletedAccount(ctx context.Context, archiveID string) error
 }
 
 // Repository is the outbound persistence port for User data.
@@ -261,6 +296,18 @@ type Repository interface {
 	AssignQualificationToUser(ctx context.Context, userID, qualificationID string, expiresAt *time.Time) error
 	RevokeQualificationFromUser(ctx context.Context, userID, qualificationID string) error
 	UpdateUserQualificationExpiry(ctx context.Context, userID, qualificationID string, expiresAt *time.Time) error
+	// DSGVO account-deletion persistence (Story 3.4, FR-24/AD-8):
+	// SoftDeleteAndArchive moves the target's personal data into
+	// dsgvo_deleted_accounts AND flips the users row to the scrubbed `deleted`
+	// tombstone in ONE transaction (an unknown id or an already-deleted
+	// tombstone maps to core.ErrAdminUserNotFound — the surface treats deleted
+	// as non-existent); ListDeletedAccounts returns the archived rows newest
+	// first; PurgeDeletedAccount hard-deletes an archived row AND its users
+	// tombstone in ONE transaction (an already-purged archive id maps to
+	// core.ErrDeletedAccountNotFound).
+	SoftDeleteAndArchive(ctx context.Context, targetUserID, reason, deletedBy string) (*core.User, error)
+	ListDeletedAccounts(ctx context.Context) ([]*DeletedAccount, error)
+	PurgeDeletedAccount(ctx context.Context, archiveID string) error
 }
 
 // PasswordHasher is the outbound password hashing port (AD-13).

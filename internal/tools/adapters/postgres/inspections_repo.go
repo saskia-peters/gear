@@ -360,5 +360,50 @@ func inspectionItemsFromRows(rows []InspectionItem) []core.InspectionItem {
 	return items
 }
 
+// AnonymizeUserReferences rewrites every reference to a deleted user's account
+// to the canonical core.DeletedUserID sentinel in ONE transaction (Story 3.4,
+// FR-24/AD-8): `inspections.inspector_id` AND `reinstatements.actor_id` both
+// flip, so a failed half-write never leaves mixed references. IDEMPOTENT: a
+// user with no matching rows (never inspected/reinstated, or already
+// anonymized) is a no-op — the UPDATEs affect zero rows without error. The
+// sentinel is a fixed well-known uuid, deliberately absent from users, so the
+// DisplayNameResolver seam renders "Deleted User" (the inspection
+// history/status report stay fully intact, FR-18). A malformed user id maps to
+// core.ErrToolNotFound.
+func (r *Repository) AnonymizeUserReferences(ctx context.Context, userID string) error {
+	uid, err := parseOptionalUUID(userID)
+	if err != nil {
+		return core.ErrToolNotFound
+	}
+	deleted, err := parseOptionalUUID(core.DeletedUserID)
+	if err != nil {
+		return err
+	}
+
+	tx, err := r.beginTx(ctx)
+	if err != nil {
+		return err
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op after Commit
+
+	q := r.queries.WithTx(tx)
+	if err := q.UpdateInspectionsInspector(ctx, UpdateInspectionsInspectorParams{
+		InspectorID:   deleted,
+		InspectorID_2: uid,
+	}); err != nil {
+		return err
+	}
+	if err := q.UpdateReinstatementsActor(ctx, UpdateReinstatementsActorParams{
+		ActorID:   deleted,
+		ActorID_2: uid,
+	}); err != nil {
+		return err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return err
+	}
+	return nil
+}
+
 // Compile-time check: the repository satisfies the core InspectionStore port.
 var _ core.InspectionStore = (*Repository)(nil)

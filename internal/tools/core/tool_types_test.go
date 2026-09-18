@@ -56,6 +56,12 @@ type fakeToolTypeStore struct {
 	archivedIDs []string
 }
 
+// AnonymizeUserReferences is a no-op on the type-only fake: the type-surface
+// tests never exercise the DSGVO deletion rewrite (the inspection/reinstatement
+// references live on the inspection store). It satisfies the embedded
+// InspectionStore port (Story 3.4).
+func (f *fakeToolTypeStore) AnonymizeUserReferences(context.Context, string) error { return nil }
+
 func (f *fakeToolTypeStore) ListToolTypes(context.Context) ([]*ToolType, error) {
 	if f.listErr != nil {
 		return nil, f.listErr

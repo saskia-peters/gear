@@ -15,6 +15,12 @@ var (
 	// unknown user id (uniform 404, no existence leak beyond what the admin
 	// already sees, FR-19).
 	ErrAdminUserNotFound = errors.New("admin user not found")
+	// ErrAdminUserDeleted is returned when an edit targets a DSGVO-deleted
+	// tombstone (Story 3.4): the account is non-existent to the admin surface —
+	// there is NO re-activation path from `deleted`. Handlers map it to the
+	// uniform 409 conflict with the German message (a tombstone is never
+	// editable back to life).
+	ErrAdminUserDeleted = errors.New("admin user is deleted, cannot be updated")
 	// ErrAdminUserInvalidName is returned when Vorname/Nachname is empty or
 	// exceeds the rune cap (400 invalid_request).
 	ErrAdminUserInvalidName = errors.New("admin user name is invalid")
@@ -69,6 +75,10 @@ const (
 	MsgAdminUserEmailTaken = "Es gibt bereits ein Konto mit dieser E-Mail-Adresse."
 	// MsgAdminUserNotFound is the uniform 404 not-found message.
 	MsgAdminUserNotFound = "Der Benutzer wurde nicht gefunden."
+	// MsgAdminUserDeleted is the uniform 409 message for an edit targeting a
+	// DSGVO-deleted tombstone (Story 3.4 — no re-activation path from
+	// `deleted`).
+	MsgAdminUserDeleted = "Das Konto wurde gelöscht und kann nicht wiederhergestellt werden."
 	// MsgUserNotActiveForDeactivate is the uniform conflict message for
 	// deactivating a non-active user (no existence leak, FR-19).
 	MsgUserNotActiveForDeactivate = "Nur aktive Benutzer können deaktiviert werden."

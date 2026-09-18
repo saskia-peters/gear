@@ -119,6 +119,14 @@ type mockRepo struct {
 	// userSessions backs ListSessionsByUser (Story 3.3 DSGVO export auth
 	// history): the stored session exports keyed by user id, newest first.
 	userSessions map[string][]UserSessionExport
+	// DSGVO account deletion (Story 3.4): deletedAccounts holds the archived
+	// (soft-deleted) rows; softDeleteFunc / listDeletedFunc / purgeDeletedFunc
+	// override the faithful in-memory transition (for the core tests they stay
+	// nil). attemptsByEmail maps an original email to the user that scrubbed it.
+	deletedAccounts  []*DeletedAccount
+	softDeleteFunc   func(ctx context.Context, targetUserID, reason, deletedBy string) (*User, error)
+	listDeletedFunc  func(ctx context.Context) ([]*DeletedAccount, error)
+	purgeDeletedFunc func(ctx context.Context, archiveID string) error
 }
 
 func newMockRepo() *mockRepo {
@@ -899,6 +907,11 @@ func (m *mockRepo) ListUsers(_ context.Context, status *string) ([]*AdminUserSum
 	}
 	out := make([]*AdminUserSummary, 0, len(m.users))
 	for _, u := range m.users {
+		// Story 3.4 Never rule: `deleted` tombstones are non-existent to the
+		// admin surface (mirroring the postgres ListUsers `state <> 'deleted'`).
+		if u.State == StateDeleted {
+			continue
+		}
 		if status != nil && string(u.State) != *status {
 			continue
 		}
@@ -1008,6 +1021,83 @@ func (m *mockRepo) mockQualificationAssignments(userID string) []QualificationAs
 // read. An unknown user yields an empty list.
 func (m *mockRepo) ListUserQualificationAssignments(_ context.Context, userID string) ([]QualificationAssignment, error) {
 	return m.mockQualificationAssignments(userID), nil
+}
+
+// SoftDeleteAndArchive emulates the postgres transactional soft-delete + archive
+// (Story 3.4, FR-24): an unknown id — or an already-deleted tombstone — maps to
+// ErrAdminUserNotFound (the surface treats `deleted` as non-existent); the
+// personal data is copied into the archive and the users row becomes the
+// scrubbed tombstone (email placeholder, cleared names/hash/attributes, state
+// deleted). No hard delete.
+func (m *mockRepo) SoftDeleteAndArchive(ctx context.Context, targetUserID, reason, deletedBy string) (*User, error) {
+	if m.softDeleteFunc != nil {
+		return m.softDeleteFunc(ctx, targetUserID, reason, deletedBy)
+	}
+	target := m.userByID(targetUserID)
+	if target == nil || target.State == StateDeleted {
+		return nil, ErrAdminUserNotFound
+	}
+	archive := &DeletedAccount{
+		ID:             "archive-" + target.ID,
+		OriginalUserID: target.ID,
+		Email:          target.Email,
+		DisplayName:    target.DisplayName,
+		FirstName:      target.FirstName,
+		LastName:       target.LastName,
+		Attributes:     target.Attributes,
+		Reason:         reason,
+		DeletedBy:      deletedBy,
+		DeletedAt:      time.Now().UTC(),
+	}
+	if archive.Attributes == nil {
+		archive.Attributes = map[string]any{}
+	}
+	m.deletedAccounts = append(m.deletedAccounts, archive)
+
+	scrubbed := *target
+	scrubbed.State = StateDeleted
+	scrubbed.Email = "deleted." + target.ID + "@deleted.local"
+	scrubbed.PasswordHash = ""
+	scrubbed.DisplayName = ""
+	scrubbed.FirstName = ""
+	scrubbed.LastName = ""
+	scrubbed.Attributes = map[string]any{}
+	scrubbed.IsMFAEnabled = false
+	scrubbed.TotpSecretEncrypted = ""
+	scrubbed.PendingTotpSecretEncrypted = ""
+	scrubbed.PendingTotpExpiresAt = time.Time{}
+	scrubbed.PendingEmail = ""
+	scrubbed.MustChangePassword = false
+	scrubbed.OneTimePasswordHash = ""
+	scrubbed.OneTimePasswordExpiresAt = time.Time{}
+	delete(m.users, target.Email)
+	m.users[scrubbed.Email] = &scrubbed
+	return &scrubbed, nil
+}
+
+// ListDeletedAccounts returns the archived (soft-deleted) accounts newest first.
+func (m *mockRepo) ListDeletedAccounts(ctx context.Context) ([]*DeletedAccount, error) {
+	if m.listDeletedFunc != nil {
+		return m.listDeletedFunc(ctx)
+	}
+	return append([]*DeletedAccount(nil), m.deletedAccounts...), nil
+}
+
+// PurgeDeletedAccount hard-deletes an archived row AND its users tombstone
+// (Story 3.4 purge): an unknown / already-purged archive id maps to
+// ErrDeletedAccountNotFound.
+func (m *mockRepo) PurgeDeletedAccount(ctx context.Context, archiveID string) error {
+	if m.purgeDeletedFunc != nil {
+		return m.purgeDeletedFunc(ctx, archiveID)
+	}
+	for i, a := range m.deletedAccounts {
+		if a.ID == archiveID {
+			delete(m.users, "deleted."+a.OriginalUserID+"@deleted.local")
+			m.deletedAccounts = append(m.deletedAccounts[:i], m.deletedAccounts[i+1:]...)
+			return nil
+		}
+	}
+	return ErrDeletedAccountNotFound
 }
 
 // CreateAdminUser creates a user (Story 2.6): a case-insensitive duplicate

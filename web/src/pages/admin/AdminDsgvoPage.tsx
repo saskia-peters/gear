@@ -4,8 +4,8 @@ import { Header } from '../../components/Header.tsx'
 import { AdminNav } from '../../components/AdminNav.tsx'
 import { adminForbiddenHandled, clearAuthState, getPermissions } from '../../auth/authState.ts'
 import { filteredAdminNav } from '../../auth/permissions.ts'
-import { getDsgvoReport, listUsers } from '../../auth/users.ts'
-import type { AccessReport, AdminUserSummary } from '../../auth/users.ts'
+import { deleteUserAccount, getDsgvoReport, listDeletedAccounts, listUsers, purgeDeletedAccount } from '../../auth/users.ts'
+import type { AccessReport, AdminUserSummary, DeletedAccountRow } from '../../auth/users.ts'
 import styles from './AdminDsgvoPage.module.css'
 
 // DSGVO permission codes (AD-6): the tabs are gated per code — Datenauskunft
@@ -47,17 +47,17 @@ function downloadReport(report: AccessReport, userName: string) {
   URL.revokeObjectURL(url)
 }
 
-// AdminDsgvoPage is the DSGVO surface (Story 3.3, FR-24/AD-6): a tab bar over
-// "Datenauskunft" and "Konto löschen". Each tab is gated by its OWN permission
-// code (AD-6) — Datenauskunft by dsgvo.access_report, Konto löschen by
-// dsgvo.delete. The report tab lets a holder pick a user, generate the
+// AdminDsgvoPage is the DSGVO surface (Story 3.3 + 3.4, FR-24/AD-6): a tab bar
+// over "Datenauskunft" and "Konto löschen". Each tab is gated by its OWN
+// permission code (AD-6) — Datenauskunft by dsgvo.access_report, Konto löschen
+// by dsgvo.delete. The report tab lets a holder pick a user, generate the
 // data-access report (the server orchestrates the User + Tool module exports)
 // and renders it read-only (profile, roles/groups/grants/qualifications, auth
 // history incl. sessions + login-attempt state, inspection summary +
-// per-inspection rows) with a JSON download. The delete tab is Story 3.4's
-// surface — a placeholder note lives here. Inline German feedback, skeleton
-// loading, 401 → login, 403 → leave the admin module (the server remains the
-// source of truth).
+// per-inspection rows) with a JSON download. The delete tab (Story 3.4) is the
+// heavy two-step account-deletion flow plus the "Gelöschte Konten" on-demand
+// purge list. Inline German feedback, skeleton loading, 401 → login, 403 →
+// leave the admin module (the server remains the source of truth).
 export function AdminDsgvoPage() {
   const navigate = useNavigate()
   const perms = getPermissions()
@@ -120,9 +120,7 @@ export function AdminDsgvoPage() {
           {activeTab === 'report' && canReport ? (
             <ReportTab onApiError={handleApiError} />
           ) : activeTab === 'delete' && canDelete ? (
-            <p role="status" className={styles.emptyHint}>
-              Konto löschen (Story 3.4)
-            </p>
+            <DeleteTab onApiError={handleApiError} />
           ) : (
             // Blank-page fallback (only reachable if the route gating drifts):
             // a caller holding NEITHER DSGVO code still gets a German notice.
@@ -479,5 +477,283 @@ function ReportView({ report, targetName }: { report: AccessReport; targetName: 
         )}
       </section>
     </div>
+  )
+}
+
+// DeleteTab is the Konto-löschen surface (Story 3.4, FR-24/UX-DR7/DR8): the
+// heavy TWO-STEP delete flow plus the "Gelöschte Konten" purge list. Step one
+// picks a user; step two requires the user's display_name typed EXACTLY AND a
+// mandatory non-empty Begründung — "Endgültig löschen" stays disabled until both
+// are valid, a name mismatch shows an inline German error and blocks deletion,
+// and the button is `busy` during the call. The deletion NEVER hard-deletes:
+// the account becomes a scrubbed tombstone and its personal data moves into the
+// archive. The second section lists the archived accounts (name/email/date/
+// reason) with a per-row "Jetzt endgültig löschen" purge action (window.confirm)
+// — the ONLY hard delete, admin-initiated on demand. 401 → login, 403 → leave
+// the admin module.
+function DeleteTab({ onApiError }: { onApiError: (err: unknown) => boolean }) {
+  const [users, setUsers] = useState<AdminUserSummary[]>([])
+  const [usersLoaded, setUsersLoaded] = useState(false)
+  const [loadError, setLoadError] = useState('')
+  const [selectedId, setSelectedId] = useState('')
+  const [typedName, setTypedName] = useState('')
+  const [reason, setReason] = useState('')
+  const [busy, setBusy] = useState(false)
+  const [feedback, setFeedback] = useState<Feedback>(null)
+  const [deleted, setDeleted] = useState<DeletedAccountRow[]>([])
+  const [deletedLoaded, setDeletedLoaded] = useState(false)
+  const [deletedError, setDeletedError] = useState('')
+
+  const selectedUser = users.find((u) => u.id === selectedId)
+  const expectedName = displayNameOf(selectedUser, selectedId)
+  const nameMatches = typedName.trim() !== '' && typedName.trim() === expectedName
+  const reasonValid = reason.trim() !== ''
+  const canSubmit = selectedId !== '' && nameMatches && reasonValid && !busy
+
+  // Load both the user picker and the archived-accounts list on mount.
+  useEffect(() => {
+    let cancelled = false
+    async function run() {
+      try {
+        const [rows, archived] = await Promise.all([listUsers(), listDeletedAccounts()])
+        if (cancelled) return
+        // Story 3.4 Never rule: a `deleted` tombstone is non-existent to the
+        // admin surface — even if one leaks into the payload, it is never
+        // offered as a selectable delete target (the server already excludes
+        // them from ListUsers; this is the defensive client filter).
+        const liveUsers = rows.filter((u) => u.status !== ('deleted' as AdminUserSummary['status']))
+        setUsers(liveUsers)
+        setDeleted(archived)
+        if (liveUsers.length === 1) setSelectedId(liveUsers[0].id)
+      } catch (err) {
+        if (cancelled) return
+        if (!onApiError(err)) {
+          setLoadError('Die Benutzerliste konnte nicht geladen werden.')
+        }
+      } finally {
+        if (!cancelled) {
+          setUsersLoaded(true)
+          setDeletedLoaded(true)
+        }
+      }
+    }
+    void run()
+    return () => {
+      cancelled = true
+    }
+  }, [onApiError])
+
+  async function refreshDeleted() {
+    try {
+      const archived = await listDeletedAccounts()
+      setDeleted(archived)
+      setDeletedLoaded(true)
+      setDeletedError('')
+    } catch (err) {
+      if (onApiError(err)) return
+      setDeletedError('Die gelöschten Konten konnten nicht geladen werden.')
+    }
+  }
+
+  async function performDelete() {
+    if (!selectedId) {
+      setFeedback({ kind: 'error', message: 'Bitte wähle einen Benutzer aus.' })
+      return
+    }
+    if (!nameMatches) {
+      setFeedback({ kind: 'error', message: 'Der eingegebene Name stimmt nicht mit dem Benutzer überein.' })
+      return
+    }
+    if (!reasonValid) {
+      setFeedback({ kind: 'error', message: 'Bitte gib eine Begründung an.' })
+      return
+    }
+    setBusy(true)
+    setFeedback(null)
+    try {
+      const result = await deleteUserAccount(selectedId, reason.trim())
+      setFeedback({ kind: 'success', message: result.message })
+      // The deleted user leaves the picker; the account appears in the archive.
+      const remaining = users.filter((u) => u.id !== selectedId)
+      setUsers(remaining)
+      setSelectedId('')
+      setTypedName('')
+      setReason('')
+      await refreshDeleted()
+    } catch (err) {
+      if (onApiError(err)) return
+      setFeedback({ kind: 'error', message: err instanceof Error ? err.message : 'Das Konto konnte nicht gelöscht werden.' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  async function performPurge(account: DeletedAccountRow) {
+    const confirmed = window.confirm(
+      `Soll „${account.display_name}“ (${account.email}) endgültig gelöscht werden? Diese Aktion kann nicht rückgängig gemacht werden.`,
+    )
+    if (!confirmed) return
+    setBusy(true)
+    setFeedback(null)
+    try {
+      const result = await purgeDeletedAccount(account.id)
+      setDeleted((prev) => prev.filter((a) => a.id !== account.id))
+      setFeedback({ kind: 'success', message: result.message })
+    } catch (err) {
+      if (onApiError(err)) return
+      setFeedback({ kind: 'error', message: err instanceof Error ? err.message : 'Der Account konnte nicht endgültig gelöscht werden.' })
+    } finally {
+      setBusy(false)
+    }
+  }
+
+  return (
+    <>
+      {feedback && (
+        <p
+          role={feedback.kind === 'error' ? 'alert' : 'status'}
+          className={feedback.kind === 'error' ? styles.feedbackError : styles.feedbackSuccess}
+        >
+          {feedback.message}
+        </p>
+      )}
+      {loadError && (
+        <p role="alert" className={styles.feedbackError}>
+          {loadError}
+        </p>
+      )}
+
+      <p className={styles.warning} role="note">
+        Unumkehrbar · Audit-Pflicht
+      </p>
+
+      {!usersLoaded ? (
+        <div className={styles.skeleton} aria-busy="true" aria-label="Benutzerliste wird geladen">
+          <div className={styles.skeletonRow} aria-hidden="true" />
+          <div className={styles.skeletonRow} aria-hidden="true" />
+        </div>
+      ) : (
+        <>
+          <div className={styles.deleteForm}>
+            <label className={styles.label} htmlFor="dsgvo-delete-user">
+              Benutzer
+            </label>
+            <select
+              id="dsgvo-delete-user"
+              className={styles.select}
+              value={selectedId}
+              disabled={busy}
+              onChange={(e) => {
+                setSelectedId(e.target.value)
+                setTypedName('')
+                setReason('')
+                setFeedback(null)
+              }}
+            >
+              <option value="">— Bitte wählen —</option>
+              {users.map((u) => (
+                <option key={u.id} value={u.id}>
+                  {`${displayNameOf(u, u.id)} (${u.email})`}
+                </option>
+              ))}
+            </select>
+
+            {selectedUser && (
+              <>
+                <p className={styles.confirmHint}>
+                  Gib den Namen exakt ein, um die Löschung zu bestätigen:
+                </p>
+                <p className={styles.confirmName}>{expectedName}</p>
+                <label className={styles.label} htmlFor="dsgvo-delete-name">
+                  Name bestätigen
+                </label>
+                <input
+                  id="dsgvo-delete-name"
+                  className={typedName.trim() !== '' && !nameMatches ? `${styles.textInput} ${styles.inputError}` : styles.textInput}
+                  type="text"
+                  value={typedName}
+                  disabled={busy}
+                  onChange={(e) => {
+                    setTypedName(e.target.value)
+                    setFeedback(null)
+                  }}
+                  placeholder={expectedName}
+                  autoComplete="off"
+                />
+                {typedName.trim() !== '' && !nameMatches && (
+                  <p role="alert" className={styles.fieldError}>
+                    Der Name stimmt nicht überein.
+                  </p>
+                )}
+                <label className={styles.label} htmlFor="dsgvo-delete-reason">
+                  Begründung
+                </label>
+                <textarea
+                  id="dsgvo-delete-reason"
+                  className={styles.textarea}
+                  value={reason}
+                  disabled={busy}
+                  onChange={(e) => {
+                    setReason(e.target.value)
+                    setFeedback(null)
+                  }}
+                  placeholder="Warum wird das Konto gelöscht?"
+                  rows={3}
+                />
+                {reason.trim() === '' && reason !== '' && (
+                  <p role="alert" className={styles.fieldError}>
+                    Bitte gib eine Begründung an.
+                  </p>
+                )}
+                <button
+                  type="button"
+                  className={styles.dangerButton}
+                  disabled={!canSubmit}
+                  onClick={() => void performDelete()}
+                >
+                  {busy ? 'Konto wird gelöscht...' : 'Endgültig löschen'}
+                </button>
+              </>
+            )}
+          </div>
+
+          <section className={styles.deletedSection} aria-label="Gelöschte Konten">
+            <h3 className={styles.sectionTitle}>Gelöschte Konten</h3>
+            {deletedError && (
+              <p role="alert" className={styles.feedbackError}>
+                {deletedError}
+              </p>
+            )}
+            {!deletedLoaded ? (
+              <div className={styles.skeleton} aria-busy="true" aria-label="Gelöschte Konten werden geladen">
+                <div className={styles.skeletonRow} aria-hidden="true" />
+              </div>
+            ) : deleted.length === 0 ? (
+              <p className={styles.emptyNote}>Keine gelöschten Konten.</p>
+            ) : (
+              <ul className={styles.list}>
+                {deleted.map((account) => (
+                  <li key={account.id} className={styles.row}>
+                    <span className={styles.rowName}>{account.display_name || account.email}</span>
+                    <span className={styles.rowMeta}>
+                      {account.email} · gelöscht am {formatDate(account.deleted_at)}
+                      {account.reason ? ` · ${account.reason}` : ''}
+                    </span>
+                    <button
+                      type="button"
+                      className={styles.rowButton}
+                      disabled={busy}
+                      onClick={() => void performPurge(account)}
+                    >
+                      Jetzt endgültig löschen
+                    </button>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </section>
+        </>
+      )}
+    </>
   )
 }

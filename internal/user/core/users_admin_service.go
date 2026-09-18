@@ -251,6 +251,22 @@ func (s *Service) UpdateAdminUser(ctx context.Context, actor *User, userID strin
 		return nil, err
 	}
 
+	// Story 3.4 Never rule (no re-activation path): a `deleted` tombstone is
+	// non-existent to the admin surface and must NEVER be edited back to life
+	// (e.g. an admin saving the user with status `active`). Resolve the target's
+	// live state FIRST and refuse any update of a deleted account (409 German).
+	// An unknown id still maps to the uniform 404 below.
+	target, err := s.repo.GetUserByID(ctx, userID)
+	if err != nil {
+		if errors.Is(err, ErrAdminUserNotFound) {
+			return nil, ErrAdminUserNotFound
+		}
+		return nil, fmt.Errorf("user core: failed to resolve user for update: %w", err)
+	}
+	if target != nil && target.State == StateDeleted {
+		return nil, ErrAdminUserDeleted
+	}
+
 	user, err := s.repo.UpdateAdminUser(ctx, userID, email, vorname, nachname, state, roleIDs, groupIDs, grantCodes)
 	if err != nil {
 		if errors.Is(err, ErrAdminUserNotFound) {

@@ -17,7 +17,18 @@ const (
 	MsgShortPassword    = "Das Passwort muss mindestens 10 Zeichen lang sein."
 	MsgPasswordMismatch = "Die Passwörter stimmen nicht überein."
 	MsgPasswordTooLong  = "Das Passwort ist zu lang."
+	// MsgEmailReserved rejects a RESERVED email (Story 3.4): the
+	// `deleted.<id>@deleted.local` tombstone domain of DSGVO-deleted accounts
+	// must stay unclaimable.
+	MsgEmailReserved = "Diese E-Mail-Adresse kann nicht verwendet werden."
 )
+
+// ReservedEmailDomain is the TLD+label the DSGVO account-deletion tombstones
+// use (Story 3.4, migration 000030): every scrubbed account's email becomes
+// `deleted.<id>@deleted.local`. The register validation rejects any
+// registration on this domain so the placeholder addresses can never collide
+// with a real account (case-insensitive — `@DELETED.LOCAL` is equally rejected).
+const ReservedEmailDomain = "@deleted.local"
 
 var (
 	// ErrMissingFields is returned when one or more required registration fields are empty.
@@ -25,6 +36,12 @@ var (
 
 	// ErrInvalidEmail is returned when an email address does not have a valid syntax.
 	ErrInvalidEmail = errors.New("invalid email address")
+
+	// ErrEmailReserved is returned when a registration email is a RESERVED
+	// address (Story 3.4): the `deleted.<id>@deleted.local` tombstones of
+	// DSGVO-deleted accounts live on that domain, so no real account may ever
+	// register one — the placeholder addresses must stay unclaimable.
+	ErrEmailReserved = errors.New("email address is reserved")
 
 	// ErrShortPassword is returned when a password has fewer than 10 characters (FR-2).
 	ErrShortPassword = errors.New("password too short")
@@ -51,6 +68,12 @@ const (
 	StatePendingApproval UserState = "pending_approval"
 	StateActive          UserState = "active"
 	StateDeactivated     UserState = "deactivated"
+	// StateDeleted is the scrubbed tombstone of a DSGVO-deleted account (Story
+	// 3.4, FR-24/AD-8): re-login is permanently blocked (only StateActive
+	// authenticates — auth.go / session.go) and the personal data lives in the
+	// dsgvo_deleted_accounts archive. The tombstone + archive are hard-purged
+	// only on admin demand (the sole hard delete).
+	StateDeleted UserState = "deleted"
 )
 
 // User is the domain entity for a system user.
@@ -117,6 +140,12 @@ func (in *RegisterInput) Validate() error {
 	email := strings.TrimSpace(in.Email)
 	if !isValidEmail(email) {
 		return ErrInvalidEmail
+	}
+	// Story 3.4 reserved-domain guard: `deleted.<id>@deleted.local` tombstones
+	// live on this domain — no real registration may claim it (case-insensitive,
+	// so `@DELETED.LOCAL` is equally rejected).
+	if strings.HasSuffix(strings.ToLower(email), ReservedEmailDomain) {
+		return ErrEmailReserved
 	}
 
 	if utf8.RuneCountInString(in.FirstName) > 100 || utf8.RuneCountInString(in.LastName) > 100 {

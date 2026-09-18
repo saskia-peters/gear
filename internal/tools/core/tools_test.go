@@ -57,6 +57,9 @@ type fakeToolStore struct {
 	// storage failure.
 	reinstatements []reinstatementRecord
 	reinstateErr   error
+	// anonymizeErr lets tests simulate a storage failure of the Story 3.4
+	// AnonymizeUserReferences rewrite.
+	anonymizeErr error
 }
 
 // reinstatementRecord is the in-memory reinstatement row (Story 5.6). CreatedAt
@@ -143,6 +146,27 @@ func (f *fakeToolStore) InsertReinstatement(_ context.Context, toolID, actorID, 
 	}
 	t := createdAt
 	f.status.LastReinstatedAt = &t
+	return nil
+}
+
+// AnonymizeUserReferences emulates the repository's transactional reference
+// rewrite (Story 3.4, FR-24/AD-8): every inspection/reinstatement referencing
+// the erased user id is rewritten to the canonical DeletedUserID sentinel.
+// Idempotent — a user with no matching rows is a no-op.
+func (f *fakeToolStore) AnonymizeUserReferences(_ context.Context, userID string) error {
+	if f.anonymizeErr != nil {
+		return f.anonymizeErr
+	}
+	for _, insp := range f.inspections {
+		if insp.InspectorID == userID {
+			insp.InspectorID = DeletedUserID
+		}
+	}
+	for i := range f.reinstatements {
+		if f.reinstatements[i].ActorID == userID {
+			f.reinstatements[i].ActorID = DeletedUserID
+		}
+	}
 	return nil
 }
 

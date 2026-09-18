@@ -77,6 +77,8 @@ func (h *Handler) Register(w http.ResponseWriter, r *http.Request) {
 			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", core.MsgMissingFields)
 		case errors.Is(err, core.ErrInvalidEmail):
 			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", core.MsgInvalidEmail)
+		case errors.Is(err, core.ErrEmailReserved):
+			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", core.MsgEmailReserved)
 		case errors.Is(err, core.ErrShortPassword):
 			httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", core.MsgShortPassword)
 		case errors.Is(err, core.ErrPasswordMismatch):

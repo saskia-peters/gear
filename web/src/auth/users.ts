@@ -437,6 +437,58 @@ export async function getDsgvoReport(userId: string): Promise<AccessReport> {
   })) as AccessReport
 }
 
+// ---------------------------------------------------------------------------
+// DSGVO account deletion (Story 3.4, FR-24/AD-8): the admin surface under
+// /api/v1/admin/dsgvo. Deletion NEVER hard-deletes — the account becomes a
+// scrubbed `deleted` tombstone and its personal data moves into the archive;
+// the archive + tombstone are hard-purged only on admin demand (the sole hard
+// delete). All three endpoints are gated by dsgvo.delete server-side.
+// ---------------------------------------------------------------------------
+
+// DeletedAccountRow is one archived (soft-deleted) account of the "Gelöschte
+// Konten" list: the archive id (the purge handle), the scrubbed display name +
+// email, the deletion timestamp and the reason.
+export interface DeletedAccountRow {
+  id: string
+  email: string
+  display_name: string
+  deleted_at: string
+  reason: string
+}
+
+// deleteUserAccount soft-deletes + archives a user account (Story 3.4): the
+// server rewrites the tool references to "Deleted User", archives the personal
+// data and scrubs the account (re-login permanently blocked). Returns the
+// server-authoritative German confirmation. The verb is POST (not DELETE): the
+// reason travels in the body and proxies strip DELETE bodies — the repo's
+// POST /{id}/archive-style convention.
+export async function deleteUserAccount(userId: string, reason: string): Promise<{ message: string }> {
+  return (await request(`${DSGVO_URL}/users/${encodeURIComponent(userId)}/delete`, {
+    method: 'POST',
+    headers: authTokenHeaders(),
+    body: JSON.stringify({ reason }),
+  })) as { message: string }
+}
+
+// listDeletedAccounts fetches the archived (soft-deleted) accounts newest-first
+// for the "Gelöschte Konten" surface.
+export async function listDeletedAccounts(): Promise<DeletedAccountRow[]> {
+  const data = (await request(`${DSGVO_URL}/users/deleted`, {
+    headers: authTokenHeaders(),
+  })) as { accounts?: DeletedAccountRow[] }
+  return Array.isArray(data.accounts) ? data.accounts : []
+}
+
+// purgeDeletedAccount hard-deletes an archived account AND its users tombstone
+// on admin demand (Story 3.4): the ONLY hard delete in the account lifecycle.
+// Returns the server-authoritative German confirmation.
+export async function purgeDeletedAccount(archiveId: string): Promise<{ message: string }> {
+  return (await request(`${DSGVO_URL}/users/deleted/${encodeURIComponent(archiveId)}`, {
+    method: 'DELETE',
+    headers: authTokenHeaders(),
+  })) as { message: string }
+}
+
 // Re-export the shared uniform-envelope error and the catalog type used by the
 // editor's direct-grant grid.
 export type { PermissionCatalogEntry }

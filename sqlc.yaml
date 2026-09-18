@@ -39,6 +39,7 @@ sql:
       - "./migrations/000015_drop_qualification_vocab_expiry.up.sql"
       - "./migrations/000016_user_account_approve_permission.up.sql"
       - "./migrations/000028_schirrmeister_inspection_history.up.sql"
+      - "./migrations/000030_dsgvo_account_deletion.up.sql"
     queries: "./internal/user/adapters/postgres/queries.sql"
     gen:
       go:

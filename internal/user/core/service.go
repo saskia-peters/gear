@@ -190,6 +190,18 @@ type Repository interface {
 	// authenticated session). Display status is NOT derived here — that is the
 	// core's job.
 	ListUserQualificationAssignments(ctx context.Context, userID string) ([]QualificationAssignment, error)
+	// DSGVO account-deletion persistence (Story 3.4, FR-24/AD-8):
+	// SoftDeleteAndArchive moves the target's personal data into
+	// dsgvo_deleted_accounts AND flips the users row to the scrubbed `deleted`
+	// tombstone in ONE transaction (an unknown id or an already-deleted
+	// tombstone maps to ErrAdminUserNotFound — the surface treats deleted as
+	// non-existent); ListDeletedAccounts returns the archived rows newest
+	// first; PurgeDeletedAccount hard-deletes an archived row AND its users
+	// tombstone in ONE transaction (an already-purged archive id maps to
+	// ErrDeletedAccountNotFound).
+	SoftDeleteAndArchive(ctx context.Context, targetUserID, reason, deletedBy string) (*User, error)
+	ListDeletedAccounts(ctx context.Context) ([]*DeletedAccount, error)
+	PurgeDeletedAccount(ctx context.Context, archiveID string) error
 }
 
 // SecretCipher encrypts/decrypts the TOTP shared secret at rest (NFR-S4). The

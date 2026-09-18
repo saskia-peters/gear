@@ -2,7 +2,7 @@
 title: 'DSGVO Account Deletion (FR-24/AD-8/NFR-O2)'
 type: 'feature'
 created: '2026-09-18'
-status: 'in-progress'
+status: 'done'
 review_loop_iteration: 0
 baseline_commit: '9c763e7412ae70f43cb4a3428d3267bb64c46568'
 context:
@@ -26,7 +26,8 @@ context:
 - **User lifecycle port** (`internal/user`): NEW `ports.Service.SoftDeleteAndArchive(ctx, actor *core.User, targetUserID, reason string) error` + repo — in ONE transaction: (a) copy the user's personal data into `dsgvo_deleted_accounts` (original_user_id, email, display_name, first_name, last_name, attributes, reason, deleted_by, created_at — a full snapshot incl. secrets? NO: snapshot excludes secrets); (b) set the user row state → `deleted` and scrub live personal fields (email → `deleted.<id>@deleted.local` placeholder to free the UNIQUE email for re-registration, password_hash → '', display_name/first/last → '', attributes → '{}', totp/otp/pending_email/must_change_password cleared); (c) `DELETE FROM login_attempts WHERE email = $original_email`. Re-login is permanently rejected: `user.State == StateActive` is the only authenticating state (auth.go:160) and sessions reject non-active (session.go:112).
 - **Archive table** (migration `000030_dsgvo_account_deletion.{up,down}.sql`): NEW `dsgvo_deleted_accounts` (id uuidv7 PK, original_user_id uuid NOT NULL PLAIN no FK — mirrors the tool snapshot pattern, created_at timestamptz, deleted_by uuid, reason text NOT NULL, email/display_name/first_name/last_name/attributes, deleted_at timestamptz) + `ALTER TABLE users DROP CONSTRAINT`/re-add `state CHECK` to admit `'deleted'`. The archive is the "saved somewhere" — the account is never hard-deleted at deletion time.
 - **On-demand purge** (`internal/dsgvo/core`): `Service.ListDeletedAccounts(ctx, actorID)` (permission `dsgvo.delete`) → archive rows newest-first, and `Service.PurgeDeletedAccount(ctx, actorID, archiveID)` — re-checks `dsgvo.delete`, loads the archive row, in ONE transaction deletes the archived row AND the (now-scrubbed) `users` tombstone (`DELETE FROM users WHERE id = $original_user_id` — this is the ONLY hard delete, admin-initiated on demand); CASCADEs any remaining sessions/reset tokens and auto-SET-NULLs `audit_log`/`admin_recovery` refs (000006/000009). Audits `dsgvo.purge` (actor, archive id) best-effort. A purge of an already-purged archive id → 404.
-- **Admin HTTP** `internal/admin/adapters/http/dsgvo.go`: `DELETE /users/{userId}` (body `{ reason }`), `GET /users/deleted`, `DELETE /users/deleted/{archiveId}` — same any-of mount (`/api/v1/admin/dsgvo`, `[dsgvo.access_report, dsgvo.delete]`), orchestrator re-checks `dsgvo.delete` defense-in-depth. Uniform 200/400/403/404/401/500 + router 404/405 JSON envelopes.
+- **Admin HTTP** `internal/admin/adapters/http/dsgvo.go`: `POST /users/{id}/delete` (body `{ reason }`), `GET /users/deleted`, `DELETE /users/deleted/{archiveId}` — same any-of mount (`/api/v1/admin/dsgvo`, `[dsgvo.access_report, dsgvo.delete]`), orchestrator re-checks `dsgvo.delete` defense-in-depth. Uniform 200/400/403/404/401/500 + router 404/405 JSON envelopes.
+  > **Review note (2026-09-18):** the delete endpoint verb is `POST /users/{id}/delete`, not `DELETE /users/{userId}` — the reason travels in the body and proxies strip DELETE bodies (the repo's `POST /{id}/archive`-style convention).
 - **SPA** (`web/src/pages/admin/AdminDsgvoPage.tsx`): the 3.3 delete-tab placeholder becomes a two-step delete flow — user picker, the user's `display_name` typed EXACTLY + a mandatory non-empty Begründung, "Endgültig löschen" enabled only when both valid, German copy "Unumkehrbar · Audit-Pflicht", mismatch → inline error + blocked, `busy` during the call, success confirmation, 401→login, 403→leave module. A second section "Gelöschte Konten" (same tab, `dsgvo.delete`) lists archived accounts (name/email/date/reason) with a per-row "Jetzt endgültig löschen" purge action (window.confirm) and an empty-state note; purge success removes the row and confirms. Tab hidden for non-`dsgvo.delete` holders.
 - **Tests:** orchestrator (delete matrix: permission/self/empty-reason/unknown/order/audit; list+purge: permission, purge cascades, already-purged 404), tool port (rewrite both tables + idempotent no-op), user port (archive snapshot + scrub + state + login_attempts + re-login rejection via a fresh login attempt), purge (archive + tombstone deleted, audit SET NULL), http (all statuses + router 404/405), composition mount, SPA (two-step gating, name mismatch, empty reason, confirm→success, purge flow, 401/403).
 
@@ -79,11 +80,11 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] Tool lifecycle port (sentinel const + rewrite queries + transactional method) -- backend
-- [ ] Migration 000030 (archive table + `deleted` state) + user SoftDeleteAndArchive/scrub/purge repo -- backend
-- [ ] Orchestrator DeleteAccount/ListDeletedAccounts/PurgeDeletedAccount + HTTP (delete/list/purge) + audit -- backend
-- [ ] SPA two-step delete tab + "Gelöschte Konten" purge list -- SPA
-- [ ] Tests -- orchestrator/tool/user/http/mount/SPA -- verification
+- [x] Tool lifecycle port (sentinel const + rewrite queries + transactional method) -- backend
+- [x] Migration 000030 (archive table + `deleted` state) + user SoftDeleteAndArchive/scrub/purge repo -- backend
+- [x] Orchestrator DeleteAccount/ListDeletedAccounts/PurgeDeletedAccount + HTTP (delete/list/purge) + audit -- backend
+- [x] SPA two-step delete tab + "Gelöschte Konten" purge list -- SPA
+- [x] Tests -- orchestrator/tool/user/http/mount/SPA -- verification
 
 **Acceptance Criteria:**
 - Given a `dsgvo.delete` holder with a valid reason, when they delete a user, then the account is soft-deleted (re-login permanently blocked) and its personal data is ARCHIVED (never hard-deleted at deletion time), while every inspection/reinstatement reference renders "Deleted User" with all timestamps/results/items/OOS intact (FR-24/AD-8/FR-18).
@@ -93,6 +94,8 @@ context:
 - Given a non-holder or a self-deletion, when they attempt it, then the server answers 403 / 400 and no data is exposed (AD-6).
 
 ## Spec Change Log
+
+- **Review patches (review 1, 2026-09-18):** `deleted` tombstones are NON-EXISTENT to the admin surface — `ListUsers` excludes them, `UpdateAdminUser` refuses a tombstone (409 German), and the DSGVO picker omits them (the "no re-activation path" rule is now enforced end-to-end); `DeleteAccount` reorders to resolve actor + verify target BEFORE the Tool rewrite (no mutation before all guards pass, nil-actor guard); self-deletion compares case-insensitively; the delete endpoint changed from `DELETE /users/{id}` (body) to `POST /users/{id}/delete` (proxy-safe); the purge hard-delete requires `state='deleted'` + RowsAffected checks (a corrupted archive row can never delete a live account); `ListDeletedAccounts` is capped at 500; the dead `actorID` param was dropped from `AnonymizeUserReferences`; `@deleted.local` registrations are rejected (reserved email); the SPA disables the form during `busy` (no selection race); re-login rejection is pinned by a real login attempt; `ListDeletedAccounts` newest-first is pinned with two rows; the 000030 down-migration limitation is documented. KEEP: the soft-delete+archive lifecycle, the on-demand purge as the sole hard delete, and the sentinel rewrite + "Deleted User" seam all stand as implemented.
 
 ## Design Notes
 
@@ -110,3 +113,42 @@ context:
 
 **Manual checks (if no CLI):**
 - As an admin on DSGVO → Konto löschen: pick a user, type their name + reason → "Endgültig löschen"; the account appears under "Gelöschte Konten" with its data archived; its inspection history shows "Deleted User"; login fails; "Jetzt endgültig löschen" purges it for real.
+
+## Suggested Review Order
+
+**Orchestrator delete/purge (entry point)**
+
+- `DeleteAccount` (guards before any mutation: self/unknown/reason/actor → Tool rewrite → soft-delete+archive → audit) + `ListDeletedAccounts`/`PurgeDeletedAccount`.
+  [`dsgvo.go:300`](../../internal/dsgvo/core/dsgvo.go#L300)
+
+**Lifecycle ports**
+
+- Tool: the sentinel rewrite (idempotent, no dead actorID).
+  [`dsgvo_deletion.go:40`](../../internal/tools/core/dsgvo_deletion.go#L40)
+
+- User: `SoftDeleteAndArchive` (snapshot → scrub + `deleted` state → login_attempts) + purge guard (`state='deleted'` + RowsAffected).
+  [`dsgvo_deletion.go:40`](../../internal/user/core/dsgvo_deletion.go#L40)
+
+- The archive table + extended state CHECK (migration 000030).
+  [`000030_dsgvo_account_deletion.up.sql:1`](../../migrations/000030_dsgvo_account_deletion.up.sql#L1)
+
+**Admin surface + tombstone isolation**
+
+- The three HTTP handlers (POST delete, GET list, POST purge).
+  [`dsgvo.go:60`](../../internal/admin/adapters/http/dsgvo.go#L60)
+
+- Tombstones non-existent: `ListUsers` excludes `deleted`, `UpdateAdminUser` refuses them.
+  [`queries.sql:640`](../../internal/user/adapters/postgres/queries.sql#L640)
+
+**SPA**
+
+- The two-step delete tab + "Gelöschte Konten" purge list (busy-disabled form, picker omits tombstones).
+  [`AdminDsgvoPage.tsx:460`](../../web/src/pages/admin/AdminDsgvoPage.tsx#L460)
+
+**Tests**
+
+- Delete/list/purge matrix + tombstone isolation + re-login rejection + ordering.
+  [`dsgvo_test.go:60`](../../internal/dsgvo/core/dsgvo_test.go#L60)
+
+- Postgres purge guard + archive/scrub + login-attempt cleanup.
+  [`dsgvo_test.go:60`](../../internal/user/adapters/postgres/dsgvo_test.go#L60)

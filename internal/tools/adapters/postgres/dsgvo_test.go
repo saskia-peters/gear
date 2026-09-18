@@ -133,3 +133,102 @@ func TestPostgresDsgvoInspectionExport(t *testing.T) {
 		t.Errorf("names contains an unknown id — it must be a MISSING key")
 	}
 }
+
+// TestPostgresAnonymizeUserReferences exercises the Story 3.4 reference
+// rewrite over the dev database: the erased user's inspections (inspector_id)
+// AND reinstatements (actor_id) flip to the canonical core.DeletedUserID
+// sentinel in ONE transaction, while a foreign user's references stay
+// untouched. A user with no matching rows is a no-op (idempotent).
+func TestPostgresAnonymizeUserReferences(t *testing.T) {
+	pool := toolTestPool(t)
+	ctx := context.Background()
+	t.Cleanup(func() { pool.Close() })
+
+	repo := NewRepository(New(pool))
+	toolTypeID, _ := seedToolRefs(t, ctx, pool)
+
+	tool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Anonymize-Werkzeug", ToolTypeID: toolTypeID})
+	if err != nil {
+		t.Fatalf("CreateTool err = %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, "DELETE FROM inspections WHERE tool_id = $1", tool.ID)
+		_, _ = pool.Exec(ctx, "DELETE FROM reinstatements WHERE tool_id = $1", tool.ID)
+		_, _ = pool.Exec(ctx, "DELETE FROM tools WHERE id = $1", tool.ID)
+	})
+
+	subject := "00000000-0000-0000-0000-0000000000ff"
+	foreign := "00000000-0000-0000-0000-0000000000fe"
+
+	if _, err := repo.InsertInspection(ctx, &core.Inspection{
+		ToolID: tool.ID, InspectorID: subject,
+		Mode: core.InspectionModePassFail, OverallResult: core.InspectionResultPass,
+	}); err != nil {
+		t.Fatalf("InsertInspection(subject) err = %v", err)
+	}
+	foreignInsp, err := repo.InsertInspection(ctx, &core.Inspection{
+		ToolID: tool.ID, InspectorID: foreign,
+		Mode: core.InspectionModePassFail, OverallResult: core.InspectionResultPass,
+	})
+	if err != nil {
+		t.Fatalf("InsertInspection(foreign) err = %v", err)
+	}
+	if err := repo.InsertReinstatement(ctx, tool.ID, subject, "erased"); err != nil {
+		t.Fatalf("InsertReinstatement(subject) err = %v", err)
+	}
+	if err := repo.InsertReinstatement(ctx, tool.ID, foreign, "foreign"); err != nil {
+		t.Fatalf("InsertReinstatement(foreign) err = %v", err)
+	}
+
+	// Idempotent no-op first: a user with no rows must not error nor disturb.
+	if err := repo.AnonymizeUserReferences(ctx, "00000000-0000-0000-0000-00000000abba"); err != nil {
+		t.Fatalf("AnonymizeUserReferences(no-op) err = %v", err)
+	}
+
+	if err := repo.AnonymizeUserReferences(ctx, subject); err != nil {
+		t.Fatalf("AnonymizeUserReferences(subject) err = %v", err)
+	}
+
+	// The subject's references are rewritten; the foreign ones are untouched.
+	var subjectInspector int
+	var foreignInspector int
+	if err := pool.QueryRow(ctx,
+		"SELECT count(*) FROM inspections WHERE inspector_id = $1", subject).Scan(&subjectInspector); err != nil {
+		t.Fatalf("counting rewritten inspector refs err = %v", err)
+	}
+	if subjectInspector != 0 {
+		t.Errorf("inspections still referencing the erased user = %d, want 0", subjectInspector)
+	}
+	if err := pool.QueryRow(ctx,
+		"SELECT count(*) FROM inspections WHERE inspector_id = $1", core.DeletedUserID).Scan(&foreignInspector); err != nil {
+		t.Fatalf("counting sentinel inspector refs err = %v", err)
+	}
+	if foreignInspector != 1 {
+		t.Errorf("inspections referencing the sentinel = %d, want the subject's 1", foreignInspector)
+	}
+	var foreignOK bool
+	if err := pool.QueryRow(ctx,
+		"SELECT EXISTS (SELECT 1 FROM inspections WHERE id = $1 AND inspector_id = $2)",
+		foreignInsp.ID, foreign).Scan(&foreignOK); err != nil {
+		t.Fatalf("reading foreign inspection err = %v", err)
+	}
+	if !foreignOK {
+		t.Errorf("foreign inspection's inspector_id was disturbed")
+	}
+
+	var subjectActors, foreignActors int
+	if err := pool.QueryRow(ctx,
+		"SELECT count(*) FROM reinstatements WHERE actor_id = $1", subject).Scan(&subjectActors); err != nil {
+		t.Fatalf("counting erased actor refs err = %v", err)
+	}
+	if subjectActors != 0 {
+		t.Errorf("reinstatements still referencing the erased user = %d, want 0", subjectActors)
+	}
+	if err := pool.QueryRow(ctx,
+		"SELECT count(*) FROM reinstatements WHERE actor_id = $1 AND reason = 'foreign'", foreign).Scan(&foreignActors); err != nil {
+		t.Fatalf("counting foreign actor refs err = %v", err)
+	}
+	if foreignActors != 1 {
+		t.Errorf("foreign reinstatement actor disturbed: %d", foreignActors)
+	}
+}

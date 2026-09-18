@@ -17,6 +17,20 @@ type AuditLog struct {
 	Severity        string             `json:"severity"`
 }
 
+type DsgvoDeletedAccount struct {
+	ID             pgtype.UUID        `json:"id"`
+	OriginalUserID pgtype.UUID        `json:"original_user_id"`
+	Email          string             `json:"email"`
+	DisplayName    string             `json:"display_name"`
+	FirstName      string             `json:"first_name"`
+	LastName       string             `json:"last_name"`
+	Attributes     []byte             `json:"attributes"`
+	Reason         string             `json:"reason"`
+	DeletedBy      pgtype.UUID        `json:"deleted_by"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	DeletedAt      pgtype.Timestamptz `json:"deleted_at"`
+}
+
 type LoginAttempt struct {
 	Email        string             `json:"email"`
 	FailedCount  int32              `json:"failed_count"`

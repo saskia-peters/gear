@@ -360,3 +360,110 @@
   font-size: var(--gear-font-body-size);
   color: var(--gear-color-ink-secondary);
 }
+
+/* --- Story 3.4 delete tab --- */
+
+.warning {
+  margin: 0;
+  padding: var(--gear-space-3) var(--gear-space-4);
+  border: 1px solid var(--gear-color-status-red);
+  border-radius: var(--gear-radius-md);
+  background-color: var(--gear-color-status-red-soft);
+  color: var(--gear-color-status-red);
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  line-height: var(--gear-font-label-line-height);
+}
+
+.deleteForm {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-2);
+  border: 1px solid var(--gear-color-border);
+  border-radius: var(--gear-radius-md);
+  padding: var(--gear-space-4);
+}
+
+.confirmHint {
+  margin: 0;
+  font-size: var(--gear-font-body-size);
+  color: var(--gear-color-ink-secondary);
+}
+
+.confirmName {
+  margin: 0;
+  font-size: var(--gear-font-subheading-size);
+  font-weight: var(--gear-font-subheading-weight);
+  color: var(--gear-color-ink-primary);
+  word-break: break-word;
+}
+
+.textInput,
+.textarea {
+  width: 100%;
+  box-sizing: border-box;
+  padding: var(--gear-space-2) var(--gear-space-3);
+  border: 1px solid var(--gear-color-border);
+  border-radius: var(--gear-radius-md);
+  background-color: var(--gear-color-surface-raised);
+  color: var(--gear-color-ink-primary);
+  font-size: var(--gear-font-body-size);
+  line-height: var(--gear-font-body-line-height);
+  font-family: var(--gear-font-family);
+}
+
+.textInput:focus-visible,
+.textarea:focus-visible {
+  outline: 2px solid var(--gear-color-accent);
+  outline-offset: 2px;
+}
+
+.textarea {
+  resize: vertical;
+  min-height: 88px;
+}
+
+.inputError {
+  border-color: var(--gear-color-status-red);
+}
+
+.fieldError {
+  margin: 0;
+  font-size: var(--gear-font-label-size);
+  color: var(--gear-color-status-red);
+}
+
+.dangerButton {
+  min-height: 48px;
+  padding: var(--gear-space-3) var(--gear-space-5);
+  border: 1px solid var(--gear-color-button-danger-bg);
+  border-radius: var(--gear-radius-md);
+  background-color: transparent;
+  color: var(--gear-color-button-danger-bg);
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  line-height: var(--gear-font-label-line-height);
+  cursor: pointer;
+  white-space: nowrap;
+  align-self: flex-start;
+}
+
+.dangerButton:hover:not(:disabled) {
+  background-color: var(--gear-color-status-red-soft);
+}
+
+.dangerButton:focus-visible {
+  outline: 2px solid var(--gear-color-status-red);
+  outline-offset: 2px;
+}
+
+.dangerButton:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+.deletedSection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-3);
+}

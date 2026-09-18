@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"strings"
 	"testing"
 	"time"
@@ -200,4 +201,68 @@ func marshalForInspectionTest(export *UserInspectionDataExport) (string, error) 
 		return "", err
 	}
 	return string(b), nil
+}
+
+// --- Story 3.4: AnonymizeUserReferences -------------------------------------
+
+func TestAnonymizeUserReferences(t *testing.T) {
+	// ANON_OK: the erased user's inspection/reinstatement references are
+	// rewritten to the canonical DeletedUserID sentinel; a foreign user's
+	// references are untouched. The method carries NO actor id (the orchestrator
+	// audits).
+	store := dsgvoToolStore()
+	svc := NewService(store, nil, nil, &fakePerms{perms: []string{}}, nil, &fakeAudit{}, nil)
+
+	if err := svc.AnonymizeUserReferences(context.Background(), "u-inspektor"); err != nil {
+		t.Fatalf("AnonymizeUserReferences err = %v, want success", err)
+	}
+	for _, insp := range store.inspections {
+		if insp.InspectorID == "u-inspektor" {
+			t.Errorf("inspection %s still references the erased user: %q", insp.ID, insp.InspectorID)
+		}
+		if insp.InspectorID == "u-andere" {
+			// A foreign inspector must stay untouched.
+			continue
+		}
+		if insp.InspectorID != DeletedUserID {
+			t.Errorf("inspection %s inspector = %q, want the canonical DeletedUserID", insp.ID, insp.InspectorID)
+		}
+	}
+	for _, r := range store.reinstatements {
+		if r.ActorID == "u-inspektor" {
+			t.Errorf("reinstatement %s still references the erased user: %q", r.ToolID, r.ActorID)
+		}
+		if r.ActorID != DeletedUserID && r.ActorID != "u-andere" {
+			t.Errorf("reinstatement %s actor = %q, want the sentinel or the untouched foreign actor", r.ToolID, r.ActorID)
+		}
+	}
+}
+
+func TestAnonymizeUserReferencesIdempotentNoOp(t *testing.T) {
+	// ANON_EMPTY: a user with no inspection/reinstatement references is a
+	// no-op — never an error, and nothing else is disturbed.
+	store := &fakeToolStore{
+		inspections: []*Inspection{{
+			ID: "insp-x", ToolID: "id-tool-a", InspectorID: "u-andere",
+			Mode: InspectionModePassFail, OverallResult: InspectionResultPass,
+			SubmittedAt: time.Now(),
+		}},
+	}
+	svc := NewService(store, nil, nil, &fakePerms{perms: []string{}}, nil, &fakeAudit{}, nil)
+	if err := svc.AnonymizeUserReferences(context.Background(), "u-neu"); err != nil {
+		t.Fatalf("AnonymizeUserReferences(no-op) err = %v, want success", err)
+	}
+	if store.inspections[0].InspectorID != "u-andere" {
+		t.Errorf("foreign inspector disturbed: %q", store.inspections[0].InspectorID)
+	}
+}
+
+func TestAnonymizeUserReferencesStoreError(t *testing.T) {
+	// A storage failure surfaces wrapped (the orchestrator answers the 500).
+	store := &fakeToolStore{anonymizeErr: errors.New("store down")}
+	store.inspections = []*Inspection{{ID: "insp-x", ToolID: "id-tool-a", InspectorID: "u-inspektor", Mode: InspectionModePassFail, OverallResult: InspectionResultPass}}
+	svc := NewService(store, nil, nil, &fakePerms{perms: []string{}}, nil, &fakeAudit{}, nil)
+	if err := svc.AnonymizeUserReferences(context.Background(), "u-inspektor"); err == nil {
+		t.Fatal("err = nil, want a wrapped store error")
+	}
 }

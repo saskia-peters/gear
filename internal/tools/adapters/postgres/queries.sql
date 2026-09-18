@@ -393,3 +393,27 @@ SELECT id, name
 FROM tools
 WHERE id = ANY($1::uuid[])
 ORDER BY id;
+
+-- ============================================================================
+-- DSGVO account-deletion anonymization queries (Story 3.4, FR-24/AD-8): the
+-- per-reference rewrites behind the Tool module's DSGVODeletionPort. The
+-- plain FK-less inspector_id / actor_id columns (000027) flip to the canonical
+-- DeletedUserID sentinel; the repository runs BOTH in ONE transaction. Both
+-- are idempotent by construction (no matching rows → a no-op).
+-- ============================================================================
+
+-- name: UpdateInspectionsInspector :exec
+-- Rewrite every inspection the erased user performed as inspector to the
+-- canonical DeletedUserID sentinel. Zero rows when the user never inspected
+-- (no-op, never an error).
+UPDATE inspections
+SET inspector_id = $1
+WHERE inspector_id = $2;
+
+-- name: UpdateReinstatementsActor :exec
+-- Rewrite every reinstatement the erased user performed as actor to the
+-- canonical DeletedUserID sentinel. Zero rows when the user never reinstated
+-- (no-op, never an error).
+UPDATE reinstatements
+SET actor_id = $1
+WHERE actor_id = $2;

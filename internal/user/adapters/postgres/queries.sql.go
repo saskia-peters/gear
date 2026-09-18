@@ -667,6 +667,25 @@ func (q *Queries) CreateUserGroup(ctx context.Context, arg CreateUserGroupParams
 	return i, err
 }
 
+const deleteDeletedAccount = `-- name: DeleteDeletedAccount :execrows
+DELETE FROM dsgvo_deleted_accounts
+WHERE id = $1
+`
+
+// Remove one archived account row (Story 3.4 purge). Called in the SAME
+// transaction as DeleteUserByID so the archive + tombstone are hard-deleted
+// all-or-nothing (the ONLY hard delete — admin-initiated on demand). The
+// affected-row count is reported so a CONCURRENT purge (the row vanished
+// between GetDeletedAccount and this delete) maps to the uniform 404 instead of
+// a false success.
+func (q *Queries) DeleteDeletedAccount(ctx context.Context, id pgtype.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteDeletedAccount, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
+}
+
 const deleteExpiredPasswordResetTokens = `-- name: DeleteExpiredPasswordResetTokens :exec
 DELETE FROM password_reset_tokens
 WHERE user_id = $1 AND expires_at < now()
@@ -706,6 +725,20 @@ WHERE permission_group_id = $1
 // re-insert of that row (PostgreSQL unique-index behaviour).
 func (q *Queries) DeleteGroupPermissions(ctx context.Context, permissionGroupID pgtype.UUID) error {
 	_, err := q.db.Exec(ctx, deleteGroupPermissions, permissionGroupID)
+	return err
+}
+
+const deleteLoginAttemptsByEmail = `-- name: DeleteLoginAttemptsByEmail :exec
+DELETE FROM login_attempts
+WHERE email = $1
+`
+
+// Remove the erased email's login-attempt rows (Story 3.4): the email is
+// scrubbed from the user row (the placeholder frees the address), so the
+// per-email failure/lockout state must follow. A zero-row delete (no tracked
+// attempts) is a no-op.
+func (q *Queries) DeleteLoginAttemptsByEmail(ctx context.Context, email string) error {
+	_, err := q.db.Exec(ctx, deleteLoginAttemptsByEmail, email)
 	return err
 }
 
@@ -773,6 +806,26 @@ type DeleteSessionsByUserExceptParams struct {
 func (q *Queries) DeleteSessionsByUserExcept(ctx context.Context, arg DeleteSessionsByUserExceptParams) error {
 	_, err := q.db.Exec(ctx, deleteSessionsByUserExcept, arg.UserID, arg.TokenHash)
 	return err
+}
+
+const deleteUserByID = `-- name: DeleteUserByID :execrows
+DELETE FROM users
+WHERE id = $1 AND state = 'deleted'
+`
+
+// Hard-delete the (already-scrubbed) `deleted` users tombstone (Story 3.4
+// purge). This is the ONLY hard delete in the account lifecycle; the CASCADEs
+// remove any remaining sessions/reset tokens/role memberships and the
+// audit_log/admin_recovery references auto-SET-NULL (migrations 000006/000009).
+// The `AND state = 'deleted'` guard means a corrupted archive row pointing at a
+// NON-deleted account can NEVER hard-delete a live user — a zero-row delete
+// maps to the uniform 404.
+func (q *Queries) DeleteUserByID(ctx context.Context, id pgtype.UUID) (int64, error) {
+	result, err := q.db.Exec(ctx, deleteUserByID, id)
+	if err != nil {
+		return 0, err
+	}
+	return result.RowsAffected(), nil
 }
 
 const deleteUserDirectGrants = `-- name: DeleteUserDirectGrants :exec
@@ -916,6 +969,35 @@ func (q *Queries) GetAdminRecoveryTokenByHash(ctx context.Context, tokenHash str
 		&i.IsMfaEnabled,
 		&i.PasswordHash,
 		&i.MustChangePassword,
+	)
+	return i, err
+}
+
+const getDeletedAccount = `-- name: GetDeletedAccount :one
+SELECT id, original_user_id, email, display_name, first_name, last_name, attributes, reason, deleted_by, created_at, deleted_at
+FROM dsgvo_deleted_accounts
+WHERE id = $1
+`
+
+// One archived account by its archive id (Story 3.4 purge): the purge
+// transaction reads it FIRST to resolve the original user id for the users
+// tombstone delete. A zero-row read (unknown or already-purged id) maps to the
+// uniform not-found.
+func (q *Queries) GetDeletedAccount(ctx context.Context, id pgtype.UUID) (DsgvoDeletedAccount, error) {
+	row := q.db.QueryRow(ctx, getDeletedAccount, id)
+	var i DsgvoDeletedAccount
+	err := row.Scan(
+		&i.ID,
+		&i.OriginalUserID,
+		&i.Email,
+		&i.DisplayName,
+		&i.FirstName,
+		&i.LastName,
+		&i.Attributes,
+		&i.Reason,
+		&i.DeletedBy,
+		&i.CreatedAt,
+		&i.DeletedAt,
 	)
 	return i, err
 }
@@ -1241,6 +1323,52 @@ func (q *Queries) GetUserByIDFull(ctx context.Context, id pgtype.UUID) (GetUserB
 	return i, err
 }
 
+const getUserFullForArchive = `-- name: GetUserFullForArchive :one
+
+SELECT id, email, display_name, first_name, last_name, attributes, state
+FROM users
+WHERE id = $1
+`
+
+type GetUserFullForArchiveRow struct {
+	ID          pgtype.UUID `json:"id"`
+	Email       string      `json:"email"`
+	DisplayName string      `json:"display_name"`
+	FirstName   string      `json:"first_name"`
+	LastName    string      `json:"last_name"`
+	Attributes  []byte      `json:"attributes"`
+	State       string      `json:"state"`
+}
+
+// ============================================================================
+// DSGVO account deletion (Story 3.4, FR-24/AD-8): the User-owned lifecycle
+// persistence behind the DSGVODeletionPort. Deletion NEVER hard-deletes — the
+// target's personal data moves into the dsgvo_deleted_accounts ARCHIVE and the
+// users row flips to a scrubbed `deleted` tombstone in ONE transaction; the
+// archive + tombstone are hard-purged ONLY on admin demand (the sole hard
+// delete, PURGE).
+// ============================================================================
+// The FULL personal-data snapshot read for the archive (Story 3.4): the
+// columns the archive row copies — email, names, attributes — PLUS the live
+// state so the repo can reject an already-deleted tombstone. The secret
+// columns (password_hash, totp_secret_encrypted, pending_totp_secret_encrypted,
+// one_time_password_hash) are deliberately NOT selected — the archive snapshot
+// excludes secrets. A zero-row read (unknown id) maps to the uniform not-found.
+func (q *Queries) GetUserFullForArchive(ctx context.Context, id pgtype.UUID) (GetUserFullForArchiveRow, error) {
+	row := q.db.QueryRow(ctx, getUserFullForArchive, id)
+	var i GetUserFullForArchiveRow
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.DisplayName,
+		&i.FirstName,
+		&i.LastName,
+		&i.Attributes,
+		&i.State,
+	)
+	return i, err
+}
+
 const incrementLoginAttempts = `-- name: IncrementLoginAttempts :exec
 INSERT INTO login_attempts (email, failed_count, lockout_until)
 VALUES ($1, 1, NULL)
@@ -1306,6 +1434,54 @@ VALUES ($1)
 func (q *Queries) InsertAuditEventAnonymous(ctx context.Context, operation string) error {
 	_, err := q.db.Exec(ctx, insertAuditEventAnonymous, operation)
 	return err
+}
+
+const insertDeletedAccount = `-- name: InsertDeletedAccount :one
+INSERT INTO dsgvo_deleted_accounts (original_user_id, email, display_name, first_name, last_name, attributes, reason, deleted_by)
+VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+RETURNING id, original_user_id, email, display_name, first_name, last_name, attributes, reason, deleted_by, created_at, deleted_at
+`
+
+type InsertDeletedAccountParams struct {
+	OriginalUserID pgtype.UUID `json:"original_user_id"`
+	Email          string      `json:"email"`
+	DisplayName    string      `json:"display_name"`
+	FirstName      string      `json:"first_name"`
+	LastName       string      `json:"last_name"`
+	Attributes     []byte      `json:"attributes"`
+	Reason         string      `json:"reason"`
+	DeletedBy      pgtype.UUID `json:"deleted_by"`
+}
+
+// Move the erased user's personal snapshot into the archive. The id is the DB
+// uuidv7; deleted_at = DB now(). deleted_by is the deleting admin (plain uuid,
+// no FK — the archive must survive the users hard delete on purge).
+func (q *Queries) InsertDeletedAccount(ctx context.Context, arg InsertDeletedAccountParams) (DsgvoDeletedAccount, error) {
+	row := q.db.QueryRow(ctx, insertDeletedAccount,
+		arg.OriginalUserID,
+		arg.Email,
+		arg.DisplayName,
+		arg.FirstName,
+		arg.LastName,
+		arg.Attributes,
+		arg.Reason,
+		arg.DeletedBy,
+	)
+	var i DsgvoDeletedAccount
+	err := row.Scan(
+		&i.ID,
+		&i.OriginalUserID,
+		&i.Email,
+		&i.DisplayName,
+		&i.FirstName,
+		&i.LastName,
+		&i.Attributes,
+		&i.Reason,
+		&i.DeletedBy,
+		&i.CreatedAt,
+		&i.DeletedAt,
+	)
+	return i, err
 }
 
 const insertGroupMembers = `-- name: InsertGroupMembers :exec
@@ -1574,6 +1750,51 @@ func (q *Queries) ListAllPermissions(ctx context.Context) ([]ListAllPermissionsR
 	for rows.Next() {
 		var i ListAllPermissionsRow
 		if err := rows.Scan(&i.Code, &i.Description); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listDeletedAccounts = `-- name: ListDeletedAccounts :many
+SELECT id, original_user_id, email, display_name, first_name, last_name, attributes, reason, deleted_by, created_at, deleted_at
+FROM dsgvo_deleted_accounts
+ORDER BY deleted_at DESC, id DESC
+LIMIT 500
+`
+
+// Every archived (soft-deleted) account for the admin "Gelöschte Konten"
+// surface (Story 3.4), newest first (deleted_at DESC, id DESC — the 000030
+// index dsgvo_deleted_accounts_deleted_at_idx serves the sort). Bounded by a
+// V1 admin-scale cap (500 rows): the surface never renders an unbounded list,
+// and the purge is per-row so a huge backlog is worked in the UI. No secret
+// material is selected.
+func (q *Queries) ListDeletedAccounts(ctx context.Context) ([]DsgvoDeletedAccount, error) {
+	rows, err := q.db.Query(ctx, listDeletedAccounts)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []DsgvoDeletedAccount
+	for rows.Next() {
+		var i DsgvoDeletedAccount
+		if err := rows.Scan(
+			&i.ID,
+			&i.OriginalUserID,
+			&i.Email,
+			&i.DisplayName,
+			&i.FirstName,
+			&i.LastName,
+			&i.Attributes,
+			&i.Reason,
+			&i.DeletedBy,
+			&i.CreatedAt,
+			&i.DeletedAt,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)
@@ -2404,6 +2625,7 @@ const listUsers = `-- name: ListUsers :many
 SELECT id, email, first_name, last_name, state
 FROM users
 WHERE ($1::text IS NULL OR state = $1::text)
+  AND state <> 'deleted'
 ORDER BY last_name, first_name, email
 `
 
@@ -2423,6 +2645,10 @@ type ListUsersRow struct {
 // filter (active/pending_approval/deactivated) narrows the set; a NULL status
 // returns all users (Spec 2.9 status filter). No secret material (password
 // hash, tokens) is selected — the listing never exposes credentials (NFR-O1).
+// DELETED tombstones are EXCLUDED from BOTH branches (the Story 3.4 Never
+// rule: a `deleted` account is non-existent to the admin surface — no
+// re-activation path, and the DSGVO delete picker must not offer one as a
+// target).
 func (q *Queries) ListUsers(ctx context.Context, status pgtype.Text) ([]ListUsersRow, error) {
 	rows, err := q.db.Query(ctx, listUsers, status)
 	if err != nil {
@@ -2657,6 +2883,84 @@ func (q *Queries) RemoveQualificationFromUser(ctx context.Context, arg RemoveQua
 		return 0, err
 	}
 	return result.RowsAffected(), nil
+}
+
+const setUserDeletedAndScrub = `-- name: SetUserDeletedAndScrub :one
+UPDATE users
+SET state                            = 'deleted',
+    email                            = 'deleted.' || id::text || '@deleted.local',
+    password_hash                    = '',
+    display_name                     = '',
+    first_name                       = '',
+    last_name                        = '',
+    attributes                       = '{}'::jsonb,
+    is_mfa_enabled                   = false,
+    totp_secret_encrypted            = NULL,
+    pending_totp_secret_encrypted    = NULL,
+    pending_totp_expires_at          = NULL,
+    pending_email                    = NULL,
+    must_change_password             = false,
+    one_time_password_hash           = '',
+    one_time_password_expires_at     = NULL,
+    updated_at                       = now()
+WHERE id = $1 AND state <> 'deleted'
+RETURNING id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password, one_time_password_hash, one_time_password_expires_at
+`
+
+type SetUserDeletedAndScrubRow struct {
+	ID                         pgtype.UUID        `json:"id"`
+	Email                      string             `json:"email"`
+	DisplayName                string             `json:"display_name"`
+	FirstName                  string             `json:"first_name"`
+	LastName                   string             `json:"last_name"`
+	PasswordHash               string             `json:"password_hash"`
+	State                      string             `json:"state"`
+	IsMfaEnabled               bool               `json:"is_mfa_enabled"`
+	TotpSecretEncrypted        pgtype.Text        `json:"totp_secret_encrypted"`
+	PendingTotpSecretEncrypted pgtype.Text        `json:"pending_totp_secret_encrypted"`
+	PendingTotpExpiresAt       pgtype.Timestamptz `json:"pending_totp_expires_at"`
+	Attributes                 []byte             `json:"attributes"`
+	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt                  pgtype.Timestamptz `json:"updated_at"`
+	PendingEmail               pgtype.Text        `json:"pending_email"`
+	MustChangePassword         bool               `json:"must_change_password"`
+	OneTimePasswordHash        string             `json:"one_time_password_hash"`
+	OneTimePasswordExpiresAt   pgtype.Timestamptz `json:"one_time_password_expires_at"`
+}
+
+// Flip the user row to the `deleted` tombstone AND scrub the live personal
+// fields in ONE statement: email becomes the `deleted.<id>@deleted.local`
+// placeholder (freeing the UNIQUE email for re-registration while the tombstone
+// stays addressable only by its id), the password hash and the names clear,
+// attributes reset to '{}', MFA + the encrypted TOTP/pending/OTP secrets clear
+// and pending_email/must_change_password reset. The `state <> 'deleted'` guard
+// makes an already-deleted tombstone (or an unknown id) affect zero rows → the
+// caller maps it to the uniform not-found (the surface treats `deleted` as
+// non-existent). No hard delete ever happens here.
+func (q *Queries) SetUserDeletedAndScrub(ctx context.Context, id pgtype.UUID) (SetUserDeletedAndScrubRow, error) {
+	row := q.db.QueryRow(ctx, setUserDeletedAndScrub, id)
+	var i SetUserDeletedAndScrubRow
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.DisplayName,
+		&i.FirstName,
+		&i.LastName,
+		&i.PasswordHash,
+		&i.State,
+		&i.IsMfaEnabled,
+		&i.TotpSecretEncrypted,
+		&i.PendingTotpSecretEncrypted,
+		&i.PendingTotpExpiresAt,
+		&i.Attributes,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.PendingEmail,
+		&i.MustChangePassword,
+		&i.OneTimePasswordHash,
+		&i.OneTimePasswordExpiresAt,
+	)
+	return i, err
 }
 
 const setUserMustChangePassword = `-- name: SetUserMustChangePassword :exec

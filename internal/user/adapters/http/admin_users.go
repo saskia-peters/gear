@@ -327,6 +327,9 @@ func (h *Handler) UpdateAdminUser(w http.ResponseWriter, r *http.Request) {
 		case errors.Is(err, core.ErrAdminUserNotFound):
 			h.logger.Warn("admin user update rejected: unknown id", "email", user.Email, "target", userID)
 			httpapi.WriteError(w, http.StatusNotFound, "not_found", core.MsgAdminUserNotFound)
+		case errors.Is(err, core.ErrAdminUserDeleted):
+			h.logger.Warn("admin user update rejected: deleted tombstone", "email", user.Email, "target", userID)
+			httpapi.WriteError(w, http.StatusConflict, "conflict", core.MsgAdminUserDeleted)
 		case errors.Is(err, core.ErrAdminUserEmailTaken):
 			httpapi.WriteError(w, http.StatusConflict, "conflict", core.MsgAdminUserEmailTaken)
 		case errors.Is(err, core.ErrAdminUserInvalidName):

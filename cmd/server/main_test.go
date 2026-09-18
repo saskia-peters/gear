@@ -1776,6 +1776,38 @@ func (a *compDsgvoAudit) InsertAuditEvent(_ context.Context, userID, operation, 
 	return nil
 }
 
+// compDsgvoUserDeletion is a userports.DSGVODeletionPort fake over a canned
+// archived-row set (Story 3.4).
+type compDsgvoUserDeletion struct {
+	rows []*usercore.DeletedAccount
+}
+
+func (p *compDsgvoUserDeletion) SoftDeleteAndArchive(_ context.Context, _ *usercore.User, _, _ string) error {
+	return nil
+}
+
+func (p *compDsgvoUserDeletion) ListDeletedAccounts(_ context.Context) ([]*usercore.DeletedAccount, error) {
+	return p.rows, nil
+}
+
+func (p *compDsgvoUserDeletion) PurgeDeletedAccount(_ context.Context, _ string) error {
+	return nil
+}
+
+// compDsgvoToolDeletion is a toolports.DSGVODeletionPort fake (Story 3.4).
+type compDsgvoToolDeletion struct{}
+
+func (p *compDsgvoToolDeletion) AnonymizeUserReferences(_ context.Context, _ string) error {
+	return nil
+}
+
+// compDsgvoActor is an ActorResolver that always resolves the actor.
+type compDsgvoActor struct{}
+
+func (a *compDsgvoActor) GetUserByID(_ context.Context, userID string) (*usercore.User, error) {
+	return &usercore.User{ID: userID, Email: "dsgvo@gear.local", State: usercore.StateActive}, nil
+}
+
 // newCompositionDsgvoRouter mirrors the main() DSGVO mounts exactly: the outer
 // /api/v1/admin mount gated by AdminModuleAccessCodes and the DSGVO sub-mount
 // /api/v1/admin/dsgvo gated by ANY of [dsgvo.access_report, dsgvo.delete]
@@ -1790,7 +1822,10 @@ func newCompositionDsgvoRouter(perms []string, session *usercore.Session) (http.
 	orchestrator := dsgvocore.NewService(
 		&compDsgvoUserPort{},
 		&compDsgvoToolPort{},
+		&compDsgvoUserDeletion{},
+		&compDsgvoToolDeletion{},
 		resolver, // the orchestrator's defense-in-depth permission seam (AD-6)
+		&compDsgvoActor{},
 		audit,
 		log,
 	)
@@ -1903,5 +1938,80 @@ func TestCompositionDsgvoMountGating(t *testing.T) {
 	routerReport.ServeHTTP(rootRec, req)
 	if rootRec.Code != http.StatusOK {
 		t.Errorf("admin root: status = %d, want 200", rootRec.Code)
+	}
+}
+
+// TestCompositionDsgvoDeleteMount verifies the Story 3.4 deletion surface
+// through the composed router (AD-6/AD-8): a dsgvo.delete holder reaches the
+// delete / list-deleted / purge endpoints (the orchestrator composes the
+// deletion ports, all wired in main()), while a non-holder is denied all of
+// them with the uniform 403 and a self-deletion answers the German 400.
+func TestCompositionDsgvoDeleteMount(t *testing.T) {
+	routerDel, auditDel := newCompositionDsgvoRouter([]string{dsgvocore.DeletePermission}, activeUser("u-del", "del@gear.local"))
+
+	// DELETE /users/{userId} → 200 German confirmation, audited.
+	rec := doComposedJSONRequest(routerDel, "tok", http.MethodPost, "/api/v1/admin/dsgvo/users/u-target/delete", `{"reason":"Auf Wunsch"}`)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("delete holder: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "wurde gelöscht") {
+		t.Errorf("delete body misses the German confirmation: %s", rec.Body.String())
+	}
+	if len(auditDel.events) != 1 || auditDel.events[0].actorID != "u-del" || auditDel.events[0].operation != dsgvocore.AuditOperationDelete {
+		t.Errorf("audit events = %+v, want one dsgvo.delete row for u-del", auditDel.events)
+	}
+
+	// Self-deletion → German 400.
+	rec = doComposedJSONRequest(routerDel, "tok", http.MethodPost, "/api/v1/admin/dsgvo/users/u-del/delete", `{"reason":"x"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Errorf("self-deletion: status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), dsgvocore.MsgDsgvoDeleteSelf) {
+		t.Errorf("self-deletion body misses the German 400: %s", rec.Body.String())
+	}
+
+	// GET /users/deleted → the archived list (empty from the in-memory port).
+	rec = doDsgvoComposedRequest(routerDel, "tok", "/api/v1/admin/dsgvo/users/deleted")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("list-deleted holder: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), `"accounts":[]`) {
+		t.Errorf("list-deleted body = %s, want an empty accounts array", rec.Body.String())
+	}
+
+	// DELETE /users/deleted/{archiveId} → 200 purge confirmation, audited.
+	rec = doComposedJSONRequest(routerDel, "tok", http.MethodDelete, "/api/v1/admin/dsgvo/users/deleted/a-1", "")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("purge holder: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), dsgvocore.MsgPurgeConfirmation) {
+		t.Errorf("purge body misses the German confirmation: %s", rec.Body.String())
+	}
+	if len(auditDel.events) < 2 || auditDel.events[1].operation != dsgvocore.AuditOperationPurge {
+		t.Errorf("audit events = %+v, want a dsgvo.purge row after the delete row", auditDel.events)
+	}
+
+	// A non-holder (report-only) is denied ALL three delete routes (AD-6).
+	routerReportOnly, _ := newCompositionDsgvoRouter([]string{dsgvocore.AccessReportPermission}, activeUser("u-rep", "rep@gear.local"))
+	if rec := doComposedJSONRequest(routerReportOnly, "tok", http.MethodPost, "/api/v1/admin/dsgvo/users/u-target/delete", `{"reason":"x"}`); rec.Code != http.StatusForbidden {
+		t.Errorf("report-only holder on delete: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	if rec := doDsgvoComposedRequest(routerReportOnly, "tok", "/api/v1/admin/dsgvo/users/deleted"); rec.Code != http.StatusForbidden {
+		t.Errorf("report-only holder on list-deleted: status = %d, want 403", rec.Code)
+	}
+	if rec := doComposedJSONRequest(routerReportOnly, "tok", http.MethodDelete, "/api/v1/admin/dsgvo/users/deleted/a-1", ""); rec.Code != http.StatusForbidden {
+		t.Errorf("report-only holder on purge: status = %d, want 403", rec.Code)
+	}
+
+	// Unauthenticated → 401 on all three.
+	router401, _ := newCompositionDsgvoRouter([]string{}, nil)
+	if rec := doComposedJSONRequest(router401, "", http.MethodPost, "/api/v1/admin/dsgvo/users/u-target/delete", `{"reason":"x"}`); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no-token delete: status = %d, want 401", rec.Code)
+	}
+	if rec := doDsgvoComposedRequest(router401, "", "/api/v1/admin/dsgvo/users/deleted"); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no-token list-deleted: status = %d, want 401", rec.Code)
+	}
+	if rec := doComposedJSONRequest(router401, "", http.MethodDelete, "/api/v1/admin/dsgvo/users/deleted/a-1", ""); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no-token purge: status = %d, want 401", rec.Code)
 	}
 }

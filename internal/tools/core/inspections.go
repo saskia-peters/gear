@@ -61,6 +61,17 @@ const ReportExportPermission = "report.export"
 // empty string.
 const DeletedUserDisplayName = "Deleted User"
 
+// DeletedUserID is the canonical well-known sentinel uuid the DSGVO account
+// deletion rewrites an erased user's inspection/reinstatement references to
+// (Story 3.4, FR-24/AD-8): the Tool module's AnonymizeUserReferences UPDATEs
+// `inspections.inspector_id` / `reinstatements.actor_id` (plain FK-less uuids,
+// AD-8/3.4) to this fixed value in ONE transaction. It is deliberately NOT a
+// real user row — the DisplayNameResolver seam maps the absent id to the
+// literal DeletedUserDisplayName, so inspection history/status reports render
+// "Deleted User" with every timestamp/result/item/OOS state intact. Fixed and
+// well-known so the rewrite is explicit and auditable (never a random uuid).
+const DeletedUserID = "00000000-0000-0000-0000-00000000dead"
+
 // Audit-operation tag for a persisted reinstatement (NFR-O1/NFR-O2). The
 // reinstatement row itself is the audit source of truth; this is the operation
 // ledger row. It DERIVES from ToolReinstatePermission so the audit tag and the
@@ -378,6 +389,16 @@ type InspectionStore interface {
 	// DESC — served by the 000029 index reinstatements_actor_id_idx). A user
 	// with no reinstatements answers an EMPTY list, nil-safe.
 	ListReinstatementsByActor(ctx context.Context, userID string) ([]*Reinstatement, error)
+	// AnonymizeUserReferences rewrites every reference to a deleted user's
+	// account to the canonical DeletedUserID sentinel (Story 3.4, FR-24/AD-8):
+	// `UPDATE inspections SET inspector_id = $sentinel WHERE inspector_id = $user`
+	// AND `UPDATE reinstatements SET actor_id = $sentinel WHERE actor_id = $user`,
+	// in ONE transaction. IDEMPOTENT: a user with no inspection/reinstatement
+	// rows (or an already-anonymized one) is a no-op. The sentinel is absent
+	// from users, so the DisplayNameResolver seam renders "Deleted User" while
+	// every timestamp/result/item/OOS state stays intact. This is the SOLE
+	// write seam of the DSGVO deletion flow the Tool module owns.
+	AnonymizeUserReferences(ctx context.Context, userID string) error
 }
 
 // SubmitInspection persists one inspection (SUBMIT_PASSFAIL / SUBMIT_CHECKLIST,

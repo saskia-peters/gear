@@ -1008,6 +1008,52 @@ func (q *Queries) ToolTypeExistsActive(ctx context.Context, id pgtype.UUID) (boo
 	return exists, err
 }
 
+const updateInspectionsInspector = `-- name: UpdateInspectionsInspector :exec
+
+UPDATE inspections
+SET inspector_id = $1
+WHERE inspector_id = $2
+`
+
+type UpdateInspectionsInspectorParams struct {
+	InspectorID   pgtype.UUID `json:"inspector_id"`
+	InspectorID_2 pgtype.UUID `json:"inspector_id_2"`
+}
+
+// ============================================================================
+// DSGVO account-deletion anonymization queries (Story 3.4, FR-24/AD-8): the
+// per-reference rewrites behind the Tool module's DSGVODeletionPort. The
+// plain FK-less inspector_id / actor_id columns (000027) flip to the canonical
+// DeletedUserID sentinel; the repository runs BOTH in ONE transaction. Both
+// are idempotent by construction (no matching rows → a no-op).
+// ============================================================================
+// Rewrite every inspection the erased user performed as inspector to the
+// canonical DeletedUserID sentinel. Zero rows when the user never inspected
+// (no-op, never an error).
+func (q *Queries) UpdateInspectionsInspector(ctx context.Context, arg UpdateInspectionsInspectorParams) error {
+	_, err := q.db.Exec(ctx, updateInspectionsInspector, arg.InspectorID, arg.InspectorID_2)
+	return err
+}
+
+const updateReinstatementsActor = `-- name: UpdateReinstatementsActor :exec
+UPDATE reinstatements
+SET actor_id = $1
+WHERE actor_id = $2
+`
+
+type UpdateReinstatementsActorParams struct {
+	ActorID   pgtype.UUID `json:"actor_id"`
+	ActorID_2 pgtype.UUID `json:"actor_id_2"`
+}
+
+// Rewrite every reinstatement the erased user performed as actor to the
+// canonical DeletedUserID sentinel. Zero rows when the user never reinstated
+// (no-op, never an error).
+func (q *Queries) UpdateReinstatementsActor(ctx context.Context, arg UpdateReinstatementsActorParams) error {
+	_, err := q.db.Exec(ctx, updateReinstatementsActor, arg.ActorID, arg.ActorID_2)
+	return err
+}
+
 const updateTool = `-- name: UpdateTool :one
 WITH updated AS (
     UPDATE tools
