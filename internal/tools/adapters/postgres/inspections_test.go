@@ -24,7 +24,7 @@ func TestPostgresInspectionStore(t *testing.T) {
 	repo := NewRepository(New(pool))
 	toolTypeID, _ := seedToolRefs(t, ctx, pool)
 
-	tool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Pruef-Werkzeug", ToolTypeID: toolTypeID})
+	tool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Pruef-Werkzeug", ToolTypeID: toolTypeID}, "GEAR", 9)
 	if err != nil {
 		t.Fatalf("CreateTool err = %v", err)
 	}
@@ -173,7 +173,7 @@ func TestPostgresInspectionItemsRollback(t *testing.T) {
 
 	repo := NewRepository(New(pool))
 	toolTypeID, _ := seedToolRefs(t, ctx, pool)
-	tool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Rollback-Werkzeug", ToolTypeID: toolTypeID})
+	tool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Rollback-Werkzeug", ToolTypeID: toolTypeID}, "GEAR", 9)
 	if err != nil {
 		t.Fatalf("CreateTool err = %v", err)
 	}
@@ -213,7 +213,7 @@ func TestPostgresInsertReinstatement(t *testing.T) {
 
 	repo := NewRepository(New(pool))
 	toolTypeID, _ := seedToolRefs(t, ctx, pool)
-	tool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Reinstate-Werkzeug", ToolTypeID: toolTypeID})
+	tool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Reinstate-Werkzeug", ToolTypeID: toolTypeID}, "GEAR", 9)
 	if err != nil {
 		t.Fatalf("CreateTool err = %v", err)
 	}
@@ -303,7 +303,7 @@ func TestPostgresToolHistory(t *testing.T) {
 
 	repo := NewRepository(New(pool))
 	toolTypeID, _ := seedToolRefs(t, ctx, pool)
-	tool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-History-Werkzeug", ToolTypeID: toolTypeID})
+	tool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-History-Werkzeug", ToolTypeID: toolTypeID}, "GEAR", 9)
 	if err != nil {
 		t.Fatalf("CreateTool err = %v", err)
 	}
@@ -379,7 +379,7 @@ func TestPostgresToolHistory(t *testing.T) {
 	}
 
 	// EMPTY: a tool with no records answers an empty list, nil-safe.
-	other, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-History-Leer", ToolTypeID: toolTypeID})
+	other, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-History-Leer", ToolTypeID: toolTypeID}, "GEAR", 9)
 	if err != nil {
 		t.Fatalf("CreateTool(empty target) err = %v", err)
 	}
@@ -444,7 +444,7 @@ func TestPostgresToolHistoryEqualTimestampTiebreak(t *testing.T) {
 
 	repo := NewRepository(New(pool))
 	toolTypeID, _ := seedToolRefs(t, ctx, pool)
-	tool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Tiebreak-Werkzeug", ToolTypeID: toolTypeID})
+	tool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Tiebreak-Werkzeug", ToolTypeID: toolTypeID}, "GEAR", 9)
 	if err != nil {
 		t.Fatalf("CreateTool err = %v", err)
 	}
@@ -537,7 +537,7 @@ func TestPostgresGetLatestInspectionByTool(t *testing.T) {
 
 	repo := NewRepository(New(pool))
 	toolTypeID, _ := seedToolRefs(t, ctx, pool)
-	tool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Report-Werkzeug", ToolTypeID: toolTypeID})
+	tool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Report-Werkzeug", ToolTypeID: toolTypeID}, "GEAR", 9)
 	if err != nil {
 		t.Fatalf("CreateTool err = %v", err)
 	}

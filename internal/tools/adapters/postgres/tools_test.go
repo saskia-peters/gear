@@ -103,7 +103,7 @@ func TestPostgresToolsStore(t *testing.T) {
 		Name:       "Test-Bohrmaschine-01",
 		ToolTypeID: toolTypeID,
 		ScheduleID: "",
-	})
+	}, "GEAR", 9)
 	if err != nil {
 		t.Fatalf("CreateTool err = %v", err)
 	}
@@ -125,10 +125,10 @@ func TestPostgresToolsStore(t *testing.T) {
 	if created.ArchivedAt != nil {
 		t.Error("new tool must be active (archived_at NULL)")
 	}
-	// CREATE_AUTO: the created tool carries an auto-assigned 'GEAR' + 6
+	// CREATE_AUTO: the created tool carries an auto-assigned 'GEAR' + 9
 	// zero-padded digits inventory number.
-	if !strings.HasPrefix(created.InventoryNumber, "GEAR") || len(created.InventoryNumber) != 10 {
-		t.Errorf("created inventory_number = %q, want 'GEAR' + 6 zero-padded digits", created.InventoryNumber)
+	if !strings.HasPrefix(created.InventoryNumber, "GEAR") || len(created.InventoryNumber) != 13 {
+		t.Errorf("created inventory_number = %q, want 'GEAR' + 9 zero-padded digits", created.InventoryNumber)
 	}
 	if created.CreatedAt.IsZero() || created.UpdatedAt.IsZero() {
 		t.Errorf("timestamps missing: %+v", created)
@@ -169,7 +169,7 @@ func TestPostgresToolsStore(t *testing.T) {
 		Name:       "Test-Bohrmaschine-02",
 		ToolTypeID: toolTypeID,
 		ScheduleID: scheduleID,
-	})
+	}, "GEAR", 9)
 	if err != nil {
 		t.Fatalf("CreateTool(override) err = %v", err)
 	}
@@ -266,7 +266,7 @@ func TestPostgresToolsStore(t *testing.T) {
 	// catalog guard cannot see) — never a 500.
 	_, err = repo.CreateTool(ctx, &core.Tool{
 		Name: "Test-Bohrmaschine-01", ToolTypeID: toolTypeID,
-	})
+	}, "GEAR", 9)
 	var inv *core.InvalidToolError
 	if !errors.As(err, &inv) {
 		t.Fatalf("recreate archived name err = %v, want *InvalidToolError (German duplicate)", err)
@@ -281,7 +281,7 @@ func TestPostgresToolsStore(t *testing.T) {
 	// would catch a live duplicate first; this pins the repo mapping).
 	conflictTool, err := repo.CreateTool(ctx, &core.Tool{
 		Name: "Test-Konflikt", ToolTypeID: toolTypeID,
-	})
+	}, "GEAR", 9)
 	if err != nil {
 		t.Fatalf("CreateTool(conflict target) err = %v", err)
 	}
@@ -359,7 +359,7 @@ func TestPostgresToolGetWithTypeQualification(t *testing.T) {
 	); err != nil {
 		t.Fatalf("seeding checklist items err = %v", err)
 	}
-	tool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Start-Lesen", ToolTypeID: toolTypeID})
+	tool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Start-Lesen", ToolTypeID: toolTypeID}, "GEAR", 9)
 	if err != nil {
 		t.Fatalf("CreateTool err = %v", err)
 	}
@@ -425,7 +425,7 @@ func TestPostgresToolGetWithTypeQualification(t *testing.T) {
 
 	// ARCHIVED TOOL: an archived tool is non-existent to the surface → the 404
 	// sentinel (the tool-side guard).
-	archivedTool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Start-Archiv", ToolTypeID: toolTypeID})
+	archivedTool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Start-Archiv", ToolTypeID: toolTypeID}, "GEAR", 9)
 	if err != nil {
 		t.Fatalf("CreateTool(archived candidate) err = %v", err)
 	}
@@ -439,7 +439,7 @@ func TestPostgresToolGetWithTypeQualification(t *testing.T) {
 	// ARCHIVED TYPE: an ACTIVE tool whose type was soft-archived must NOT
 	// resolve the retired type's required_qualification_id / inspection_mode —
 	// the type-side JOIN guard (tt.archived_at IS NULL) answers the 404 sentinel.
-	orphanedTool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Start-Waise", ToolTypeID: toolTypeID})
+	orphanedTool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Start-Waise", ToolTypeID: toolTypeID}, "GEAR", 9)
 	if err != nil {
 		t.Fatalf("CreateTool(orphan candidate) err = %v", err)
 	}
@@ -469,7 +469,7 @@ func TestPostgresToolsFKConstraints(t *testing.T) {
 	// Bad tool_type FK → mapped to the German 400 (intra-module FK, AD-10).
 	_, err := repo.CreateTool(ctx, &core.Tool{
 		Name: "Test-Fk-Type", ToolTypeID: missing,
-	})
+	}, "GEAR", 9)
 	var inv *core.InvalidToolError
 	if !errors.As(err, &inv) {
 		t.Fatalf("create with missing type err = %v, want *InvalidToolError (German 400)", err)
@@ -481,7 +481,7 @@ func TestPostgresToolsFKConstraints(t *testing.T) {
 	// Bad schedule override FK → mapped to the German 400.
 	_, err = repo.CreateTool(ctx, &core.Tool{
 		Name: "Test-Fk-Override", ToolTypeID: toolTypeID, ScheduleID: missing,
-	})
+	}, "GEAR", 9)
 	inv = nil
 	if !errors.As(err, &inv) {
 		t.Fatalf("create with missing override err = %v, want *InvalidToolError (German 400)", err)
@@ -505,12 +505,12 @@ func TestPostgresToolsFKConstraints(t *testing.T) {
 	}
 }
 
-// toolInventoryNumberFormat is the auto-assigned shape: 'GEAR' + 6 zero-padded
-// digits (Story 4-3b, CREATE_AUTO).
-var toolInventoryNumberFormat = regexp.MustCompile(`^GEAR\d{6}$`)
+// toolInventoryNumberFormat is the auto-assigned shape: 'GEAR' + 9 zero-padded
+// digits (Story 5-2c, C2 adoption — the configurable inventory_width default 9).
+var toolInventoryNumberFormat = regexp.MustCompile(`^GEAR\d{9}$`)
 
 // TestPostgresToolInventoryNumbers covers the Story 4-3b inventory-number
-// store contract: CREATE_AUTO (monotonic 'GEAR%06d' sequence values), the
+// store contract: CREATE_AUTO (monotonic 'GEAR%09d' sequence values), the
 // list round-trip, and the DB-level uniqueness backstop (EXACT, over ALL rows
 // incl. archived — the Story 4.5 import backstop) mapped to the German
 // duplicate-inventory 400.
@@ -524,16 +524,16 @@ func TestPostgresToolInventoryNumbers(t *testing.T) {
 
 	// CREATE_AUTO: two creates get distinct, monotonic 'GEAR' + 6 zero-padded
 	// numbers (same width → string order == numeric order).
-	first, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Inv-A", ToolTypeID: toolTypeID})
+	first, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Inv-A", ToolTypeID: toolTypeID}, "GEAR", 9)
 	if err != nil {
 		t.Fatalf("CreateTool(A) err = %v", err)
 	}
-	second, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Inv-B", ToolTypeID: toolTypeID})
+	second, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Inv-B", ToolTypeID: toolTypeID}, "GEAR", 9)
 	if err != nil {
 		t.Fatalf("CreateTool(B) err = %v", err)
 	}
 	if !toolInventoryNumberFormat.MatchString(first.InventoryNumber) || !toolInventoryNumberFormat.MatchString(second.InventoryNumber) {
-		t.Fatalf("inventory numbers = %q / %q, want 'GEAR' + 6 zero-padded digits", first.InventoryNumber, second.InventoryNumber)
+		t.Fatalf("inventory numbers = %q / %q, want 'GEAR' + 9 zero-padded digits", first.InventoryNumber, second.InventoryNumber)
 	}
 	if first.InventoryNumber == second.InventoryNumber {
 		t.Fatalf("inventory numbers collide: %q", first.InventoryNumber)
@@ -579,8 +579,8 @@ func TestPostgresToolInventoryNumbers(t *testing.T) {
 	}
 
 	// CASE-INSENSITIVITY (finding 3): a case-variant of an ACTIVE number is
-	// rejected by the functional index — 'gear000001' collides with
-	// 'GEAR000001' (the core guard alone cannot be trusted with a case-blind
+	// rejected by the functional index — 'gear000000001' collides with
+	// 'GEAR000000001' (the core guard alone cannot be trusted with a case-blind
 	// DB).
 	_, err = repo.UpdateTool(ctx, &core.Tool{
 		ID:              second.ID,
@@ -610,11 +610,11 @@ func TestPostgresToolInventoryArchivedBackstop(t *testing.T) {
 	repo := NewRepository(New(pool))
 	toolTypeID, _ := seedToolRefs(t, ctx, pool)
 
-	archived, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Inv-Arch-A", ToolTypeID: toolTypeID})
+	archived, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Inv-Arch-A", ToolTypeID: toolTypeID}, "GEAR", 9)
 	if err != nil {
 		t.Fatalf("CreateTool(archived candidate) err = %v", err)
 	}
-	active, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Inv-Arch-B", ToolTypeID: toolTypeID})
+	active, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Inv-Arch-B", ToolTypeID: toolTypeID}, "GEAR", 9)
 	if err != nil {
 		t.Fatalf("CreateTool(active) err = %v", err)
 	}
@@ -654,15 +654,15 @@ func TestPostgresToolInventoryArchivedBackstop(t *testing.T) {
 	}
 	if _, err := pool.Exec(ctx,
 		`UPDATE tools SET inventory_number = $1 WHERE id = $2`,
-		fmt.Sprintf("GEAR%06d", next), archived.ID,
+		fmt.Sprintf("GEAR%09d", next), archived.ID,
 	); err != nil {
 		t.Fatalf("re-setting the archived number err = %v", err)
 	}
-	created, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Inv-Arch-C", ToolTypeID: toolTypeID})
+	created, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Inv-Arch-C", ToolTypeID: toolTypeID}, "GEAR", 9)
 	if err != nil {
 		t.Fatalf("CreateTool (retry past an archived number) err = %v", err)
 	}
-	if want := fmt.Sprintf("GEAR%06d", next+1); created.InventoryNumber != want {
+	if want := fmt.Sprintf("GEAR%09d", next+1); created.InventoryNumber != want {
 		t.Errorf("inventory_number = %q, want %q (the retry advanced past the archived collision)", created.InventoryNumber, want)
 	}
 }
@@ -695,18 +695,18 @@ func TestPostgresCreateToolInventoryCollisionRetry(t *testing.T) {
 
 	// Reserve ONLY the first generated value: the auto-assign collides on
 	// attempt 1, the retry loop advances to the next fresh number → succeeds.
-	reserved := fmt.Sprintf("GEAR%06d", next)
+	reserved := fmt.Sprintf("GEAR%09d", next)
 	if _, err := pool.Exec(ctx,
 		`INSERT INTO tools (name, tool_type_id, inventory_number) VALUES ('Test-Collision-Reserve', $1, $2)`, toolTypeID, reserved,
 	); err != nil {
 		t.Fatalf("reserving the next generated number err = %v", err)
 	}
 
-	created, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Collision-Auto", ToolTypeID: toolTypeID})
+	created, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Collision-Auto", ToolTypeID: toolTypeID}, "GEAR", 9)
 	if err != nil {
 		t.Fatalf("CreateTool (collision retry) err = %v", err)
 	}
-	if want := fmt.Sprintf("GEAR%06d", next+1); created.InventoryNumber != want {
+	if want := fmt.Sprintf("GEAR%09d", next+1); created.InventoryNumber != want {
 		t.Errorf("inventory_number = %q, want %q (the retry advanced past the collision)", created.InventoryNumber, want)
 	}
 
@@ -722,12 +722,12 @@ func TestPostgresCreateToolInventoryCollisionRetry(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		if _, err := pool.Exec(ctx,
 			`INSERT INTO tools (name, tool_type_id, inventory_number) VALUES ($1, $2, $3)`,
-			fmt.Sprintf("Test-Collision-Reserve-%d", i), toolTypeID, fmt.Sprintf("GEAR%06d", cur+int64(i)),
+			fmt.Sprintf("Test-Collision-Reserve-%d", i), toolTypeID, fmt.Sprintf("GEAR%09d", cur+int64(i)),
 		); err != nil {
 			t.Fatalf("reserving colliding number %d err = %v", i, err)
 		}
 	}
-	_, err = repo.CreateTool(ctx, &core.Tool{Name: "Test-Collision-Fail", ToolTypeID: toolTypeID})
+	_, err = repo.CreateTool(ctx, &core.Tool{Name: "Test-Collision-Fail", ToolTypeID: toolTypeID}, "GEAR", 9)
 	var inv *core.InvalidToolError
 	if !errors.As(err, &inv) {
 		t.Fatalf("exhausted retry err = %v, want *InvalidToolError (German collision)", err)
@@ -773,11 +773,15 @@ func TestPostgresToolInventoryBackfill(t *testing.T) {
 	); err != nil {
 		t.Fatalf("backfill update err = %v", err)
 	}
+	// The 000025 backfill is a HISTORICAL migration: its width-6 lpad is the
+	// fixed shape of that backfill (the 000031 migration only changes the
+	// width of NEW auto-assignments via the CreateTool params) — assert the
+	// literal 'GEAR' + 6 zero-padded digits the 000025 SQL produced.
 	var inv string
 	if err := tx.QueryRow(ctx, `SELECT inventory_number FROM tools WHERE id = $1`, preID).Scan(&inv); err != nil {
 		t.Fatalf("scanning the backfilled number err = %v", err)
 	}
-	if !toolInventoryNumberFormat.MatchString(inv) {
+	if !regexp.MustCompile(`^GEAR\d{6}$`).MatchString(inv) {
 		t.Errorf("backfilled inventory_number = %q, want 'GEAR' + 6 zero-padded digits", inv)
 	}
 }
@@ -802,7 +806,7 @@ func TestPostgresToolsAttributes(t *testing.T) {
 		Name:       "Test-Attr-Werkzeug",
 		ToolTypeID: toolTypeID,
 		Attributes: map[string]any{"standort": "Werkstatt", "leistung": float64(1200)},
-	})
+	}, "GEAR", 9)
 	if err != nil {
 		t.Fatalf("CreateTool(attributes) err = %v", err)
 	}

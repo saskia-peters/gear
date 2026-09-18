@@ -502,6 +502,11 @@ func (s *Service) SubmitInspection(ctx context.Context, actorID, toolID string, 
 	// record alone — a pass anchors the clock at its submitted_at (green when
 	// fresh), a fail reads as `oos` (its submitted_at is the latest fail and no
 	// reinstatement is known to follow).
+	//
+	// The orange-window percentage (Story 5-2c, D1) resolves ONCE per request;
+	// a settings failure falls back to the default 25 so the post-commit
+	// derivation never fails (it is best-effort by design).
+	orangeWindowPercent := s.orangeWindowPercent(ctx)
 	var status ToolStatus
 	statusInput, err := s.store.GetToolInspectionStatus(ctx, toolID)
 	if err != nil {
@@ -515,10 +520,10 @@ func (s *Service) SubmitInspection(ctx context.Context, actorID, toolID string, 
 			t := persisted.SubmittedAt
 			lastSuccessAt = &t
 		}
-		status = deriveToolStatus(latestFailAt, lastSuccessAt, nil, interval, time.Now())
+		status = deriveToolStatus(latestFailAt, lastSuccessAt, nil, interval, orangeWindowPercent, time.Now())
 	} else {
 		status = deriveToolStatus(statusInput.LatestFailAt, statusInput.LastSuccessAt, statusInput.LastReinstatedAt,
-			interval, time.Now())
+			interval, orangeWindowPercent, time.Now())
 	}
 
 	return &SubmitInspectionResult{Inspection: persisted, Status: status}, nil
@@ -668,6 +673,11 @@ func (s *Service) ReinstateTool(ctx context.Context, actorID, toolID, reason str
 
 	s.auditTool(ctx, actorID, AuditOperationToolReinstate, "action=reinstate target=tool id="+tool.ID)
 
+	// The orange-window percentage (Story 5-2c, D1) resolves ONCE per request;
+	// a settings failure falls back to the default 25 so the post-commit
+	// derivation never fails (it is best-effort by design).
+	orangeWindowPercent := s.orangeWindowPercent(ctx)
+
 	// Derive the new status (AD-4/AD-5) BEST-EFFORT after the row committed: a
 	// schedule/status resolution failure AFTER the write must NOT surface as an
 	// error (a client retry would DUPLICATE the reinstatement). Log the failure
@@ -690,7 +700,7 @@ func (s *Service) ReinstateTool(ctx context.Context, actorID, toolID, reason str
 		statusInput = &ToolInspectionStatus{}
 	}
 	status := deriveToolStatus(statusInput.LatestFailAt, statusInput.LastSuccessAt, statusInput.LastReinstatedAt,
-		interval, time.Now())
+		interval, orangeWindowPercent, time.Now())
 	return &ReinstateResult{Status: status}, nil
 }
 

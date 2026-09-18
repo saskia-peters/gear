@@ -48,8 +48,8 @@ func fullAppSettings() *core.AppSettings {
 		AttributeKeyMaxRunes:            64,
 		AttributesMaxSize:               16384,
 		InventoryPrefix:                 "GEAR",
-		InventoryWidth:                  6,
-		InspectionOrangeWindowDays:      14,
+		InventoryWidth:                  9,
+		InspectionOrangeWindowPercent:   25,
 		QualificationExpiringSoonWindow: 2592000 * time.Second,
 	}
 }
@@ -82,8 +82,11 @@ func TestSystemSettingsGetAll(t *testing.T) {
 	if v, ok := byKey["smtp_dial_timeout"]; !ok || v["unit"] != "Sekunden" {
 		t.Errorf("smtp_dial_timeout unit = %v, want Sekunden", v)
 	}
-	if v, ok := byKey["inspection_orange_window_days"]; !ok || v["unit"] != "Tage" {
-		t.Errorf("inspection_orange_window_days unit = %v, want Tage (not Sekunden)", v)
+	if v, ok := byKey["inspection_orange_window_percent"]; !ok || v["unit"] != "Prozent" {
+		t.Errorf("inspection_orange_window_percent unit = %v, want Prozent", v)
+	}
+	if v, ok := byKey["inspection_orange_window_percent"]; !ok || v["value"] != float64(25) {
+		t.Errorf("inspection_orange_window_percent value = %v, want 25", v)
 	}
 	if v, ok := byKey["otp_length"]; !ok || v["unit"] != "Zeichen" {
 		t.Errorf("otp_length unit = %v, want Zeichen", v)

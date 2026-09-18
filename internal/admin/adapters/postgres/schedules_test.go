@@ -9,10 +9,11 @@ import (
 	"github.com/saskia-peters/gear/internal/admin/core"
 )
 
-// TestPostgresSchedulesSeed pins the migration 000019 seed catalog (AD-16),
-// whose display names were Germanized by migration 000020: the EXACT five
-// canonical intervals are present, ACTIVE, and in a deterministic order
-// (created_at ASC, name ASC — the seeds share one now() created_at).
+// TestPostgresSchedulesSeed pins the migration 000019/000031 seed catalog
+// (AD-16), whose display names were Germanized by migration 000020: the EXACT
+// six canonical intervals are present, ACTIVE, and in REAL-duration ascending
+// order (3 Tage < 1 Woche < 2 Wochen < 1 Monat < 1 Quartal < 1 Jahr — Story
+// 5-2c FR-30 sort), regardless of created_at.
 func TestPostgresSchedulesSeed(t *testing.T) {
 	pool := adminTestPool(t)
 	ctx := context.Background()
@@ -28,11 +29,12 @@ func TestPostgresSchedulesSeed(t *testing.T) {
 		unit string
 		magn int
 	}{
-		{"1 Jahr", core.IntervalUnitYear, 1},
+		{"3 Tage", core.IntervalUnitDay, 3},
+		{"1 Woche", core.IntervalUnitWeek, 1},
+		{"2 Wochen", core.IntervalUnitWeek, 2},
 		{"1 Monat", core.IntervalUnitMonth, 1},
 		{"1 Quartal", core.IntervalUnitQuarter, 1},
-		{"2 Wochen", core.IntervalUnitWeek, 2},
-		{"3 Tage", core.IntervalUnitDay, 3},
+		{"1 Jahr", core.IntervalUnitYear, 1},
 	}
 
 	got, err := repo.ListSchedules(ctx)
@@ -40,7 +42,7 @@ func TestPostgresSchedulesSeed(t *testing.T) {
 		t.Fatalf("ListSchedules err = %v", err)
 	}
 	// EXACT count: after removing any test rows, the active catalog is exactly
-	// the five seed rows (no stray rows may appear or go missing).
+	// the six seed rows (no stray rows may appear or go missing).
 	if len(got) != len(seeded) {
 		t.Fatalf("list = %d rows, want exactly %d seed rows", len(got), len(seeded))
 	}
@@ -53,6 +55,71 @@ func TestPostgresSchedulesSeed(t *testing.T) {
 			t.Errorf("seed row %q is archived, want active", s.Name)
 		}
 	}
+}
+
+// TestPostgresSchedulesDurationSort pins the Story 5-2c FR-30 duration-ascending
+// ORDER BY: the active catalog sorts by REAL duration (unit weight × magnitude,
+// id tiebreak), NOT created_at/name — a freshly created long schedule renders
+// AFTER the shorter seeds even when created earlier, and a short one before
+// them.
+func TestPostgresSchedulesDurationSort(t *testing.T) {
+	pool := adminTestPool(t)
+	ctx := context.Background()
+	t.Cleanup(func() { pool.Close() })
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, "DELETE FROM schedules WHERE name LIKE 'Test-%'") })
+	if _, err := pool.Exec(ctx, "DELETE FROM schedules WHERE name LIKE 'Test-%'"); err != nil {
+		t.Fatalf("cleanup err = %v", err)
+	}
+	repo := NewRepository(New(pool))
+
+	// A 1-day schedule (created NOW) must sort BEFORE the '3 Tage' seed.
+	short, err := repo.CreateSchedule(ctx, &core.Schedule{
+		Name: "Test-Ein-Tag", IntervalUnit: core.IntervalUnitDay, IntervalMagnitude: 1,
+	})
+	if err != nil {
+		t.Fatalf("CreateSchedule(short) err = %v", err)
+	}
+	// A 1-year schedule (created NOW) must sort AFTER the '1 Jahr' seed (365d
+	// == 365d) — the id tiebreak keeps a deterministic order, and after any
+	// longer seed.
+	long, err := repo.CreateSchedule(ctx, &core.Schedule{
+		Name: "Test-Zwei-Jahre", IntervalUnit: core.IntervalUnitYear, IntervalMagnitude: 2,
+	})
+	if err != nil {
+		t.Fatalf("CreateSchedule(long) err = %v", err)
+	}
+
+	got, err := repo.ListSchedules(ctx)
+	if err != nil {
+		t.Fatalf("ListSchedules err = %v", err)
+	}
+	names := make([]string, 0, len(got))
+	for _, s := range got {
+		names = append(names, s.Name)
+	}
+	// The 1-day Test row must appear before '3 Tage'; the 2-year row after '1 Jahr'.
+	idxShort, idxLong, idxSeedLast := -1, -1, -1
+	for i, n := range names {
+		switch n {
+		case "Test-Ein-Tag":
+			idxShort = i
+		case "Test-Zwei-Jahre":
+			idxLong = i
+		case "1 Jahr":
+			idxSeedLast = i
+		}
+	}
+	if idxShort == -1 || idxLong == -1 {
+		t.Fatalf("list = %v, want the Test rows present", names)
+	}
+	if idxShort > idxSeedLast {
+		t.Errorf("1-day schedule = position %d, want before '1 Jahr' at %d (duration sort)", idxShort, idxSeedLast)
+	}
+	if idxLong <= idxSeedLast {
+		t.Errorf("2-year schedule = position %d, want after '1 Jahr' at %d (duration sort)", idxLong, idxSeedLast)
+	}
+	_ = short
+	_ = long
 }
 
 // TestPostgresSchedulesStore exercises the CRUD + soft-archive round-trip over

@@ -58,6 +58,7 @@ func TestStartInspectionEligibleNoQualType(t *testing.T) {
 		store,
 		nil,
 		nil, // nil qualification port: must NOT be reached
+		nil,
 		&fakePerms{perms: []string{InspectionSubmitPermission}},
 		nil,
 		&fakeAudit{},
@@ -85,6 +86,7 @@ func TestStartInspectionQualified(t *testing.T) {
 		inspectionStore(),
 		&fakeSchedulesPort{},
 		holdsPort(actorID, "id-q1"),
+		nil,
 		&fakePerms{perms: []string{InspectionSubmitPermission}},
 		nil,
 		&fakeAudit{},
@@ -108,6 +110,7 @@ func TestStartInspectionMissingQual(t *testing.T) {
 		inspectionStore(),
 		&fakeSchedulesPort{},
 		holdsPort(actorID), // holds nothing
+		nil,
 		&fakePerms{perms: []string{InspectionSubmitPermission}},
 		nil,
 		&fakeAudit{},
@@ -132,6 +135,7 @@ func TestStartInspectionExpiredQual(t *testing.T) {
 		inspectionStore(),
 		&fakeSchedulesPort{},
 		holdsPort(actorID), // the user-core port already resolved the expired assignment
+		nil,
 		&fakePerms{perms: []string{InspectionSubmitPermission}},
 		nil,
 		&fakeAudit{},
@@ -150,6 +154,7 @@ func TestStartInspectionToolNotFound(t *testing.T) {
 		inspectionStore(),
 		&fakeSchedulesPort{},
 		holdsPort(actorID, "id-q1"),
+		nil,
 		&fakePerms{perms: []string{InspectionSubmitPermission}},
 		nil,
 		&fakeAudit{},
@@ -175,6 +180,7 @@ func TestStartInspectionForbidden(t *testing.T) {
 		inspectionStore(),
 		&fakeSchedulesPort{},
 		holdsPort(actorID, "id-q1"),
+		nil,
 		&fakePerms{perms: []string{"dashboard.view"}},
 		nil,
 		&fakeAudit{},
@@ -197,6 +203,7 @@ func TestStartInspectionNilQualPortFailsLoudly(t *testing.T) {
 	svc := NewService(
 		inspectionStore(),
 		&fakeSchedulesPort{},
+		nil,
 		nil,
 		&fakePerms{perms: []string{InspectionSubmitPermission}},
 		nil,
@@ -223,6 +230,7 @@ func TestStartInspectionPortErrorPropagates(t *testing.T) {
 		inspectionStore(),
 		&fakeSchedulesPort{},
 		&fakeQualificationPort{qualificationIDs: []string{"id-q1"}, holdErr: errors.New("boom")},
+		nil,
 		&fakePerms{perms: []string{InspectionSubmitPermission}},
 		nil,
 		&fakeAudit{},
@@ -245,6 +253,7 @@ func TestStartInspectionAuditsEligibleStart(t *testing.T) {
 	svc := NewService(
 		store,
 		&fakeSchedulesPort{},
+		nil,
 		nil,
 		&fakePerms{perms: []string{InspectionSubmitPermission}},
 		nil,
@@ -275,6 +284,7 @@ func submitInspectionService() (*Service, *fakeToolStore, *fakeAudit) {
 			ID: "id-s1", Name: "1 Jahr", IntervalUnit: admcore.IntervalUnitYear, IntervalMagnitude: 1,
 		}}},
 		holdsPort(actorID, "id-q1"),
+		nil,
 		&fakePerms{perms: []string{InspectionSubmitPermission}},
 		nil,
 		audit,
@@ -353,6 +363,41 @@ func TestSubmitInspectionPassFailFail(t *testing.T) {
 	}
 	if result.Status.NextDue != nil {
 		t.Errorf("next_due = %v, want nil for oos", result.Status.NextDue)
+	}
+}
+
+func TestSubmitInspectionResolvesAppSettingsOnce(t *testing.T) {
+	// Story 5-2c (D1): SubmitInspection resolves CurrentAppSettings ONCE per
+	// request — the fake port counts the resolutions, so a per-derivation (N+1)
+	// settings read would trip this.
+	svc, _, _ := submitInspectionService()
+	port := &fakeAppSettingsPort{settings: adoptedSettings()}
+	svc.appSettings = port
+
+	if _, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", checklistSubmitInput()); err != nil {
+		t.Fatalf("SubmitInspection err = %v", err)
+	}
+	if port.calls != 1 {
+		t.Errorf("CurrentAppSettings resolutions = %d, want exactly 1 (resolve once per submit)", port.calls)
+	}
+}
+
+func TestReinstateToolResolvesAppSettingsOnce(t *testing.T) {
+	// Story 5-2c (D1): ReinstateTool resolves CurrentAppSettings ONCE per
+	// request — the post-commit derivation shares a single settings read.
+	svc, store, _ := submitInspectionService()
+	svc.perms = &fakePerms{perms: []string{ToolReinstatePermission}}
+	port := &fakeAppSettingsPort{settings: adoptedSettings()}
+	svc.appSettings = port
+	// Make the tool OOS so the reinstatement is meaningful (REINSTATE_OK).
+	now := time.Now()
+	store.status = &ToolInspectionStatus{LatestFailAt: &now}
+
+	if _, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "wiederhergestellt"); err != nil {
+		t.Fatalf("ReinstateTool err = %v", err)
+	}
+	if port.calls != 1 {
+		t.Errorf("CurrentAppSettings resolutions = %d, want exactly 1 (resolve once per reinstate)", port.calls)
 	}
 }
 
@@ -750,6 +795,7 @@ func reinstateService() (*Service, *fakeToolStore, *fakeAudit) {
 			ID: "id-s1", Name: "1 Jahr", IntervalUnit: admcore.IntervalUnitYear, IntervalMagnitude: 1,
 		}}},
 		holdsPort(actorID, "id-q1"),
+		nil,
 		&fakePerms{perms: []string{ToolReinstatePermission}},
 		nil,
 		audit,
@@ -999,6 +1045,7 @@ func historyService() (*Service, *fakeToolStore, *fakeDisplayNames) {
 	names := &fakeDisplayNames{names: map[string]string{actorID: "Anna Muster"}}
 	svc := NewService(
 		store,
+		nil,
 		nil,
 		nil,
 		&fakePerms{perms: []string{InspectionHistoryViewPermission}},

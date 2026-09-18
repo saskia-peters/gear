@@ -64,6 +64,85 @@ func restoreAppSettings(t *testing.T, ctx context.Context, pool *pgxpool.Pool, s
 	}
 }
 
+// TestPostgresAppSettingsMigration031 pins the Story 5-2c migration contract
+// (000031) against the SHARED dev DB: the D1 key is renamed to a CONSUMED
+// percent (25), the old day-count row is gone, the inventory_width seed is 9,
+// the '1 Woche' schedule is seeded exactly once, and re-running the migration
+// statements is idempotent — crucially, the width-only-if-6 guard never
+// clobbers an admin-typed override. The app_settings table is
+// snapshot-and-restored (the SMTP data-loss lesson); the idempotent schedule
+// INSERT needs no restore.
+func TestPostgresAppSettingsMigration031(t *testing.T) {
+	pool := adminTestPool(t)
+	t.Cleanup(pool.Close)
+	ctx := context.Background()
+
+	snap := snapshotAppSettings(t, ctx, pool)
+	t.Cleanup(func() { restoreAppSettings(t, ctx, pool, snap) })
+
+	// Apply the 000031 up statements exactly, twice — idempotency.
+	for i := 0; i < 2; i++ {
+		if _, err := pool.Exec(ctx, `INSERT INTO app_settings (key, value_type, int_value)
+			VALUES ('inspection_orange_window_percent', 'integer', 25) ON CONFLICT (key) DO NOTHING`); err != nil {
+			t.Fatalf("apply 000031 percent insert err = %v", err)
+		}
+		if _, err := pool.Exec(ctx, `DELETE FROM app_settings WHERE key = 'inspection_orange_window_days'`); err != nil {
+			t.Fatalf("apply 000031 days delete err = %v", err)
+		}
+		if _, err := pool.Exec(ctx, `UPDATE app_settings SET int_value = 9 WHERE key = 'inventory_width' AND int_value = 6`); err != nil {
+			t.Fatalf("apply 000031 width update err = %v", err)
+		}
+		if _, err := pool.Exec(ctx, `INSERT INTO schedules (name, interval_unit, interval_magnitude)
+			VALUES ('1 Woche', 'week', 1) ON CONFLICT (name) DO NOTHING`); err != nil {
+			t.Fatalf("apply 000031 schedule seed err = %v", err)
+		}
+	}
+
+	var percent int64
+	if err := pool.QueryRow(ctx, `SELECT int_value FROM app_settings WHERE key = 'inspection_orange_window_percent'`).Scan(&percent); err != nil {
+		t.Fatalf("percent row missing: %v", err)
+	}
+	if percent != 25 {
+		t.Errorf("percent = %d, want 25", percent)
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM app_settings WHERE key = 'inspection_orange_window_days'`).Scan(&count); err != nil {
+		t.Fatalf("counting days row err = %v", err)
+	}
+	if count != 0 {
+		t.Errorf("inspection_orange_window_days rows = %d, want 0 (renamed away)", count)
+	}
+	var width int64
+	if err := pool.QueryRow(ctx, `SELECT int_value FROM app_settings WHERE key = 'inventory_width'`).Scan(&width); err != nil {
+		t.Fatalf("inventory_width row missing: %v", err)
+	}
+	if width != 9 {
+		t.Errorf("inventory_width = %d, want 9", width)
+	}
+	var weeks int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM schedules WHERE name = '1 Woche' AND interval_unit = 'week' AND interval_magnitude = 1`).Scan(&weeks); err != nil {
+		t.Fatalf("counting 1 Woche rows err = %v", err)
+	}
+	if weeks != 1 {
+		t.Errorf("'1 Woche' rows = %d, want exactly 1", weeks)
+	}
+
+	// Non-clobber guard: an admin-typed width override (5) survives a
+	// re-applied width update (the WHERE int_value = 6 guard is the boundary).
+	if _, err := pool.Exec(ctx, `UPDATE app_settings SET int_value = 5 WHERE key = 'inventory_width'`); err != nil {
+		t.Fatalf("setting admin width override err = %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE app_settings SET int_value = 9 WHERE key = 'inventory_width' AND int_value = 6`); err != nil {
+		t.Fatalf("re-applying width update err = %v", err)
+	}
+	if err := pool.QueryRow(ctx, `SELECT int_value FROM app_settings WHERE key = 'inventory_width'`).Scan(&width); err != nil {
+		t.Fatalf("reading width err = %v", err)
+	}
+	if width != 5 {
+		t.Errorf("inventory_width after override = %d, want 5 (the 6-only guard must not clobber an admin override)", width)
+	}
+}
+
 // TestPostgresAppSettingsStore verifies the Story 5-2b app_settings store
 // (migration 000026 applied) against the SHARED dev DB. Because the table holds
 // real admin-edited data, the test snapshots-and-restores the whole table in

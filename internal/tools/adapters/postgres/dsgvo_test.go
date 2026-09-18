@@ -21,7 +21,7 @@ func TestPostgresDsgvoInspectionExport(t *testing.T) {
 	repo := NewRepository(New(pool))
 	toolTypeID, _ := seedToolRefs(t, ctx, pool)
 
-	tool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Dsgvo-Werkzeug", ToolTypeID: toolTypeID})
+	tool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Dsgvo-Werkzeug", ToolTypeID: toolTypeID}, "GEAR", 9)
 	if err != nil {
 		t.Fatalf("CreateTool err = %v", err)
 	}
@@ -112,7 +112,7 @@ func TestPostgresDsgvoInspectionExport(t *testing.T) {
 	// ListToolNamesByIDs resolves the id → name map (including the ARCHIVED
 	// tool: archive the first tool, create a second, archive it, then resolve
 	// both — the export covers the full fleet history).
-	second, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Dsgvo-Werkzeug-2", ToolTypeID: toolTypeID})
+	second, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Dsgvo-Werkzeug-2", ToolTypeID: toolTypeID}, "GEAR", 9)
 	if err != nil {
 		t.Fatalf("CreateTool(second) err = %v", err)
 	}
@@ -147,7 +147,7 @@ func TestPostgresAnonymizeUserReferences(t *testing.T) {
 	repo := NewRepository(New(pool))
 	toolTypeID, _ := seedToolRefs(t, ctx, pool)
 
-	tool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Anonymize-Werkzeug", ToolTypeID: toolTypeID})
+	tool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Anonymize-Werkzeug", ToolTypeID: toolTypeID}, "GEAR", 9)
 	if err != nil {
 		t.Fatalf("CreateTool err = %v", err)
 	}

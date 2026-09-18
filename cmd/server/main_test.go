@@ -197,8 +197,8 @@ func (s *compSettingsService) GetAppSettings(_ context.Context, _ string) (*admc
 		AttributeKeyMaxRunes:            64,
 		AttributesMaxSize:               16384,
 		InventoryPrefix:                 "GEAR",
-		InventoryWidth:                  6,
-		InspectionOrangeWindowDays:      14,
+		InventoryWidth:                  9,
+		InspectionOrangeWindowPercent:   25,
 		QualificationExpiringSoonWindow: 2592000 * time.Second,
 	}, nil
 }
@@ -1525,7 +1525,7 @@ func newComposedRealToolRouter(t *testing.T, log *slog.Logger) (http.Handler, *u
 	userRepo := userpostgres.NewRepository(userpostgres.New(pool))
 	sm := usercore.NewSessionManager(userRepo, time.Hour)
 	toolRepo := toolpostgres.NewRepository(toolpostgres.New(pool))
-	toolService := toolscore.NewService(toolRepo, nil, nil, userRepo, userRepo, userRepo, log)
+	toolService := toolscore.NewService(toolRepo, nil, nil, nil, userRepo, userRepo, userRepo, log)
 	toolHandler := toolhttp.NewHandler(toolService, sm, userRepo, log)
 	toolsSurface := auth.RequireAnyPermission(sm, userRepo,
 		[]string{toolscore.ToolsManagePermission, toolscore.ToolEditPermission},
@@ -1595,7 +1595,7 @@ func composedCreateAdminUser(t *testing.T, pool *pgxpool.Pool, repo *userpostgre
 
 // TestComposedToolCreateAutoAssignsInventory pins the full create round-trip
 // through the REAL wiring (finding 9): a tools.manage holder POSTs a tool and
-// the response carries a non-empty 'GEAR%06d' number auto-assigned in-SQL by
+// the response carries a non-empty 'GEAR%09d' number auto-assigned in-SQL by
 // the store; a subsequent GET returns the same number. This proves the
 // auto-assignment is NOT a fake-service artifact but flows through
 // gate → handler → core → postgres repo → nextval and back.
@@ -1619,8 +1619,8 @@ func TestComposedToolCreateAutoAssignsInventory(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &created); err != nil {
 		t.Fatalf("decoding create response err = %v", err)
 	}
-	if !regexp.MustCompile(`^GEAR\d{6}$`).MatchString(created.InventoryNumber) {
-		t.Fatalf("created inventory_number = %q, want a non-empty 'GEAR' + 6 zero-padded digits", created.InventoryNumber)
+	if !regexp.MustCompile(`^GEAR\d{9}$`).MatchString(created.InventoryNumber) {
+		t.Fatalf("created inventory_number = %q, want a non-empty 'GEAR' + 9 zero-padded digits", created.InventoryNumber)
 	}
 	if created.ID == "" {
 		t.Fatal("created tool id empty")

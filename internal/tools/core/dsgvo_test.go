@@ -68,7 +68,7 @@ func TestExportUserInspectionDataFull(t *testing.T) {
 	// per-tool summary (counts + tool names). Another inspector's records never
 	// appear.
 	store := dsgvoToolStore()
-	svc := NewService(store, nil, nil, &fakePerms{perms: []string{}}, nil, &fakeAudit{}, nil)
+	svc := NewService(store, nil, nil, nil, &fakePerms{perms: []string{}}, nil, &fakeAudit{}, nil)
 
 	export, err := svc.ExportUserInspectionData(context.Background(), "u-inspektor")
 	if err != nil {
@@ -126,7 +126,7 @@ func TestExportUserInspectionDataEmpty(t *testing.T) {
 	store := &fakeToolStore{
 		tools: []*Tool{{ID: "id-tool-a", Name: "Bohrmaschine-01"}},
 	}
-	svc := NewService(store, nil, nil, &fakePerms{perms: []string{}}, nil, &fakeAudit{}, nil)
+	svc := NewService(store, nil, nil, nil, &fakePerms{perms: []string{}}, nil, &fakeAudit{}, nil)
 
 	export, err := svc.ExportUserInspectionData(context.Background(), "u-neu")
 	if err != nil {
@@ -153,7 +153,7 @@ func TestExportUserInspectionDataToolNameFallback(t *testing.T) {
 			SubmittedAt: time.Now().UTC().Add(-time.Hour),
 		}},
 	}
-	svc := NewService(store, nil, nil, &fakePerms{perms: []string{}}, nil, &fakeAudit{}, nil)
+	svc := NewService(store, nil, nil, nil, &fakePerms{perms: []string{}}, nil, &fakeAudit{}, nil)
 
 	export, err := svc.ExportUserInspectionData(context.Background(), "u-inspektor")
 	if err != nil {
@@ -172,7 +172,7 @@ func TestExportUserInspectionDataNeverExposesForeignInspectorID(t *testing.T) {
 	// the JSON payload never names another inspector (the subject's own records
 	// are what is exported).
 	store := dsgvoToolStore()
-	svc := NewService(store, nil, nil, &fakePerms{perms: []string{}}, nil, &fakeAudit{}, nil)
+	svc := NewService(store, nil, nil, nil, &fakePerms{perms: []string{}}, nil, &fakeAudit{}, nil)
 
 	export, err := svc.ExportUserInspectionData(context.Background(), "u-inspektor")
 	if err != nil {
@@ -211,7 +211,7 @@ func TestAnonymizeUserReferences(t *testing.T) {
 	// references are untouched. The method carries NO actor id (the orchestrator
 	// audits).
 	store := dsgvoToolStore()
-	svc := NewService(store, nil, nil, &fakePerms{perms: []string{}}, nil, &fakeAudit{}, nil)
+	svc := NewService(store, nil, nil, nil, &fakePerms{perms: []string{}}, nil, &fakeAudit{}, nil)
 
 	if err := svc.AnonymizeUserReferences(context.Background(), "u-inspektor"); err != nil {
 		t.Fatalf("AnonymizeUserReferences err = %v, want success", err)
@@ -248,7 +248,7 @@ func TestAnonymizeUserReferencesIdempotentNoOp(t *testing.T) {
 			SubmittedAt: time.Now(),
 		}},
 	}
-	svc := NewService(store, nil, nil, &fakePerms{perms: []string{}}, nil, &fakeAudit{}, nil)
+	svc := NewService(store, nil, nil, nil, &fakePerms{perms: []string{}}, nil, &fakeAudit{}, nil)
 	if err := svc.AnonymizeUserReferences(context.Background(), "u-neu"); err != nil {
 		t.Fatalf("AnonymizeUserReferences(no-op) err = %v, want success", err)
 	}
@@ -261,7 +261,7 @@ func TestAnonymizeUserReferencesStoreError(t *testing.T) {
 	// A storage failure surfaces wrapped (the orchestrator answers the 500).
 	store := &fakeToolStore{anonymizeErr: errors.New("store down")}
 	store.inspections = []*Inspection{{ID: "insp-x", ToolID: "id-tool-a", InspectorID: "u-inspektor", Mode: InspectionModePassFail, OverallResult: InspectionResultPass}}
-	svc := NewService(store, nil, nil, &fakePerms{perms: []string{}}, nil, &fakeAudit{}, nil)
+	svc := NewService(store, nil, nil, nil, &fakePerms{perms: []string{}}, nil, &fakeAudit{}, nil)
 	if err := svc.AnonymizeUserReferences(context.Background(), "u-inspektor"); err == nil {
 		t.Fatal("err = nil, want a wrapped store error")
 	}

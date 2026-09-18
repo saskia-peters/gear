@@ -632,9 +632,10 @@ describe('AdminEinstellungenPage Zeitpläne tab', () => {
     expect(screen.getByText('Wöchentlich − 2 Wochen')).toBeInTheDocument()
     expect(screen.getAllByRole('button', { name: 'Archivieren' })).toHaveLength(2)
     expect(screen.getAllByRole('button', { name: 'Bearbeiten' })).toHaveLength(2)
-    // The Name column is the default sort, so it shows the next-action hint.
-    expect(screen.getByRole('button', { name: 'Sortieren nach Name (absteigend)' })).toBeInTheDocument()
-    expect(screen.getByRole('button', { name: 'Sortieren nach Intervall' })).toBeInTheDocument()
+    // The Intervall column is the default sort (Story 5-2c FR-30: the list opens
+    // duration-ascending), so it shows the next-action hint.
+    expect(screen.getByRole('button', { name: 'Sortieren nach Intervall (absteigend)' })).toBeInTheDocument()
+    expect(screen.getByRole('button', { name: 'Sortieren nach Name' })).toBeInTheDocument()
     expect(screen.getByRole('button', { name: 'Neuer Zeitplan' })).toBeInTheDocument()
   })
 
@@ -653,12 +654,14 @@ describe('AdminEinstellungenPage Zeitpläne tab', () => {
     const table = screen.getByRole('table', { name: 'Zeitpläne' })
     const names = () =>
       Array.from(table.querySelectorAll('tbody tr')).map((tr) => tr.querySelector('td')?.textContent?.trim() ?? '')
-    // Default: Name asc → "1 Jahr" before "2 Wochen" before "Monatlich".
+    // Default: Intervall asc (Story 5-2c FR-30) → 2 Wochen (14d), Monatlich (30d), 1 Jahr (365d).
+    expect(names()).toEqual(['2 Wochen', 'Monatlich', '1 Jahr'])
+    // Name asc → "1 Jahr" before "2 Wochen" before "Monatlich".
+    await user.click(screen.getByRole('button', { name: 'Sortieren nach Name' }))
     expect(names()).toEqual(['1 Jahr', '2 Wochen', 'Monatlich'])
-    // Intervall asc → shortest first: 2 Wochen (14d), Monatlich (30d), 1 Jahr (365d).
+    // Intervall asc → shortest first; desc → longest first.
     await user.click(screen.getByRole('button', { name: 'Sortieren nach Intervall' }))
     expect(names()).toEqual(['2 Wochen', 'Monatlich', '1 Jahr'])
-    // Intervall desc → longest first.
     await user.click(screen.getByRole('button', { name: 'Sortieren nach Intervall (absteigend)' }))
     expect(names()).toEqual(['1 Jahr', 'Monatlich', '2 Wochen'])
   })
@@ -793,8 +796,8 @@ describe('AdminEinstellungenPage System tab', () => {
       { key: 'attribute_key_max_runes', value_type: 'integer', unit: 'Zeichen', value: 64 },
       { key: 'attributes_max_size', value_type: 'integer', unit: 'Bytes', value: 16384 },
       { key: 'inventory_prefix', value_type: 'text', value: 'GEAR' },
-      { key: 'inventory_width', value_type: 'integer', unit: 'Ziffern', value: 6 },
-      { key: 'inspection_orange_window_days', value_type: 'integer', unit: 'Tage', value: 14 },
+      { key: 'inventory_width', value_type: 'integer', unit: 'Ziffern', value: 9 },
+      { key: 'inspection_orange_window_percent', value_type: 'integer', unit: 'Prozent', value: 25 },
       { key: 'qualification_expiring_soon_window', value_type: 'duration', value: 2592000 },
     ]
   }
@@ -855,9 +858,9 @@ describe('AdminEinstellungenPage System tab', () => {
     // seconds never look alike.
     expect(screen.getByText('GEAR')).toBeInTheDocument()
     expect(screen.getByText('16384 Bytes')).toBeInTheDocument()
-    expect(screen.getByText('14 Tage')).toBeInTheDocument()
+    expect(screen.getByText('25 Prozent')).toBeInTheDocument()
     expect(screen.getByText('10 Zeichen')).toBeInTheDocument()
-    expect(screen.getByText('6 Ziffern')).toBeInTheDocument()
+    expect(screen.getByText('9 Ziffern')).toBeInTheDocument()
     // 21 rows: one input + one save + one "?" per row.
     expect(screen.getAllByRole('spinbutton')).toHaveLength(20)
     expect(screen.getAllByRole('textbox')).toHaveLength(1)

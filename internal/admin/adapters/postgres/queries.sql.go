@@ -321,15 +321,23 @@ const listSchedules = `-- name: ListSchedules :many
 SELECT id, name, interval_unit, interval_magnitude, weekday_set, time_of_day, archived_at, created_at, updated_at
 FROM schedules
 WHERE archived_at IS NULL
-ORDER BY created_at ASC, name ASC
+ORDER BY (CASE interval_unit
+            WHEN 'day' THEN 1
+            WHEN 'week' THEN 7
+            WHEN 'month' THEN 30
+            WHEN 'quarter' THEN 91
+            WHEN 'year' THEN 365
+            ELSE 0
+          END) * interval_magnitude ASC, id ASC
 `
 
 // The ACTIVE named-schedule catalog (FR-30/AD-16). Archived rows (archived_at
 // NOT NULL) are filtered out — the active surface never shows them. The order
-// is deterministic: created_at ASC with a name tiebreaker, so the seed rows
-// (which share one now() created_at) always render in a stable order. The
-// reserved weekday_set/time_of_day columns are selected so the returned rows
-// carry the full stored row (they are NULL in V1).
+// is by REAL duration ASCENDING (unit→days weight × magnitude, id tiebreak) so
+// the Zeitpläne list renders 3 Tage < 1 Woche < 2 Wochen < 1 Monat < 1 Quartal
+// < 1 Jahr (Story 5-2c, FR-30) instead of alphabetically. The reserved
+// weekday_set/time_of_day columns are selected so the returned rows carry the
+// full stored row (they are NULL in V1).
 func (q *Queries) ListSchedules(ctx context.Context) ([]Schedule, error) {
 	rows, err := q.db.Query(ctx, listSchedules)
 	if err != nil {

@@ -110,9 +110,25 @@ const (
 )
 
 // InventoryNumberMaxLength bounds the editable inventory number (16 chars —
-// 'GEAR' + 6 zero-padded digits leaves headroom for future numbering schemes;
+// 'GEAR' + 9 zero-padded digits leaves headroom for future numbering schemes;
 // mirrored by the DB CHECK constraint).
 const InventoryNumberMaxLength = 16
+
+// defaultInventoryPrefix / defaultInventoryWidth are the server-side fallback
+// inventory-number format (Story 5-2c, C2 adoption): when the Admin
+// AppSettingsPort is unwired or its read fails (or the rows drifted), the
+// auto-assigned number falls back to 'GEAR' + 9 zero-padded digits — the
+// migration-seeded defaults. The configurable values are consumed when present.
+const (
+	defaultInventoryPrefix = "GEAR"
+	defaultInventoryWidth  = 9
+)
+
+// defaultOrangeWindowPercent is the fallback orange-window percentage (Story
+// 5-2c, D1): 25 = one QUARTER of the inspection interval — exactly the
+// previous interval/4 behavior, so an unwired/failed settings read keeps the
+// derivation identical until an admin edits the setting.
+const defaultOrangeWindowPercent = 25
 
 // Tool is the domain representation of one physical tool row (FR-9/FR-10).
 // ToolTypeID is the intra-module FK to a tool type; ToolTypeName is the JOIN
@@ -176,10 +192,11 @@ type ToolWithTypeQualification struct {
 // leaves the stored JSONB unchanged, an EXPLICIT `{}` clears it, a non-empty
 // object replaces it wholesale. On CREATE a nil field simply stores the DB
 // default `{}`.
-// InventoryNumber is IGNORED on create (the server auto-assigns 'GEAR%06d'
-// in-SQL, CREATE_IGNORE_CLIENT) and OPTIONAL on update: a non-empty value edits
-// the stored number (bounded, unique); an empty value is REJECTED — a tool
-// always has an inventory number (UPDATE_CLEAR, 400).
+// InventoryNumber is IGNORED on create (the server auto-assigns
+// '<inventory_prefix> + zero-padded nextval' in-SQL, CREATE_IGNORE_CLIENT) and
+// OPTIONAL on update: a non-empty value edits the stored number (bounded,
+// unique); an empty value is REJECTED — a tool always has an inventory number
+// (UPDATE_CLEAR, 400).
 type ToolInput struct {
 	Name            string         `json:"name"`
 	ToolTypeID      string         `json:"tool_type_id"`
@@ -207,7 +224,7 @@ type ToolInput struct {
 type ToolStore interface {
 	ListTools(ctx context.Context) ([]*Tool, error)
 	ToolExistsActive(ctx context.Context, id string) (bool, error)
-	CreateTool(ctx context.Context, tool *Tool) (*Tool, error)
+	CreateTool(ctx context.Context, tool *Tool, inventoryPrefix string, inventoryWidth int) (*Tool, error)
 	UpdateTool(ctx context.Context, tool *Tool) (*Tool, error)
 	ArchiveTool(ctx context.Context, id string) (*Tool, error)
 	GetToolWithTypeQualification(ctx context.Context, id string) (*ToolWithTypeQualification, error)
@@ -327,11 +344,17 @@ func (s *Service) ListToolsForDashboard(ctx context.Context) ([]*DashboardTool, 
 		return nil, fmt.Errorf("tools core: failed to resolve schedule catalog: %w", err)
 	}
 
+	// The orange-window percentage is resolved ONCE per call too (Story 5-2c,
+	// D1): the settings read joins the schedule-catalog snapshot, so the
+	// per-tool derivation never triggers an N+1 settings read. A missing/
+	// drifted row falls back to the default 25 (a quarter of the interval).
+	orangeWindowPercent := s.orangeWindowPercent(ctx)
+
 	now := time.Now()
 	for _, tool := range tools {
 		out = append(out, &DashboardTool{
 			Tool:   *tool,
-			Status: s.dashboardStatus(ctx, tool, schedules, now),
+			Status: s.dashboardStatus(ctx, tool, schedules, orangeWindowPercent, now),
 		})
 	}
 	return out, nil
@@ -403,6 +426,11 @@ func (s *Service) ExportStatusReport(ctx context.Context, actorID string, filter
 		return nil, fmt.Errorf("tools core: failed to resolve schedule catalog: %w", err)
 	}
 
+	// The orange-window percentage resolves ONCE per call alongside the
+	// catalog snapshot (Story 5-2c, D1) — the per-tool derivation shares it,
+	// no N+1 settings read.
+	orangeWindowPercent := s.orangeWindowPercent(ctx)
+
 	filterSet := make(map[string]struct{}, len(filterCodes))
 	for _, code := range filterCodes {
 		filterSet[code] = struct{}{}
@@ -414,7 +442,7 @@ func (s *Service) ExportStatusReport(ctx context.Context, actorID string, filter
 	seen := make(map[string]struct{}, len(tools))
 	var ids []string
 	for _, tool := range tools {
-		status := s.dashboardStatus(ctx, tool, schedules, now)
+		status := s.dashboardStatus(ctx, tool, schedules, orangeWindowPercent, now)
 		if len(filterSet) > 0 {
 			if _, ok := filterSet[string(status.Status)]; !ok {
 				continue
@@ -474,8 +502,9 @@ func (s *Service) ExportStatusReport(ctx context.Context, actorID string, filter
 // status-read error is logged and rendered `red` (NextDue nil) — the tool is
 // never falsely claimed serviceable, and the config defect never takes the
 // whole list down. `schedules` is the catalog snapshot resolved once per
-// ListToolsForDashboard call.
-func (s *Service) dashboardStatus(ctx context.Context, tool *Tool, schedules []*admcore.Schedule, now time.Time) ToolStatus {
+// ListToolsForDashboard call; `orangeWindowPercent` is the once-per-call
+// settings value (Story 5-2c, D1).
+func (s *Service) dashboardStatus(ctx context.Context, tool *Tool, schedules []*admcore.Schedule, orangeWindowPercent int, now time.Time) ToolStatus {
 	interval, err := scheduleIntervalFor(tool.ScheduleID, tool.DefaultScheduleID, schedules)
 	if err != nil {
 		s.log().Warn("tools core: dashboard tool has no effective schedule; rendering red",
@@ -494,7 +523,7 @@ func (s *Service) dashboardStatus(ctx context.Context, tool *Tool, schedules []*
 		statusInput = &ToolInspectionStatus{}
 	}
 	return deriveToolStatus(statusInput.LatestFailAt, statusInput.LastSuccessAt, statusInput.LastReinstatedAt,
-		interval, now)
+		interval, orangeWindowPercent, now)
 }
 
 // CreateTool persists a new tool (CREATE_VALID / CREATE_OVERRIDE /
@@ -540,7 +569,12 @@ func (s *Service) CreateTool(ctx context.Context, actorID string, input ToolInpu
 		return nil, err
 	}
 
-	persisted, err := s.store.CreateTool(ctx, tool)
+	// C2 adoption (Story 5-2c): the auto-assigned number format resolves from
+	// the Admin AppSettingsPort ONCE per call (inventory_prefix + width,
+	// defaults 'GEAR' + 9), never a hardcoded constant and never a copy.
+	inventoryPrefix, inventoryWidth := s.inventoryNumberFormat(ctx)
+
+	persisted, err := s.store.CreateTool(ctx, tool, inventoryPrefix, inventoryWidth)
 	if err != nil {
 		return nil, fmt.Errorf("tools core: failed to persist tool: %w", err)
 	}
@@ -659,6 +693,56 @@ func (s *Service) ArchiveTool(ctx context.Context, actorID, id string) (*Tool, e
 	return archived, nil
 }
 
+// inventoryNumberFormat resolves the configurable auto-assigned number format
+// (Story 5-2c, C2 adoption): the Admin AppSettingsPort's inventory_prefix +
+// inventory_width, falling back to the default 'GEAR' + 9 when the seam is
+// unwired or its read fails (the migration-seeded rows are authoritative when
+// present; a drifted/missing row must not fail the create). Resolved ONCE per
+// CreateTool call.
+func (s *Service) inventoryNumberFormat(ctx context.Context) (string, int) {
+	prefix, width := defaultInventoryPrefix, defaultInventoryWidth
+	if s.appSettings == nil {
+		s.log().Warn("tools core: app settings port is not wired; using default inventory number format")
+		return prefix, width
+	}
+	settings, err := s.appSettings.CurrentAppSettings(ctx)
+	if err != nil {
+		s.log().Warn("tools core: failed to resolve app settings; using default inventory number format", "error", err)
+		return prefix, width
+	}
+	if settings.InventoryPrefix != "" {
+		prefix = settings.InventoryPrefix
+	}
+	if settings.InventoryWidth > 0 {
+		width = settings.InventoryWidth
+	}
+	return prefix, width
+}
+
+// orangeWindowPercent resolves the configurable orange-window percentage
+// (Story 5-2c, D1): the Admin AppSettingsPort's
+// inspection_orange_window_percent, falling back to 25 (a quarter of the
+// interval — the previous interval/4 behavior) when the seam is unwired, its
+// read fails, or the row drifted below the 1..100 range. Callers resolve it
+// ONCE per call — the dashboard alongside the schedule-catalog snapshot,
+// submit/reinstate once per request — so the derivation never triggers an N+1
+// settings read.
+func (s *Service) orangeWindowPercent(ctx context.Context) int {
+	if s.appSettings == nil {
+		s.log().Warn("tools core: app settings port is not wired; using default orange window percent")
+		return defaultOrangeWindowPercent
+	}
+	settings, err := s.appSettings.CurrentAppSettings(ctx)
+	if err != nil {
+		s.log().Warn("tools core: failed to resolve app settings; using default orange window percent", "error", err)
+		return defaultOrangeWindowPercent
+	}
+	if settings.InspectionOrangeWindowPercent < 1 {
+		return defaultOrangeWindowPercent
+	}
+	return settings.InspectionOrangeWindowPercent
+}
+
 // validateToolFKs validates the tool's FK references (CREATE_BAD_TYPE /
 // CREATE_BAD_OVERRIDE): the tool's type must EXIST and be ACTIVE — checked
 // through the Tool module's OWN store ToolTypeExistsActive (intra-module, no
@@ -750,7 +834,7 @@ func (s *Service) ensureUniqueToolName(ctx context.Context, name, exceptID strin
 // (a tool always has one — clearing is rejected, 400), bounded to
 // InventoryNumberMaxLength RUNES and returned trimmed. Validity of the format
 // is intentionally free-form text (char, not number-only — the only hard shape
-// is the auto-assigned 'GEAR%06d').
+// is the auto-assigned '<prefix> + zero-padded nextval').
 func validateToolInventoryNumber(inventoryNumber string) (string, error) {
 	inv := strings.TrimSpace(inventoryNumber)
 	if inv == "" {

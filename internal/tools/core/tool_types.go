@@ -215,6 +215,7 @@ type Service struct {
 	store          toolModuleStore
 	schedules      adminports.SchedulesPort
 	qualifications userports.QualificationCatalogPort
+	appSettings    adminports.AppSettingsPort
 	perms          PermissionResolver
 	displayNames   DisplayNameResolver
 	audit          AuditWriter
@@ -224,12 +225,15 @@ type Service struct {
 // NewService constructs the Tool service. store is the combined persistence
 // port over the Tool-owned tables (tool types + tools); schedules/
 // qualifications are the read-only consumer ports used only by the write path
-// (FK validation); perms/displayNames/audit are the User-module repository
+// (FK validation); appSettings is the Admin AppSettingsPort (Story 5-2c) the
+// tool module reads the configurable settings through (inventory prefix/width
+// on create, the orange-window percent on the status derivation) — never a
+// copy (AD-14/AD-16); perms/displayNames/audit are the User-module repository
 // seams (permission re-check + the history surface's display-name resolution +
 // the audit trail). logger may be nil (falls back to slog.Default()); it is
 // used for structured logging of audit-write failures (NFR-O1).
-func NewService(store toolModuleStore, schedules adminports.SchedulesPort, qualifications userports.QualificationCatalogPort, perms PermissionResolver, displayNames DisplayNameResolver, audit AuditWriter, logger *slog.Logger) *Service {
-	return &Service{store: store, schedules: schedules, qualifications: qualifications, perms: perms, displayNames: displayNames, audit: audit, logger: logger}
+func NewService(store toolModuleStore, schedules adminports.SchedulesPort, qualifications userports.QualificationCatalogPort, appSettings adminports.AppSettingsPort, perms PermissionResolver, displayNames DisplayNameResolver, audit AuditWriter, logger *slog.Logger) *Service {
+	return &Service{store: store, schedules: schedules, qualifications: qualifications, appSettings: appSettings, perms: perms, displayNames: displayNames, audit: audit, logger: logger}
 }
 
 // log returns the configured logger or slog.Default().

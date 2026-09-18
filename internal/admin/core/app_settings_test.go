@@ -79,8 +79,8 @@ func seededAppSettingRows() []*AppSetting {
 			AttributeKeyMaxRunes:            64,
 			AttributesMaxSize:               16384,
 			InventoryPrefix:                 "GEAR",
-			InventoryWidth:                  6,
-			InspectionOrangeWindowDays:      14,
+			InventoryWidth:                  9,
+			InspectionOrangeWindowPercent:   25,
 			QualificationExpiringSoonWindow: 2592000 * time.Second,
 		}, key))
 	}
@@ -123,11 +123,11 @@ func TestCurrentAppSettingsReadOnlyPort(t *testing.T) {
 	if got.AttributeKeyMaxRunes != 64 || got.AttributesMaxSize != 16384 {
 		t.Errorf("attribute caps = %d/%d, want 64/16384", got.AttributeKeyMaxRunes, got.AttributesMaxSize)
 	}
-	if got.InventoryPrefix != "GEAR" || got.InventoryWidth != 6 {
-		t.Errorf("inventory = %q/%d, want GEAR/6", got.InventoryPrefix, got.InventoryWidth)
+	if got.InventoryPrefix != "GEAR" || got.InventoryWidth != 9 {
+		t.Errorf("inventory = %q/%d, want GEAR/9", got.InventoryPrefix, got.InventoryWidth)
 	}
-	if got.InspectionOrangeWindowDays != 14 {
-		t.Errorf("orange window = %d, want 14", got.InspectionOrangeWindowDays)
+	if got.InspectionOrangeWindowPercent != 25 {
+		t.Errorf("orange window = %d, want 25", got.InspectionOrangeWindowPercent)
 	}
 	if got.QualificationExpiringSoonWindow != 2592000*time.Second {
 		t.Errorf("qualification window = %v, want 30d", got.QualificationExpiringSoonWindow)

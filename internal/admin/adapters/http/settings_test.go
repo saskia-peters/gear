@@ -175,8 +175,8 @@ func applyAppSettingToStruct(s *core.AppSettings, row *core.AppSetting) {
 		s.InventoryPrefix = row.Text()
 	case "inventory_width":
 		s.InventoryWidth = int(row.Int())
-	case "inspection_orange_window_days":
-		s.InspectionOrangeWindowDays = int(row.Int())
+	case "inspection_orange_window_percent":
+		s.InspectionOrangeWindowPercent = int(row.Int())
 	case "qualification_expiring_soon_window":
 		s.QualificationExpiringSoonWindow = row.Duration()
 	}

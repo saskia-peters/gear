@@ -148,7 +148,7 @@ func (f *fakeToolTypeStore) ListTools(context.Context) ([]*Tool, error) { return
 func (f *fakeToolTypeStore) ToolExistsActive(context.Context, string) (bool, error) {
 	return false, nil
 }
-func (f *fakeToolTypeStore) CreateTool(_ context.Context, _ *Tool) (*Tool, error) {
+func (f *fakeToolTypeStore) CreateTool(_ context.Context, _ *Tool, _ string, _ int) (*Tool, error) {
 	return nil, ErrToolNotFound
 }
 func (f *fakeToolTypeStore) UpdateTool(_ context.Context, _ *Tool) (*Tool, error) {
@@ -238,6 +238,38 @@ func (f *fakeQualificationPort) UserHoldsQualification(_ context.Context, userID
 	return false, nil
 }
 
+// fakeAppSettingsPort is an adminports.AppSettingsPort over a fixed typed
+// settings fixture (Story 5-2c adoption). err lets tests simulate a resolution
+// failure (the create-format + status-window fallback paths); calls counts the
+// CurrentAppSettings resolutions so tests can pin the resolve-ONCE-per-call
+// invariant (no N+1).
+type fakeAppSettingsPort struct {
+	settings *admcore.AppSettings
+	err      error
+	calls    int
+}
+
+func (f *fakeAppSettingsPort) CurrentAppSettings(context.Context) (*admcore.AppSettings, error) {
+	f.calls++
+	if f.err != nil {
+		return nil, f.err
+	}
+	if f.settings == nil {
+		return &admcore.AppSettings{}, nil
+	}
+	return f.settings, nil
+}
+
+// adoptedSettings is the Story 5-2c fixture the adoption tests wire: an
+// admin-typed prefix 'WKZ' + width 5 (C2) and an orange-window percent 50 (D1).
+func adoptedSettings() *admcore.AppSettings {
+	return &admcore.AppSettings{
+		InventoryPrefix:              "WKZ",
+		InventoryWidth:               5,
+		InspectionOrangeWindowPercent: 50,
+	}
+}
+
 // newToolTypeService wires the fakes around a Service. perms defaults to the
 // tool_types.manage holder; the schedule/qualification ports default to one
 // ACTIVE schedule (id-s1) and one qualification (id-q1).
@@ -251,6 +283,7 @@ func newToolTypeService(perms ...string) (*Service, *fakeToolTypeStore, *fakeAud
 		store,
 		&fakeSchedulesPort{schedules: []*admcore.Schedule{{ID: "id-s1", Name: "1 Jahr"}}},
 		&fakeQualificationPort{qualificationIDs: []string{"id-q1"}},
+		nil,
 		&fakePerms{perms: perms},
 		nil,
 		audit,
@@ -666,6 +699,7 @@ func TestToolTypesNilPortsFailLoudly(t *testing.T) {
 	store := &fakeToolTypeStore{}
 	svc := NewService(
 		store,
+		nil,
 		nil,
 		nil,
 		&fakePerms{perms: []string{ToolTypesManagePermission}},

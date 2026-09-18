@@ -145,7 +145,7 @@ func main() {
 	// tables (AD-7/AD-10/AD-11).
 	toolStore := toolpostgres.New(pool)
 	toolRepo := toolpostgres.NewRepository(toolStore)
-	toolService := toolscore.NewService(toolRepo, adminSettingsService, userService, userRepo, userRepo, userRepo, log)
+	toolService := toolscore.NewService(toolRepo, adminSettingsService, userService, adminSettingsService, userRepo, userRepo, userRepo, log)
 	toolHandler := toolhttp.NewHandler(toolService, sessionManager, userRepo, log)
 
 	// The tool-type surface mounts under /api/v1/admin/tool-types with its OWN

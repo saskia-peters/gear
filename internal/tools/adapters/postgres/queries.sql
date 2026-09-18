@@ -145,13 +145,15 @@ WHERE t.id = $1 AND t.archived_at IS NULL AND tt.archived_at IS NULL;
 
 -- name: CreateTool :one
 -- Insert a tool and return the resulting row JOINed with its type name. The
--- inventory number is AUTO-ASSIGNED in-SQL (Story 4-3b): 'GEAR' || zero-padded
--- nextval from the dedicated sequence — atomic, monotonic, one round-trip, no
--- client input (CREATE_IGNORE_CLIENT). NOTE: the zero-pad width is 6 for the
--- backfill/early numbering; once the sequence exceeds 999999 the number
--- NATURALLY widens to 7+ digits (e.g. 'GEAR1000000') — still well inside the
--- CHECK (char_length <= 16), monotonic, and fine for the surface. A manual edit
--- can consume a future sequence value; a UNIQUE collision on
+-- inventory number is AUTO-ASSIGNED in-SQL (Story 5-2c, C2 adoption): the
+-- core resolves `inventory_prefix`/`inventory_width` from the Admin
+-- AppSettingsPort (default 'GEAR' + 9 zero-padded digits) and passes them as
+-- $5/$6 — the number is `<prefix> || lpad(nextval, <width>, '0')`, atomic,
+-- monotonic, one round-trip, no client input (CREATE_IGNORE_CLIENT). NOTE:
+-- once the sequence exceeds 10^width-1 the number NATURALLY widens to
+-- width+1 digits (e.g. 'GEAR1000000000') — still well inside the CHECK
+-- (char_length <= 16), monotonic, and fine for the surface. A manual edit can
+-- consume a future sequence value; a UNIQUE collision on
 -- tools_inventory_number_key (a case-insensitive functional index) is handled
 -- by the repository's bounded retry loop (re-running this INSERT computes a
 -- FRESH nextval). The core validated the type EXISTS + ACTIVE and the
@@ -161,7 +163,7 @@ WHERE t.id = $1 AND t.archived_at IS NULL AND tt.archived_at IS NULL;
 -- is mapped by the repository to the German duplicate-name 400.
 WITH new_tool AS (
     INSERT INTO tools (name, tool_type_id, schedule_id, inventory_number, attributes)
-    VALUES ($1, $2, $3, 'GEAR' || lpad(nextval('tools_inventory_number_seq')::text, 6, '0'), $4)
+    VALUES ($1, $2, $3, sqlc.arg('inventory_prefix') || lpad(nextval('tools_inventory_number_seq')::text, sqlc.arg('inventory_width'), '0'), $4)
     RETURNING id, name, tool_type_id, schedule_id, inventory_number, attributes, archived_at, created_at, updated_at
 )
 SELECT nt.id, nt.name, nt.tool_type_id, tt.name AS tool_type_name, nt.schedule_id, nt.inventory_number, nt.attributes, nt.archived_at, nt.created_at, nt.updated_at

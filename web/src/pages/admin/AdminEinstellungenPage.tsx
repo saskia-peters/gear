@@ -940,7 +940,9 @@ function BackupSettingsTab({ onApiError }: { onApiError: (err: unknown) => boole
 // per-row archive action with a confirm. Archive is SOFT — the row leaves the
 // active list and is never hard-deleted; archived schedules are not shown (the
 // server filters them). The create/edit FORM lives on the dedicated editor
-// page. Sorted presentation-only (Name asc by default, localeCompare 'de').
+// page. Sorted presentation-only (Intervall/Duration asc by default —
+// Story 5-2c FR-30: the Zeitpläne list opens 3 Tage < 1 Woche < 2 Wochen <
+// 1 Monat < 1 Quartal < 1 Jahr, not alphabetically).
 function ScheduleSettingsTab({ onApiError }: { onApiError: (err: unknown) => boolean }) {
   const navigate = useNavigate()
   const [loaded, setLoaded] = useState(false)
@@ -948,7 +950,7 @@ function ScheduleSettingsTab({ onApiError }: { onApiError: (err: unknown) => boo
   const [schedules, setSchedules] = useState<Schedule[]>([])
   const [busy, setBusy] = useState(false)
   const [feedback, setFeedback] = useState<Feedback>(null)
-  const [sort, setSort] = useState<{ key: 'name' | 'intervall'; dir: SortDir }>({ key: 'name', dir: 'asc' })
+  const [sort, setSort] = useState<{ key: 'name' | 'intervall'; dir: SortDir }>({ key: 'intervall', dir: 'asc' })
 
   useEffect(() => {
     let cancelled = false
@@ -1222,11 +1224,11 @@ const SYSTEM_SETTING_META: Record<string, SystemSettingMeta> = {
   },
   inventory_width: {
     label: 'Breite Inventarnummer',
-    help: 'Breite des numerischen Teils der Inventarnummer (Standard 6). Zusammen mit dem Präfix ergibt sich z. B. „GEAR000001“.',
+    help: 'Breite des numerischen Teils der Inventarnummer (Standard 9). Zusammen mit dem Präfix ergibt sich z. B. „GEAR000000001“.',
   },
-  inspection_orange_window_days: {
-    label: 'Orange-Fenster Prüfung',
-    help: 'Tage vor der Fälligkeit, ab denen ein Gerät auf dem Dashboard orange dargestellt wird (Standard 14).',
+  inspection_orange_window_percent: {
+    label: 'Orange-Fenster Prüfung (Prozent des Prüfintervalls)',
+    help: 'Prozent des Prüfintervalls, in dem ein Gerät vor der Fälligkeit auf dem Dashboard orange dargestellt wird. 25 = ein Viertel des Prüfintervalls (Standard).',
   },
   qualification_expiring_soon_window: {
     label: 'Qualifikation „bald ablaufend“',
@@ -1282,7 +1284,7 @@ const SYSTEM_SETTING_GROUPS: readonly SystemSettingGroup[] = [
   },
   {
     label: 'Prüfung & Qualifikation',
-    keys: ['inspection_orange_window_days', 'qualification_expiring_soon_window'],
+    keys: ['inspection_orange_window_percent', 'qualification_expiring_soon_window'],
   },
 ]
 

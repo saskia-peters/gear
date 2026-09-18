@@ -28,6 +28,10 @@ type fakeToolStore struct {
 	created     []*Tool
 	updated     []*Tool
 	archivedIDs []string
+	// createdPrefix / createdWidth capture the Story 5-2c inventory format the
+	// core resolved from the AppSettingsPort and passed into the store.
+	createdPrefix string
+	createdWidth  int
 	inspections []*Inspection
 	status      *ToolInspectionStatus
 	statusErr   error
@@ -309,7 +313,7 @@ func (f *fakeToolStore) ToolExistsActive(_ context.Context, id string) (bool, er
 	return false, nil
 }
 
-func (f *fakeToolStore) CreateTool(_ context.Context, tool *Tool) (*Tool, error) {
+func (f *fakeToolStore) CreateTool(_ context.Context, tool *Tool, inventoryPrefix string, inventoryWidth int) (*Tool, error) {
 	if f.createErr != nil {
 		return nil, f.createErr
 	}
@@ -317,6 +321,8 @@ func (f *fakeToolStore) CreateTool(_ context.Context, tool *Tool) (*Tool, error)
 	persisted.ID = "id-tool-" + tool.Name
 	f.tools = append(f.tools, &persisted)
 	f.created = append(f.created, &persisted)
+	f.createdPrefix = inventoryPrefix
+	f.createdWidth = inventoryWidth
 	return &persisted, nil
 }
 
@@ -443,6 +449,7 @@ func newToolService(perms ...string) (*Service, *fakeToolStore, *fakeAudit) {
 		store,
 		&fakeSchedulesPort{schedules: []*admcore.Schedule{{ID: "id-s1", Name: "1 Jahr"}}},
 		&fakeQualificationPort{},
+		nil,
 		&fakePerms{perms: perms},
 		nil,
 		audit,
@@ -1016,6 +1023,7 @@ func dashboardService() (*Service, *fakeToolStore) {
 			ID: "id-s1", Name: "30 Tage", IntervalUnit: admcore.IntervalUnitDay, IntervalMagnitude: 30,
 		}}},
 		&fakeQualificationPort{},
+		nil,
 		&fakePerms{perms: []string{DashboardViewPermission}},
 		nil,
 		&fakeAudit{},
@@ -1254,7 +1262,8 @@ func TestToolsEmptyActorNeverPasses(t *testing.T) {
 func TestCreateToolIgnoresClientInventory(t *testing.T) {
 	// CREATE_IGNORE_CLIENT: a client-sent inventory_number on create is IGNORED —
 	// the persisted tool carries an EMPTY number (the store auto-assigns
-	// 'GEAR%06d' in-SQL). Nothing is validated against the client value.
+	// '<prefix> + zero-padded nextval' in-SQL). Nothing is validated against the
+	// client value.
 	svc, store, _ := newToolService()
 	input := toolInput()
 	input.InventoryNumber = "GEAR999999"
@@ -1267,6 +1276,83 @@ func TestCreateToolIgnoresClientInventory(t *testing.T) {
 	}
 	if len(store.created) != 1 || store.created[0].InventoryNumber != "" {
 		t.Fatalf("persisted = %+v, want the client inventory ignored (empty)", store.created)
+	}
+}
+
+func TestCreateToolAdoptsInventorySettings(t *testing.T) {
+	// C2 adoption (Story 5-2c, CREATE_INVENTORY_ADMIN): the CreateTool core
+	// resolves the inventory_prefix/inventory_width from the Admin
+	// AppSettingsPort ONCE and passes BOTH into the store — an admin-typed
+	// prefix 'WKZ' + width 5 replaces the hardcoded 'GEAR' + 6/'GEAR' + 9.
+	svc, store, _ := newToolService()
+	svc.appSettings = &fakeAppSettingsPort{settings: adoptedSettings()}
+
+	if _, err := svc.CreateTool(context.Background(), actorID, toolInput()); err != nil {
+		t.Fatalf("CreateTool(adopted settings) err = %v", err)
+	}
+	if store.createdPrefix != "WKZ" || store.createdWidth != 5 {
+		t.Errorf("store format = %q/%d, want WKZ/5 (the AppSettingsPort values, consumed not hardcoded)",
+			store.createdPrefix, store.createdWidth)
+	}
+}
+
+func TestCreateToolDefaultsInventoryFormat(t *testing.T) {
+	// C2 default (CREATE_INVENTORY): a missing/unwired AppSettingsPort (or an
+	// empty/drifted settings read) falls back to 'GEAR' + 9 — the migration
+	// default — so the create never fails and never invents a broken format.
+	svc, store, _ := newToolService()
+	if _, err := svc.CreateTool(context.Background(), actorID, toolInput()); err != nil {
+		t.Fatalf("CreateTool(nil port) err = %v, want the default format", err)
+	}
+	if store.createdPrefix != "GEAR" || store.createdWidth != 9 {
+		t.Errorf("store format = %q/%d, want GEAR/9 (the default fallback)", store.createdPrefix, store.createdWidth)
+	}
+
+	// A settings-read failure ALSO falls back to the defaults (the create is
+	// never blocked by a drifted/missing settings row).
+	svc.appSettings = &fakeAppSettingsPort{err: errors.New("boom")}
+	input := toolInput()
+	input.Name = "Bohrmaschine-02"
+	if _, err := svc.CreateTool(context.Background(), actorID, input); err != nil {
+		t.Fatalf("CreateTool(settings error) err = %v, want the default format", err)
+	}
+	if store.createdPrefix != "GEAR" || store.createdWidth != 9 {
+		t.Errorf("store format after settings error = %q/%d, want GEAR/9", store.createdPrefix, store.createdWidth)
+	}
+}
+
+func TestListToolsForDashboardUsesOrangeWindowPercent(t *testing.T) {
+	// D1 consumption (Story 5-2c, ORANGE_PERCENT_CHANGED): with the setting at
+	// 50%, a tool whose next_due lies 10 days out on a 30-day cycle (window
+	// 15d) renders ORANGE — the same tool under the 25% default (window 7.5d)
+	// renders GREEN. Proves the derivation consumes the CONFIGURED percent,
+	// not a constant.
+	now := time.Now()
+	mk := func(percent int) (*Service, *fakeToolStore) {
+		svc, store := dashboardService()
+		svc.appSettings = &fakeAppSettingsPort{settings: &admcore.AppSettings{InspectionOrangeWindowPercent: percent}}
+		store.tools = []*Tool{dashboardToolFixture("id-a", "Bald-fällig")}
+		anchor := now.Add(-20 * 24 * time.Hour) // next_due = now + 10d
+		store.statusByTool = map[string]*ToolInspectionStatus{"id-a": {LastSuccessAt: &anchor}}
+		return svc, store
+	}
+
+	svc, _ := mk(50)
+	got, err := svc.ListToolsForDashboard(context.Background())
+	if err != nil {
+		t.Fatalf("ListToolsForDashboard(percent 50) err = %v", err)
+	}
+	if len(got) != 1 || got[0].Status.Status != ToolStatusCodeOrange {
+		t.Fatalf("percent 50 status = %+v, want orange (window = interval/2)", got[0].Status)
+	}
+
+	svc25, _ := mk(25)
+	got, err = svc25.ListToolsForDashboard(context.Background())
+	if err != nil {
+		t.Fatalf("ListToolsForDashboard(percent 25) err = %v", err)
+	}
+	if len(got) != 1 || got[0].Status.Status != ToolStatusCodeGreen {
+		t.Fatalf("percent 25 status = %+v, want green (window = interval/4)", got[0].Status)
 	}
 }
 
@@ -1428,6 +1514,7 @@ func TestCreateToolNilOverridePortFailsLoudly(t *testing.T) {
 	store := &fakeToolStore{types: []*ToolType{{ID: "id-t1", Name: "Bohrmaschine"}}}
 	svc := NewService(
 		store,
+		nil,
 		nil,
 		nil,
 		&fakePerms{perms: []string{ToolsManagePermission}},
@@ -1713,6 +1800,7 @@ func reportService(perms ...string) (*Service, *fakeToolStore, *fakeDisplayNames
 			ID: "id-s1", Name: "30 Tage", IntervalUnit: admcore.IntervalUnitDay, IntervalMagnitude: 30,
 		}}},
 		&fakeQualificationPort{},
+		nil,
 		&fakePerms{perms: perms},
 		names,
 		&fakeAudit{},

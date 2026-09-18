@@ -119,7 +119,7 @@ type AppSettings struct {
 	AttributesMaxSize               int
 	InventoryPrefix                 string
 	InventoryWidth                  int
-	InspectionOrangeWindowDays      int
+	InspectionOrangeWindowPercent   int
 	QualificationExpiringSoonWindow time.Duration
 	resolvedKeys                    map[string]struct{}
 }
@@ -289,11 +289,13 @@ var appSettingsCatalog = []appSettingDef{
 	{key: "inventory_width", valueType: ValueTypeInteger, unit: "Ziffern", min: 1,
 		set: func(s *AppSettings, r *AppSetting) { s.InventoryWidth = int(r.Int()) },
 		get: func(s *AppSettings) any { return s.InventoryWidth }},
-	// D1 Inspection orange-window threshold (days — a DAYS unit, unlike the
+	// D1 Inspection orange-window threshold — a PERCENTAGE of the tool's own
+	// inspection interval (25 = a quarter of the interval, the consumed default
+	// the derivation reads via AppSettingsPort; a PERCENT unit, unlike the
 	// duration windows, so the unit is surfaced to distinguish them).
-	{key: "inspection_orange_window_days", valueType: ValueTypeInteger, unit: "Tage", min: 1,
-		set: func(s *AppSettings, r *AppSetting) { s.InspectionOrangeWindowDays = int(r.Int()) },
-		get: func(s *AppSettings) any { return s.InspectionOrangeWindowDays }},
+	{key: "inspection_orange_window_percent", valueType: ValueTypeInteger, unit: "Prozent", min: 1,
+		set: func(s *AppSettings, r *AppSetting) { s.InspectionOrangeWindowPercent = int(r.Int()) },
+		get: func(s *AppSettings) any { return s.InspectionOrangeWindowPercent }},
 	// D2 Qualification "expiring soon" window.
 	{key: "qualification_expiring_soon_window", valueType: ValueTypeDuration, unit: "Sekunden", min: 1,
 		set: func(s *AppSettings, r *AppSetting) { s.QualificationExpiringSoonWindow = r.Duration() },
