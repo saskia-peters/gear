@@ -29,14 +29,14 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-04-2026 19:40
-last_updated: 09-16-2026 09:15
+last_updated: 09-17-2026 09:45
 project: gear
 project_key: NOKEY
 tracking_system: file-system
 story_location: 
   /home/saskia/devprojects/gear/_bmad-output/implementation-artifacts
 development_status:
-  epic-1: in-progress
+  epic-1: done
   1-1-project-scaffold-database-foundation: done
   1-2-dashboard-foundation-app-home: done
   1-3-self-registration-with-admin-pending-approval: done
@@ -78,22 +78,26 @@ development_status:
   4-3b-inventory-number-tool-edit: done
   4-4-flexible-attributes-on-tools-tool-types: done
   4-5-bulk-csv-import: deferred
+  4-6-admin-catalog-lists-and-create-pages: done
   epic-4-retrospective: done
 
   epic-5: in-progress
   5-1-qualification-gated-inspection-start: done
   5-2-inspection-ux-foundation: done
   5-2b-configurable-system-settings: done
-  5-3-out-of-service-flagging: review
-  5-4-pass-fail-inspection-execution: review
-  5-5-checklist-inspection-execution: review
-  5-6-out-of-service-reinstatement: review
+  5-3-out-of-service-flagging: done
+  5-4-pass-fail-inspection-execution: done
+  5-5-checklist-inspection-execution: done
+  5-6-out-of-service-reinstatement: done
   epic-5-retrospective: optional
 
   epic-6: in-progress
-  6-1-color-coded-status-dashboard: review
+  6-1-color-coded-status-dashboard: done
+  6-1b-dashboard-row-details-navigation: done
   6-2-status-report-export-pdf: backlog
-  6-3-inspection-history-per-tool: review
+  6-3-inspection-history-per-tool: done
+  6-3b-tool-details-track-record: done
+  6-3c-tool-details-condensed-back: done
   epic-6-retrospective: optional
 action_items:
   - id: "epic-1-retro-item-1-extract-a-shared-authheaders-helper-into"
