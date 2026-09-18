@@ -18,6 +18,7 @@ A plain-language overview of the app for decision-makers and new team members.
 - [Product Brief](/docs/planning/product-brief) — scope, objectives, and high-level requirements
 - [Architecture Spine](/docs/planning/architecture-spine) — technical invariants, ADs, database artifacts, diagrams
 - [Architecture Addendum](/docs/planning/addendum) — technology stack decisions and deferred options
+- [Module Roadmap](/docs/planning/module-roadmap) — the modular ecosystem: Module 1 (tool inspection) and the planned modules
 
 ## Implementation (auto-generated from code)
 

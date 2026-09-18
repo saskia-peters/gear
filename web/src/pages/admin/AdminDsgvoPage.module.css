@@ -125,13 +125,13 @@
 }
 
 .tabActive {
-  color: var(--gear-color-accent);
-  border-bottom-color: var(--gear-color-accent);
+  color: var(--gear-color-ink-primary);
+  border-bottom-color: var(--gear-color-brand-hover);
 }
 
 .tab:focus-visible,
 .tabActive:focus-visible {
-  outline: 2px solid var(--gear-color-accent);
+  outline: 2px solid var(--gear-focus-ring-color);
   outline-offset: 2px;
 }
 
@@ -159,30 +159,34 @@
 }
 
 .select:focus-visible {
-  outline: 2px solid var(--gear-color-accent);
+  outline: 2px solid var(--gear-focus-ring-color);
   outline-offset: 2px;
 }
 
 .saveButton {
   min-height: 48px;
-  padding: var(--gear-space-2) var(--gear-space-4);
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: var(--gear-space-3) var(--gear-space-5);
   border: none;
   border-radius: var(--gear-radius-md);
-  background-color: var(--gear-color-accent);
-  color: var(--gear-color-on-accent);
+  background-color: var(--gear-color-button-primary-bg);
+  color: var(--gear-color-button-primary-text);
   font-size: var(--gear-font-label-size);
   font-weight: var(--gear-font-label-weight);
   line-height: var(--gear-font-label-line-height);
   cursor: pointer;
   white-space: nowrap;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
 }
 
 .saveButton:hover:not(:disabled) {
-  filter: brightness(1.05);
+  background-color: var(--gear-color-brand-hover);
 }
 
 .saveButton:focus-visible {
-  outline: 2px solid var(--gear-color-accent);
+  outline: 2px solid var(--gear-focus-ring-color);
   outline-offset: 2px;
 }
 
@@ -249,7 +253,7 @@
   font-size: var(--gear-font-label-size);
   font-weight: var(--gear-font-label-weight);
   line-height: var(--gear-font-label-line-height);
-  color: var(--gear-color-accent);
+  color: var(--gear-color-ink-secondary);
   margin: 0;
   text-transform: uppercase;
   letter-spacing: 0.04em;
@@ -352,12 +356,12 @@
 }
 
 .rowButton:hover:not(:disabled) {
-  border-color: var(--gear-color-accent);
-  color: var(--gear-color-accent);
+  border-color: var(--gear-color-brand-hover);
+  color: var(--gear-color-brand-hover);
 }
 
 .rowButton:focus-visible {
-  outline: 2px solid var(--gear-color-accent);
+  outline: 2px solid var(--gear-focus-ring-color);
   outline-offset: 2px;
 }
 
@@ -423,7 +427,7 @@
 
 .textInput:focus-visible,
 .textarea:focus-visible {
-  outline: 2px solid var(--gear-color-accent);
+  outline: 2px solid var(--gear-focus-ring-color);
   outline-offset: 2px;
 }
 
