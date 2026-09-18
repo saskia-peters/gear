@@ -341,3 +341,55 @@ FROM inspection_items ii
 JOIN inspections i ON i.id = ii.inspection_id
 WHERE i.tool_id = $1
 ORDER BY ii.inspection_id, ii.position;
+
+-- ============================================================================
+-- DSGVO data-access export queries (Story 3.3, FR-24/AD-8): the per-USER reads
+-- behind the Tool module's DSGVOInspectionExportPort. They filter on the plain
+-- FK-less inspector_id / actor_id columns (the 000029 indexes
+-- inspections_inspector_id_idx / reinstatements_actor_id_idx serve them).
+-- The export stays inside Tool-owned tables (inspections JOIN tools for the
+-- display name is intra-module, AD-8/AD-11); no actor names resolve here — the
+-- report subject is the exporting user.
+-- ============================================================================
+
+-- name: ListInspectionsByInspector :many
+-- Every inspection the user performed as inspector (FR-24), newest first with
+-- the id tiebreak. The repository attaches the snapshotted per-checklist-item
+-- results in one grouped round-trip. A user with no inspections answers an
+-- empty set (the report renders the German empty note, never a 404).
+SELECT id, tool_id, inspector_id, mode, overall_result, notes, submitted_at
+FROM inspections
+WHERE inspector_id = $1
+ORDER BY submitted_at DESC, id DESC;
+
+-- name: ListInspectionItemsByInspector :many
+-- The snapshotted ordered checklist items of EVERY inspection the user
+-- performed (Story 3.3), grouped by inspection and ordered by position within
+-- each group — the per-inspection item results of the DSGVO export in ONE
+-- round-trip (no N+1 per-inspection item reads, mirroring the history surface).
+SELECT ii.id, ii.inspection_id, ii.item_id, ii.label, ii.position, ii.result
+FROM inspection_items ii
+JOIN inspections i ON i.id = ii.inspection_id
+WHERE i.inspector_id = $1
+ORDER BY ii.inspection_id, ii.position;
+
+-- name: ListReinstatementsByActor :many
+-- Every reinstatement the user performed as actor (FR-24), newest first with
+-- the id tiebreak. A user with no reinstatements answers an empty set.
+SELECT id, tool_id, actor_id, reason, created_at
+FROM reinstatements
+WHERE actor_id = $1
+ORDER BY created_at DESC, id DESC;
+
+-- name: ListToolNamesByIDs :many
+-- The id → name map of the EXISTING tools among the given set (Story 3.3): the
+-- DSGVO export resolves the display names of the tools the subject inspected /
+-- reinstated, INCLUDING archived ones (the report covers the full fleet
+-- history, so the active-only ListTools would drop archived rows). The read is
+-- intra-module (Tool-owned tools, AD-8/AD-11). A tool id ABSENT from the
+-- result (concurrent deletion) is simply a MISSING key — the export falls back
+-- to the id itself, never a 404.
+SELECT id, name
+FROM tools
+WHERE id = ANY($1::uuid[])
+ORDER BY id;

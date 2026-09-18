@@ -177,6 +177,15 @@ func (f *fakeToolTypeStore) ListReinstatementsByTool(_ context.Context, _ string
 func (f *fakeToolTypeStore) GetLatestInspectionByTool(_ context.Context, _ string) (*LatestInspection, error) {
 	return nil, nil
 }
+func (f *fakeToolTypeStore) ListInspectionsByInspector(_ context.Context, _ string) ([]*Inspection, error) {
+	return []*Inspection{}, nil
+}
+func (f *fakeToolTypeStore) ListReinstatementsByActor(_ context.Context, _ string) ([]*Reinstatement, error) {
+	return []*Reinstatement{}, nil
+}
+func (f *fakeToolTypeStore) ListToolNamesByIDs(_ context.Context, _ []string) (map[string]string, error) {
+	return map[string]string{}, nil
+}
 
 // fakeSchedulesPort is an adminports.SchedulesPort over a fixed ACTIVE catalog.
 // err lets tests simulate a resolution failure (the submit interval path).

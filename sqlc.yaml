@@ -80,6 +80,7 @@ sql:
       - "./migrations/000024_tools.up.sql"
       - "./migrations/000025_tool_inventory_number.up.sql"
       - "./migrations/000027_inspections.up.sql"
+      - "./migrations/000029_dsgvo_inspector_indexes.up.sql"
     queries: "./internal/tools/adapters/postgres/queries.sql"
     gen:
       go:

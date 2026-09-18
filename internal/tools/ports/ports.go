@@ -13,6 +13,10 @@ import (
 	"github.com/saskia-peters/gear/internal/tools/core"
 )
 
+// UserInspectionDataExport is the DSGVO inspection-data export payload (Story
+// 3.3, FR-24).
+type UserInspectionDataExport = core.UserInspectionDataExport
+
 // Service is the Tool module's inbound configuration port (Story 4.2 + 4.3,
 // AD-10): list/create/update/archive tool types AND the physical tools that
 // belong to them. Every method re-checks its own permission code (`tool_types.manage`
@@ -116,4 +120,17 @@ type Service interface {
 	// display names resolve through the DisplayNameResolver seam in ONE call (a
 	// missing user row maps to the literal "Deleted User").
 	ExportStatusReport(ctx context.Context, actorID string, filterCodes []string) ([]*core.ReportRow, error)
+}
+
+// DSGVOInspectionExportPort is the read-only inspection-data export seam (Story
+// 3.3, FR-24/AD-8) the DSGVO orchestrator consumes: given a user id it returns
+// every inspection the user performed as inspector (with the per-checklist-item
+// results), every reinstatement they performed as actor and the per-tool
+// summary. Actor names are NOT resolved — the report subject is the exporting
+// user. Implemented by the Tool core Service. The port is deliberately
+// UNGATED: the orchestrator re-checks `dsgvo.access_report` defense-in-depth
+// (AD-6) before calling it. All reads are intra-module (Tool-owned tables,
+// AD-8/AD-11).
+type DSGVOInspectionExportPort interface {
+	ExportUserInspectionData(ctx context.Context, userID string) (*UserInspectionDataExport, error)
 }

@@ -350,6 +350,93 @@ export async function deleteUserGroup(groupId: string): Promise<{ message: strin
   })) as { message: string }
 }
 
+// ---------------------------------------------------------------------------
+// DSGVO data-access report (Story 3.3, FR-24/AD-8): the admin surface under
+// /api/v1/admin/dsgvo. The server orchestrates the User + Tool module exports
+// into one report (profile, roles/groups/grants/qualifications, auth history,
+// inspection records + counts) and audits every generation (NFR-O2).
+// ---------------------------------------------------------------------------
+
+const DSGVO_URL = '/api/v1/admin/dsgvo'
+
+// AccessReport is the assembled DSGVO data-access report: the User module's
+// export (profile + roles/groups/grants/qualifications + auth history) and the
+// Tool module's inspection export (inspections + reinstatements + per-tool
+// summary), stamped with the generation timestamp.
+export interface AccessReport {
+  user: UserDataExport
+  tools: UserInspectionDataExport
+  generated_at: string
+}
+
+// UserDataExport is the User module's report section. LoginAttempts is absent
+// (null) when the email has no tracked attempts — the page renders the German
+// empty note. Sessions carry no token material.
+export interface UserDataExport {
+  profile: {
+    id: string
+    email: string
+    pending_email?: string
+    display_name: string
+    first_name: string
+    last_name: string
+    state: string
+    is_mfa_enabled: boolean
+    attributes: Record<string, unknown>
+    created_at: string
+    updated_at: string
+  }
+  roles: RoleGroupRef[]
+  user_groups: UserGroupRef[]
+  direct_grants: DirectGrantRef[]
+  qualifications: QualificationAssignment[]
+  sessions: Array<{ id: string; created_at: string; expires_at: string }>
+  login_attempts?: {
+    email: string
+    failed_count: number
+    lockout_until: string | null
+    updated_at: string
+  } | null
+}
+
+// UserInspectionDataExport is the Tool module's report section: the subject's
+// inspections (with the per-checklist-item results), their reinstatements and
+// the per-tool summary.
+export interface UserInspectionDataExport {
+  inspections: Array<{
+    id: string
+    tool_id: string
+    tool_name: string
+    mode: string
+    overall_result: string
+    notes: string
+    submitted_at: string
+    items: Array<{ id: string; item_id: string; label: string; position: number; result: string }>
+  }>
+  reinstatements: Array<{
+    id: string
+    tool_id: string
+    tool_name: string
+    reason: string
+    created_at: string
+  }>
+  summary: Array<{
+    tool_id: string
+    tool_name: string
+    inspection_count: number
+    fail_count: number
+  }>
+}
+
+// getDsgvoReport fetches the assembled data-access report of one user (Story
+// 3.3, FR-24). Gated by dsgvo.access_report (the server re-checks
+// defense-in-depth); a 403 means no personal data is exposed.
+export async function getDsgvoReport(userId: string): Promise<AccessReport> {
+  return (await request(`${DSGVO_URL}/reports/${encodeURIComponent(userId)}`, {
+    headers: authTokenHeaders(),
+  })) as AccessReport
+}
+
 // Re-export the shared uniform-envelope error and the catalog type used by the
 // editor's direct-grant grid.
 export type { PermissionCatalogEntry }

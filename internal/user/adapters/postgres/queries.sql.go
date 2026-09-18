@@ -1181,6 +1181,66 @@ func (q *Queries) GetUserByID(ctx context.Context, id pgtype.UUID) (GetUserByIDR
 	return i, err
 }
 
+const getUserByIDFull = `-- name: GetUserByIDFull :one
+SELECT id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password, one_time_password_hash, one_time_password_expires_at
+FROM users
+WHERE id = $1
+`
+
+type GetUserByIDFullRow struct {
+	ID                         pgtype.UUID        `json:"id"`
+	Email                      string             `json:"email"`
+	DisplayName                string             `json:"display_name"`
+	FirstName                  string             `json:"first_name"`
+	LastName                   string             `json:"last_name"`
+	PasswordHash               string             `json:"password_hash"`
+	State                      string             `json:"state"`
+	IsMfaEnabled               bool               `json:"is_mfa_enabled"`
+	TotpSecretEncrypted        pgtype.Text        `json:"totp_secret_encrypted"`
+	PendingTotpSecretEncrypted pgtype.Text        `json:"pending_totp_secret_encrypted"`
+	PendingTotpExpiresAt       pgtype.Timestamptz `json:"pending_totp_expires_at"`
+	Attributes                 []byte             `json:"attributes"`
+	CreatedAt                  pgtype.Timestamptz `json:"created_at"`
+	UpdatedAt                  pgtype.Timestamptz `json:"updated_at"`
+	PendingEmail               pgtype.Text        `json:"pending_email"`
+	MustChangePassword         bool               `json:"must_change_password"`
+	OneTimePasswordHash        string             `json:"one_time_password_hash"`
+	OneTimePasswordExpiresAt   pgtype.Timestamptz `json:"one_time_password_expires_at"`
+}
+
+// The FULL user row by id (Story 3.3, FR-24): the same column set as
+// GetUserByEmail, including attributes + created_at/updated_at AND the secret
+// columns (password_hash, totp_secret_encrypted, pending_totp_secret_encrypted,
+// one_time_password_hash). The DSGVO export reads this row but STRIPS every
+// authenticator in the core before assembly — the report never carries a
+// secret (REPORT_SECRETS). A zero-row read (unknown id) maps to the uniform
+// not-found in the repository.
+func (q *Queries) GetUserByIDFull(ctx context.Context, id pgtype.UUID) (GetUserByIDFullRow, error) {
+	row := q.db.QueryRow(ctx, getUserByIDFull, id)
+	var i GetUserByIDFullRow
+	err := row.Scan(
+		&i.ID,
+		&i.Email,
+		&i.DisplayName,
+		&i.FirstName,
+		&i.LastName,
+		&i.PasswordHash,
+		&i.State,
+		&i.IsMfaEnabled,
+		&i.TotpSecretEncrypted,
+		&i.PendingTotpSecretEncrypted,
+		&i.PendingTotpExpiresAt,
+		&i.Attributes,
+		&i.CreatedAt,
+		&i.UpdatedAt,
+		&i.PendingEmail,
+		&i.MustChangePassword,
+		&i.OneTimePasswordHash,
+		&i.OneTimePasswordExpiresAt,
+	)
+	return i, err
+}
+
 const incrementLoginAttempts = `-- name: IncrementLoginAttempts :exec
 INSERT INTO login_attempts (email, failed_count, lockout_until)
 VALUES ($1, 1, NULL)
@@ -1980,6 +2040,50 @@ func (q *Queries) ListResolvedPermissionSources(ctx context.Context, userID pgty
 	for rows.Next() {
 		var i ListResolvedPermissionSourcesRow
 		if err := rows.Scan(&i.Code, &i.SourceKind, &i.SourceName); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listSessionsByUser = `-- name: ListSessionsByUser :many
+SELECT id, user_id, created_at, expires_at
+FROM sessions
+WHERE user_id = $1
+ORDER BY created_at DESC, id DESC
+`
+
+type ListSessionsByUserRow struct {
+	ID        pgtype.UUID        `json:"id"`
+	UserID    pgtype.UUID        `json:"user_id"`
+	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	ExpiresAt pgtype.Timestamptz `json:"expires_at"`
+}
+
+// The authentication sessions of a user (Story 3.3, FR-24 auth history),
+// newest first with the id tiebreak. The token_hash is deliberately NOT
+// selected — the DSGVO report never carries an authenticator (REPORT_SECRETS);
+// only identity + the created/expiry timestamps are exported. The existing
+// sessions.user_id_idx serves the read.
+func (q *Queries) ListSessionsByUser(ctx context.Context, userID pgtype.UUID) ([]ListSessionsByUserRow, error) {
+	rows, err := q.db.Query(ctx, listSessionsByUser, userID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListSessionsByUserRow
+	for rows.Next() {
+		var i ListSessionsByUserRow
+		if err := rows.Scan(
+			&i.ID,
+			&i.UserID,
+			&i.CreatedAt,
+			&i.ExpiresAt,
+		); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

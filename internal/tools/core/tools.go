@@ -211,6 +211,14 @@ type ToolStore interface {
 	UpdateTool(ctx context.Context, tool *Tool) (*Tool, error)
 	ArchiveTool(ctx context.Context, id string) (*Tool, error)
 	GetToolWithTypeQualification(ctx context.Context, id string) (*ToolWithTypeQualification, error)
+	// ListToolNamesByIDs resolves the id → display name map of the EXISTING
+	// tools among the given set (Story 3.3 DSGVO export, AD-8): the report
+	// names the tools the subject inspected / reinstated — INCLUDING archived
+	// ones (the export covers the full fleet history, so the active-only
+	// ListTools would drop archived rows). Intra-module read over Tool-owned
+	// tools. A tool id ABSENT from the result is simply a MISSING key — the
+	// export falls back to the id itself, never a 404.
+	ListToolNamesByIDs(ctx context.Context, toolIDs []string) (map[string]string, error)
 }
 
 // toolModuleStore is the combined persistence port the Service consumes: the

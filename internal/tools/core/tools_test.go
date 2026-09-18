@@ -202,6 +202,67 @@ func (f *fakeToolStore) GetLatestInspectionByTool(_ context.Context, toolID stri
 	return f.latestByTool[toolID], nil
 }
 
+// ListInspectionsByInspector returns every inspection the user performed as
+// inspector (Story 3.3 DSGVO export), newest first (submitted_at DESC, id DESC)
+// — mirroring the repository's SQL ORDER BY. The items the inspection was
+// inserted with are returned alongside.
+func (f *fakeToolStore) ListInspectionsByInspector(_ context.Context, userID string) ([]*Inspection, error) {
+	var out []*Inspection
+	for _, insp := range f.inspections {
+		if insp.InspectorID == userID {
+			out = append(out, insp)
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].SubmittedAt.Equal(out[j].SubmittedAt) {
+			return out[i].ID > out[j].ID
+		}
+		return out[i].SubmittedAt.After(out[j].SubmittedAt)
+	})
+	return out, nil
+}
+
+// ListReinstatementsByActor returns every reinstatement the user performed as
+// actor (Story 3.3 DSGVO export), newest first (created_at DESC, id DESC) —
+// mirroring the repository's SQL ORDER BY.
+func (f *fakeToolStore) ListReinstatementsByActor(_ context.Context, userID string) ([]*Reinstatement, error) {
+	var out []*Reinstatement
+	for i, r := range f.reinstatements {
+		if r.ActorID == userID {
+			out = append(out, &Reinstatement{
+				ID:        fmt.Sprintf("id-rein-%d", i),
+				ToolID:    r.ToolID,
+				ActorID:   r.ActorID,
+				Reason:    r.Reason,
+				CreatedAt: r.CreatedAt,
+			})
+		}
+	}
+	sort.SliceStable(out, func(i, j int) bool {
+		if out[i].CreatedAt.Equal(out[j].CreatedAt) {
+			return out[i].ID > out[j].ID
+		}
+		return out[i].CreatedAt.After(out[j].CreatedAt)
+	})
+	return out, nil
+}
+
+// ListToolNamesByIDs resolves the id → display name map of the EXISTING tools
+// among the given set (Story 3.3 DSGVO export), including archived ones. A tool
+// id absent from the fake answers a MISSING key (the core falls back to the
+// id itself).
+func (f *fakeToolStore) ListToolNamesByIDs(_ context.Context, toolIDs []string) (map[string]string, error) {
+	out := map[string]string{}
+	for _, t := range f.tools {
+		for _, id := range toolIDs {
+			if t.ID == id {
+				out[id] = t.Name
+			}
+		}
+	}
+	return out, nil
+}
+
 func (f *fakeToolStore) ListTools(context.Context) ([]*Tool, error) {
 	if f.listErr != nil {
 		return nil, f.listErr

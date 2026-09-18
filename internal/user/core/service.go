@@ -64,6 +64,14 @@ type Repository interface {
 	SetUserOneTimePassword(ctx context.Context, userID, hash string, expiresAt time.Time) (bool, error)
 	ClearUserOneTimePassword(ctx context.Context, userID, hash string) (bool, error)
 	GetUserByID(ctx context.Context, userID string) (*User, error)
+	// DSGVO data-access export persistence (Story 3.3, FR-24/AD-8):
+	// GetUserByIDFull returns the FULL user row by id (the same column set as
+	// GetUserByEmail — INCLUDING the secret columns, which the core strips
+	// before assembly, REPORT_SECRETS; an unknown id → ErrAdminUserNotFound);
+	// ListSessionsByUser returns the user's authentication sessions (newest
+	// first) WITHOUT the token hash — the report never carries an authenticator.
+	GetUserByIDFull(ctx context.Context, userID string) (*User, error)
+	ListSessionsByUser(ctx context.Context, userID string) ([]UserSessionExport, error)
 	// IsUserInPermissionGroup reports whether the user is a member of the named
 	// permission group (AD-12); the admin-group membership drives the
 	// server-authoritative IsAdmin flag (Story 1.8).

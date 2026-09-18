@@ -651,6 +651,29 @@ SELECT id, email, first_name, last_name, display_name, state
 FROM users
 WHERE id = $1;
 
+-- name: GetUserByIDFull :one
+-- The FULL user row by id (Story 3.3, FR-24): the same column set as
+-- GetUserByEmail, including attributes + created_at/updated_at AND the secret
+-- columns (password_hash, totp_secret_encrypted, pending_totp_secret_encrypted,
+-- one_time_password_hash). The DSGVO export reads this row but STRIPS every
+-- authenticator in the core before assembly — the report never carries a
+-- secret (REPORT_SECRETS). A zero-row read (unknown id) maps to the uniform
+-- not-found in the repository.
+SELECT id, email, display_name, first_name, last_name, password_hash, state, is_mfa_enabled, totp_secret_encrypted, pending_totp_secret_encrypted, pending_totp_expires_at, attributes, created_at, updated_at, pending_email, must_change_password, one_time_password_hash, one_time_password_expires_at
+FROM users
+WHERE id = $1;
+
+-- name: ListSessionsByUser :many
+-- The authentication sessions of a user (Story 3.3, FR-24 auth history),
+-- newest first with the id tiebreak. The token_hash is deliberately NOT
+-- selected — the DSGVO report never carries an authenticator (REPORT_SECRETS);
+-- only identity + the created/expiry timestamps are exported. The existing
+-- sessions.user_id_idx serves the read.
+SELECT id, user_id, created_at, expires_at
+FROM sessions
+WHERE user_id = $1
+ORDER BY created_at DESC, id DESC;
+
 -- name: ListUserRoles :many
 -- The permission groups (roles) a user holds, for the user detail surface
 -- (Story 2.6, AD-12). No secret material is selected.

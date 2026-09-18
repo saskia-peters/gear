@@ -33,6 +33,7 @@ The table below lists the current story set:
 | `000026_app_settings.up/down.sql` | 5-2b | Admin-owned typed `app_settings` key/value store (one row per atomic setting, one of `duration_value`/`int_value`/`text_value` set per row, durations in seconds) seeded with the 14 proposal defaults (21 atomic rows) + `admin.settings.system` permission seeded/granted to admin. |
 | `000027_inspections.up/down.sql` | 5.3 | Tool-owned `inspections` + `inspection_items` (snapshotted checklist results) + `reinstatements` ledger (FR-12/FR-13/FR-15) — status stays DERIVED on read (AD-4), never stored — + the per-tool history/status indexes (FR-18). |
 | `000028_schirrmeister_inspection_history.up/down.sql` | 6.3 follow-up | Grants the EXISTING `inspection.history.view` permission (000010) to the `schirrmeister` base role (the frozen spec names Schirrmeister as a history viewer). Idempotent INSERT; the down only removes the schirrmeister grant row — the code itself is never deleted. |
+| `000029_dsgvo_inspector_indexes.up/down.sql` | 3.3 | Pure read indexes for the DSGVO data-access export (FR-24): `inspections_inspector_id_idx` (inspector_id, submitted_at DESC), `reinstatements_actor_id_idx` (actor_id, created_at DESC) — the per-user `ListInspectionsByInspector` / `ListReinstatementsByActor` reads — and `sessions_user_id_created_at_idx` (user_id, created_at DESC) — the per-user `ListSessionsByUser` sort. No schema change. |
 
 Naming: `NNNNNN_snake_case.up.sql` / `NNNNNN_snake_case.down.sql`.
 

@@ -1850,6 +1850,14 @@ func (r *changePasswordRepo) GetUserByID(_ context.Context, _ string) (*core.Use
 	return nil, core.ErrAdminUserNotFound
 }
 
+func (r *changePasswordRepo) GetUserByIDFull(_ context.Context, _ string) (*core.User, error) {
+	return nil, core.ErrAdminUserNotFound
+}
+
+func (r *changePasswordRepo) ListSessionsByUser(_ context.Context, _ string) ([]core.UserSessionExport, error) {
+	return []core.UserSessionExport{}, nil
+}
+
 func (r *changePasswordRepo) IsUserInPermissionGroup(_ context.Context, _, _ string) (bool, error) {
 	return false, nil
 }

@@ -22,6 +22,9 @@ type ResetRequestResult = core.ResetRequestResult
 // ResetCompleteResult is the confirmation returned when a reset is completed.
 type ResetCompleteResult = core.ResetCompleteResult
 
+// UserDataExport is the DSGVO data-access export payload (Story 3.3, FR-24).
+type UserDataExport = core.UserDataExport
+
 // Service is the User Directory & Auth inbound port (AD-2).
 type Service interface {
 	Register(ctx context.Context, input core.RegisterInput) (*core.RegisterResult, error)
@@ -157,6 +160,17 @@ type Service interface {
 	AssignUserQualification(ctx context.Context, actor *core.User, userID, qualificationID string, expiresAt *time.Time) (*core.UserQualificationAssignResult, error)
 	RevokeUserQualification(ctx context.Context, actor *core.User, userID, qualificationID string) (*core.UserQualificationAssignResult, error)
 	UpdateUserQualificationExpiry(ctx context.Context, actor *core.User, userID, qualificationID string, expiresAt *time.Time) (*core.UserQualificationAssignResult, error)
+}
+
+// DSGVOExportPort is the read-only data-access export seam (Story 3.3, FR-24/
+// AD-8) the DSGVO orchestrator consumes: given a user id it returns the full
+// export — profile (secrets stripped), roles/user-groups/direct-grants/
+// qualifications, auth sessions and login-attempt state. A missing user →
+// core.ErrAdminUserNotFound (uniform 404). Implemented by the User core
+// Service. The port is deliberately UNGATED: the orchestrator re-checks
+// `dsgvo.access_report` defense-in-depth (AD-6) before calling it.
+type DSGVOExportPort interface {
+	ExportUserData(ctx context.Context, userID string) (*UserDataExport, error)
 }
 
 // Repository is the outbound persistence port for User data.

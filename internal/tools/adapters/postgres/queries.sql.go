@@ -529,6 +529,45 @@ func (q *Queries) InsertToolTypeChecklistItem(ctx context.Context, arg InsertToo
 	return err
 }
 
+const listInspectionItemsByInspector = `-- name: ListInspectionItemsByInspector :many
+SELECT ii.id, ii.inspection_id, ii.item_id, ii.label, ii.position, ii.result
+FROM inspection_items ii
+JOIN inspections i ON i.id = ii.inspection_id
+WHERE i.inspector_id = $1
+ORDER BY ii.inspection_id, ii.position
+`
+
+// The snapshotted ordered checklist items of EVERY inspection the user
+// performed (Story 3.3), grouped by inspection and ordered by position within
+// each group — the per-inspection item results of the DSGVO export in ONE
+// round-trip (no N+1 per-inspection item reads, mirroring the history surface).
+func (q *Queries) ListInspectionItemsByInspector(ctx context.Context, inspectorID pgtype.UUID) ([]InspectionItem, error) {
+	rows, err := q.db.Query(ctx, listInspectionItemsByInspector, inspectorID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []InspectionItem
+	for rows.Next() {
+		var i InspectionItem
+		if err := rows.Scan(
+			&i.ID,
+			&i.InspectionID,
+			&i.ItemID,
+			&i.Label,
+			&i.Position,
+			&i.Result,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listInspectionItemsByTool = `-- name: ListInspectionItemsByTool :many
 SELECT ii.id, ii.inspection_id, ii.item_id, ii.label, ii.position, ii.result
 FROM inspection_items ii
@@ -557,6 +596,55 @@ func (q *Queries) ListInspectionItemsByTool(ctx context.Context, toolID pgtype.U
 			&i.Label,
 			&i.Position,
 			&i.Result,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listInspectionsByInspector = `-- name: ListInspectionsByInspector :many
+
+SELECT id, tool_id, inspector_id, mode, overall_result, notes, submitted_at
+FROM inspections
+WHERE inspector_id = $1
+ORDER BY submitted_at DESC, id DESC
+`
+
+// ============================================================================
+// DSGVO data-access export queries (Story 3.3, FR-24/AD-8): the per-USER reads
+// behind the Tool module's DSGVOInspectionExportPort. They filter on the plain
+// FK-less inspector_id / actor_id columns (the 000029 indexes
+// inspections_inspector_id_idx / reinstatements_actor_id_idx serve them).
+// The export stays inside Tool-owned tables (inspections JOIN tools for the
+// display name is intra-module, AD-8/AD-11); no actor names resolve here — the
+// report subject is the exporting user.
+// ============================================================================
+// Every inspection the user performed as inspector (FR-24), newest first with
+// the id tiebreak. The repository attaches the snapshotted per-checklist-item
+// results in one grouped round-trip. A user with no inspections answers an
+// empty set (the report renders the German empty note, never a 404).
+func (q *Queries) ListInspectionsByInspector(ctx context.Context, inspectorID pgtype.UUID) ([]Inspection, error) {
+	rows, err := q.db.Query(ctx, listInspectionsByInspector, inspectorID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Inspection
+	for rows.Next() {
+		var i Inspection
+		if err := rows.Scan(
+			&i.ID,
+			&i.ToolID,
+			&i.InspectorID,
+			&i.Mode,
+			&i.OverallResult,
+			&i.Notes,
+			&i.SubmittedAt,
 		); err != nil {
 			return nil, err
 		}
@@ -617,6 +705,41 @@ func (q *Queries) ListInspectionsByTool(ctx context.Context, toolID pgtype.UUID)
 	return items, nil
 }
 
+const listReinstatementsByActor = `-- name: ListReinstatementsByActor :many
+SELECT id, tool_id, actor_id, reason, created_at
+FROM reinstatements
+WHERE actor_id = $1
+ORDER BY created_at DESC, id DESC
+`
+
+// Every reinstatement the user performed as actor (FR-24), newest first with
+// the id tiebreak. A user with no reinstatements answers an empty set.
+func (q *Queries) ListReinstatementsByActor(ctx context.Context, actorID pgtype.UUID) ([]Reinstatement, error) {
+	rows, err := q.db.Query(ctx, listReinstatementsByActor, actorID)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []Reinstatement
+	for rows.Next() {
+		var i Reinstatement
+		if err := rows.Scan(
+			&i.ID,
+			&i.ToolID,
+			&i.ActorID,
+			&i.Reason,
+			&i.CreatedAt,
+		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const listReinstatementsByTool = `-- name: ListReinstatementsByTool :many
 SELECT id, tool_id, actor_id, reason, created_at
 FROM reinstatements
@@ -644,6 +767,45 @@ func (q *Queries) ListReinstatementsByTool(ctx context.Context, toolID pgtype.UU
 			&i.Reason,
 			&i.CreatedAt,
 		); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
+const listToolNamesByIDs = `-- name: ListToolNamesByIDs :many
+SELECT id, name
+FROM tools
+WHERE id = ANY($1::uuid[])
+ORDER BY id
+`
+
+type ListToolNamesByIDsRow struct {
+	ID   pgtype.UUID `json:"id"`
+	Name string      `json:"name"`
+}
+
+// The id → name map of the EXISTING tools among the given set (Story 3.3): the
+// DSGVO export resolves the display names of the tools the subject inspected /
+// reinstated, INCLUDING archived ones (the report covers the full fleet
+// history, so the active-only ListTools would drop archived rows). The read is
+// intra-module (Tool-owned tools, AD-8/AD-11). A tool id ABSENT from the
+// result (concurrent deletion) is simply a MISSING key — the export falls back
+// to the id itself, never a 404.
+func (q *Queries) ListToolNamesByIDs(ctx context.Context, dollar_1 []pgtype.UUID) ([]ListToolNamesByIDsRow, error) {
+	rows, err := q.db.Query(ctx, listToolNamesByIDs, dollar_1)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []ListToolNamesByIDsRow
+	for rows.Next() {
+		var i ListToolNamesByIDsRow
+		if err := rows.Scan(&i.ID, &i.Name); err != nil {
 			return nil, err
 		}
 		items = append(items, i)

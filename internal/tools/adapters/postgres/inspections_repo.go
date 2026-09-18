@@ -238,6 +238,62 @@ func (r *Repository) ListReinstatementsByTool(ctx context.Context, toolID string
 	return out, nil
 }
 
+// ListInspectionsByInspector reads every inspection the user performed as
+// inspector (Story 3.3 DSGVO export, FR-24): every row reverse-chronological
+// (submitted_at DESC, id DESC — the 000029 index
+// inspections_inspector_id_idx serves it), EACH WITH its snapshotted ordered
+// checklist items. The items are fetched in ONE round-trip
+// (ListInspectionItemsByInspector JOINs inspections by inspector_id) and
+// grouped onto the inspections — never an N+1 per-inspection item read,
+// mirroring the per-tool history surface. A user with no inspections answers
+// an empty list, nil-safe.
+func (r *Repository) ListInspectionsByInspector(ctx context.Context, userID string) ([]*core.Inspection, error) {
+	uid, err := parseOptionalUUID(userID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := r.queries.ListInspectionsByInspector(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return []*core.Inspection{}, nil
+	}
+	itemRows, err := r.queries.ListInspectionItemsByInspector(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+	itemsByInspection := groupInspectionItems(itemRows)
+	out := make([]*core.Inspection, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, inspectionFromRow(row, itemsByInspection[row.ID]))
+	}
+	return out, nil
+}
+
+// ListReinstatementsByActor reads every reinstatement the user performed as
+// actor (Story 3.3 DSGVO export, FR-24): every row newest first (created_at
+// DESC, id DESC — the 000029 index reinstatements_actor_id_idx serves it). A
+// user with no reinstatements answers an empty list, nil-safe.
+func (r *Repository) ListReinstatementsByActor(ctx context.Context, userID string) ([]*core.Reinstatement, error) {
+	uid, err := parseOptionalUUID(userID)
+	if err != nil {
+		return nil, err
+	}
+	rows, err := r.queries.ListReinstatementsByActor(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+	if len(rows) == 0 {
+		return []*core.Reinstatement{}, nil
+	}
+	out := make([]*core.Reinstatement, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, reinstatementFromRow(row))
+	}
+	return out, nil
+}
+
 // groupInspectionItems buckets the fetched item rows by their inspection_id so
 // the repository can attach them to the fetched inspections in one round-trip.
 func groupInspectionItems(rows []InspectionItem) map[pgtype.UUID][]InspectionItem {

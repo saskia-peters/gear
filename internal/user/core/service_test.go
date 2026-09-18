@@ -116,6 +116,9 @@ type mockRepo struct {
 	userGroupRoles       map[string][]string
 	qualificationExpiry  map[string]*time.Time
 	listUserGroupRolesErr error
+	// userSessions backs ListSessionsByUser (Story 3.3 DSGVO export auth
+	// history): the stored session exports keyed by user id, newest first.
+	userSessions map[string][]UserSessionExport
 }
 
 func newMockRepo() *mockRepo {
@@ -135,6 +138,7 @@ func newMockRepo() *mockRepo {
 		userQualifications: make(map[string][]string),
 		userGroupRoles:     make(map[string][]string),
 		qualificationExpiry: make(map[string]*time.Time),
+		userSessions:        make(map[string][]UserSessionExport),
 	}
 }
 
@@ -493,6 +497,29 @@ func (m *mockRepo) GetUserByID(_ context.Context, userID string) (*User, error) 
 		return nil, ErrAdminUserNotFound
 	}
 	return u, nil
+}
+
+// GetUserByIDFull returns the FULL stored user row by ID (Story 3.3 DSGVO
+// export): the mock keeps complete *User values (including the secret columns),
+// so the same lookup serves the export's profile read. An unknown id maps to
+// ErrAdminUserNotFound.
+func (m *mockRepo) GetUserByIDFull(_ context.Context, userID string) (*User, error) {
+	u := m.userByID(userID)
+	if u == nil {
+		return nil, ErrAdminUserNotFound
+	}
+	return u, nil
+}
+
+// ListSessionsByUser returns the stored DSGVO session exports of a user (Story
+// 3.3 auth history), newest first. Tests seed userSessions keyed by user id; an
+// unset/unknown user answers an EMPTY list, nil-safe (REPORT_NO_AUTH).
+func (m *mockRepo) ListSessionsByUser(_ context.Context, userID string) ([]UserSessionExport, error) {
+	out := m.userSessions[userID]
+	if out == nil {
+		return []UserSessionExport{}, nil
+	}
+	return out, nil
 }
 
 // SetUserOneTimePassword stores the OTP hash + expiry and flags

@@ -365,6 +365,19 @@ type InspectionStore interface {
 	// no inspections answers (nil, nil) — never an error (the report renders
 	// "–").
 	GetLatestInspectionByTool(ctx context.Context, toolID string) (*LatestInspection, error)
+	// ListInspectionsByInspector reads every inspection the user performed as
+	// inspector (Story 3.3 DSGVO export, FR-24): newest first (submitted_at
+	// DESC, id DESC — deterministic, served by the 000029 index
+	// inspections_inspector_id_idx), EACH WITH its snapshotted ordered
+	// checklist items (the repository fetches the items in one grouped
+	// round-trip, mirroring the history surface — no N+1). A user with no
+	// inspections answers an EMPTY list, nil-safe.
+	ListInspectionsByInspector(ctx context.Context, userID string) ([]*Inspection, error)
+	// ListReinstatementsByActor reads every reinstatement the user performed as
+	// actor (Story 3.3 DSGVO export, FR-24): newest first (created_at DESC, id
+	// DESC — served by the 000029 index reinstatements_actor_id_idx). A user
+	// with no reinstatements answers an EMPTY list, nil-safe.
+	ListReinstatementsByActor(ctx context.Context, userID string) ([]*Reinstatement, error)
 }
 
 // SubmitInspection persists one inspection (SUBMIT_PASSFAIL / SUBMIT_CHECKLIST,

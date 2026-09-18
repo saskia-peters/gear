@@ -22,6 +22,7 @@ import (
 	admsmtp "github.com/saskia-peters/gear/internal/admin/adapters/smtp"
 	admcore "github.com/saskia-peters/gear/internal/admin/core"
 	adminports "github.com/saskia-peters/gear/internal/admin/ports"
+	dsgvocore "github.com/saskia-peters/gear/internal/dsgvo/core"
 	"github.com/saskia-peters/gear/internal/platform/auth"
 	"github.com/saskia-peters/gear/internal/platform/crypto"
 	"github.com/saskia-peters/gear/internal/platform/httpapi"
@@ -1727,4 +1728,180 @@ func doComposedRawRequest(h http.Handler, token, method, path string) *httptest.
 	rec := httptest.NewRecorder()
 	h.ServeHTTP(rec, req)
 	return rec
+}
+
+// ============================================================================
+// Story 3.3 — the DSGVO composition-root mount (AD-6/AD-8): /api/v1/admin/dsgvo
+// behind its OWN any-of gate [dsgvo.access_report, dsgvo.delete] with the REAL
+// orchestrator (fake export ports + the compResolver as the permission seam +
+// an in-memory audit), mirroring main().
+// ============================================================================
+
+// compDsgvoUserPort is a userports.DSGVOExportPort over a canned export.
+type compDsgvoUserPort struct{}
+
+func (p *compDsgvoUserPort) ExportUserData(_ context.Context, userID string) (*userports.UserDataExport, error) {
+	return &userports.UserDataExport{
+		Profile: usercore.UserExportProfile{ID: userID, Email: "target@gear.local", DisplayName: "Ziel Person"},
+	}, nil
+}
+
+// compDsgvoToolPort is a toolports.DSGVOInspectionExportPort over a canned export.
+type compDsgvoToolPort struct{}
+
+func (p *compDsgvoToolPort) ExportUserInspectionData(_ context.Context, _ string) (*toolports.UserInspectionDataExport, error) {
+	return &toolports.UserInspectionDataExport{
+		Inspections: []toolscore.InspectionExport{{ID: "insp-1", ToolID: "id-tool-a", ToolName: "Bohrmaschine-01"}},
+		Summary:     []toolscore.ToolExportSummary{},
+	}, nil
+}
+
+// compDsgvoAudit records InsertAuditEvent calls.
+type compDsgvoAudit struct {
+	events []struct {
+		actorID   string
+		operation string
+		detail    string
+		severity  string
+	}
+}
+
+func (a *compDsgvoAudit) InsertAuditEvent(_ context.Context, userID, operation, detail, severity string) error {
+	a.events = append(a.events, struct {
+		actorID   string
+		operation string
+		detail    string
+		severity  string
+	}{actorID: userID, operation: operation, detail: detail, severity: severity})
+	return nil
+}
+
+// newCompositionDsgvoRouter mirrors the main() DSGVO mounts exactly: the outer
+// /api/v1/admin mount gated by AdminModuleAccessCodes and the DSGVO sub-mount
+// /api/v1/admin/dsgvo gated by ANY of [dsgvo.access_report, dsgvo.delete]
+// (one permission per surface, AD-6), both through the REAL RequireAnyPermission
+// middleware and router.New, with the REAL orchestrator behind the handler.
+func newCompositionDsgvoRouter(perms []string, session *usercore.Session) (http.Handler, *compDsgvoAudit) {
+	log := discardLogger()
+	validator := &compValidator{session: session}
+	resolver := &compResolver{perms: perms}
+
+	audit := &compDsgvoAudit{}
+	orchestrator := dsgvocore.NewService(
+		&compDsgvoUserPort{},
+		&compDsgvoToolPort{},
+		resolver, // the orchestrator's defense-in-depth permission seam (AD-6)
+		audit,
+		log,
+	)
+	dsgvoHandler := adminhttp.NewDsgvoHandler(orchestrator, log)
+	dsgvoSurface := auth.RequireAnyPermission(validator, resolver, []string{dsgvocore.AccessReportPermission, dsgvocore.DeletePermission}, "dsgvo access denied", log)(dsgvoHandler.DsgvoRoutes())
+
+	// The sibling settings surface (mounted in main.go too) so the REVERSE
+	// assertion can prove the DSGVO code does NOT widen the SMTP gate.
+	settingsHandler := adminhttp.NewHandler(&compSettingsService{}, log)
+	settingsSurface := auth.RequireAnyPermission(validator, resolver, []string{admcore.SmtpSettingsPermission}, "admin.settings.email access denied", log)(settingsHandler.Routes())
+
+	outer := chi.NewRouter()
+	outer.Get("/", func(w http.ResponseWriter, _ *http.Request) {
+		_, _ = w.Write([]byte(`{"module":"admin","status":"ok"}`))
+	})
+	outerSurface := auth.RequireAnyPermission(validator, resolver, usercore.AdminModuleAccessCodes(), "admin access denied", log)(outer)
+
+	return router.New(stubPinger{}, log,
+		router.WithMount("/api/v1/admin", outerSurface),
+		router.WithMount("/api/v1/admin/settings", settingsSurface),
+		router.WithMount("/api/v1/admin/dsgvo", dsgvoSurface),
+	), audit
+}
+
+func doDsgvoComposedRequest(h http.Handler, token, path string) *httptest.ResponseRecorder {
+	return doComposedJSONRequest(h, token, http.MethodGet, path, "")
+}
+
+// TestCompositionDsgvoMountGating verifies the Story 3.3 composition-root
+// wiring: /api/v1/admin/dsgvo is gated by ITS OWN any-of gate
+// [dsgvo.access_report, dsgvo.delete] (AD-6) — a caller holding only an
+// unrelated admin code gets the uniform 403 with NO personal data, while a
+// dsgvo.access_report holder reaches the surface (and, via the outer gate, the
+// admin module root). The reverse is also pinned: a delete-only holder passes
+// the mount gate but is STILL denied the report by the orchestrator's
+// defense-in-depth re-check (the per-action code, AD-6) — and a
+// dsgvo.access_report-only holder is denied the SMTP surface (its code opens
+// only the DSGVO mount).
+func TestCompositionDsgvoMountGating(t *testing.T) {
+	// 401: no token.
+	router401, _ := newCompositionDsgvoRouter([]string{}, nil)
+	if rec := doDsgvoComposedRequest(router401, "", "/api/v1/admin/dsgvo/reports/u-target"); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no token: status = %d, want 401 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// 403: a caller holding an unrelated admin code is denied with no personal
+	// data exposed (the gates are separate — one permission per surface, AD-6).
+	routerMail, _ := newCompositionDsgvoRouter([]string{admcore.SmtpSettingsPermission}, activeUser("u-mail", "mail@gear.local"))
+	rec := doDsgvoComposedRequest(routerMail, "tok", "/api/v1/admin/dsgvo/reports/u-target")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("email-only holder: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "target@gear.local") || strings.Contains(rec.Body.String(), "Ziel Person") {
+		t.Errorf("403 body leaks personal data: %s", rec.Body.String())
+	}
+
+	// 403: a non-admin (dashboard.view only) caller is also denied.
+	routerVol, _ := newCompositionDsgvoRouter([]string{toolscore.DashboardViewPermission}, activeUser("u-vol", "vol@gear.local"))
+	if rec := doDsgvoComposedRequest(routerVol, "tok", "/api/v1/admin/dsgvo/reports/u-target"); rec.Code != http.StatusForbidden {
+		t.Errorf("non-admin holder: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// 200: a dsgvo.access_report holder reaches the report — the composed path
+	// (gate → handler → orchestrator → ports) serves the assembled JSON with
+	// the attachment Content-Disposition, and the generation is audited.
+	routerReport, audit := newCompositionDsgvoRouter([]string{dsgvocore.AccessReportPermission}, activeUser("u-dsgvo", "dsgvo@gear.local"))
+	rec = doDsgvoComposedRequest(routerReport, "tok", "/api/v1/admin/dsgvo/reports/u-target")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("dsgvo.access_report holder: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if cd := rec.Header().Get("Content-Disposition"); !strings.Contains(cd, "attachment") {
+		t.Errorf("Content-Disposition = %q, want the attachment download header", cd)
+	}
+	if !strings.Contains(rec.Body.String(), "Ziel Person") || !strings.Contains(rec.Body.String(), "Bohrmaschine-01") {
+		t.Errorf("report body misses the composed sections: %s", rec.Body.String())
+	}
+	if len(audit.events) != 1 || audit.events[0].actorID != "u-dsgvo" || audit.events[0].operation != dsgvocore.AuditOperationAccessReport {
+		t.Errorf("audit events = %+v, want one dsgvo.access_report row for u-dsgvo", audit.events)
+	}
+	if !strings.Contains(audit.events[0].detail, "u-target") {
+		t.Errorf("audit detail = %q, want the target user id", audit.events[0].detail)
+	}
+
+	// DEFENSE-IN-DEPTH: a delete-ONLY holder passes the any-of mount gate but is
+	// STILL denied the report by the orchestrator's `dsgvo.access_report`
+	// re-check — the delete code never opens the report (AD-6).
+	routerDelete, auditDelete := newCompositionDsgvoRouter([]string{dsgvocore.DeletePermission}, activeUser("u-del", "del@gear.local"))
+	rec = doDsgvoComposedRequest(routerDelete, "tok", "/api/v1/admin/dsgvo/reports/u-target")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("delete-only holder on the report: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "Ziel Person") {
+		t.Errorf("403 body leaks personal data to a delete-only holder: %s", rec.Body.String())
+	}
+	if len(auditDelete.events) != 0 {
+		t.Errorf("audit written for a denied report: %+v", auditDelete.events)
+	}
+
+	// REVERSE: the dsgvo.access_report-only holder must NOT reach the SMTP
+	// surface (its code opens only the DSGVO mount).
+	if rec := doComposedJSONRequest(routerReport, "tok", http.MethodGet, "/api/v1/admin/settings/smtp", ""); rec.Code != http.StatusForbidden {
+		t.Errorf("dsgvo-only holder on SMTP: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// 200: the same holder reaches the outer admin-module root
+	// (dsgvo.access_report is part of AdminModuleAccessCodes).
+	req := httptest.NewRequest(http.MethodGet, "/api/v1/admin", nil)
+	req.Header.Set("Authorization", "Bearer tok")
+	rootRec := httptest.NewRecorder()
+	routerReport.ServeHTTP(rootRec, req)
+	if rootRec.Code != http.StatusOK {
+		t.Errorf("admin root: status = %d, want 200", rootRec.Code)
+	}
 }

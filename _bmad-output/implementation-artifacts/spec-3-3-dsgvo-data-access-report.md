@@ -2,7 +2,7 @@
 title: 'DSGVO Data-Access Report (FR-24/AD-8/NFR-O2)'
 type: 'feature'
 created: '2026-09-17'
-status: 'in-progress'
+status: 'done'
 review_loop_iteration: 0
 baseline_commit: 'faa2673a2aa5050ae6199dc1213afb0f93da3bad'
 context:
@@ -53,22 +53,22 @@ context:
 
 ## Code Map
 
-- `internal/dsgvo/core/dsgvo.go` NEW -- orchestrator `Service` + `AccessReport`/`UserDataExport`/`UserInspectionDataExport` types; `NewService(userPort, toolPort, audit, log)`; permission re-check; composes the two module exports; audits `dsgvo.access_report`.
-- `internal/user/ports/ports.go` -- `DSGVOExportPort { ExportUserData(ctx, userID) }` + core method aggregating profile/roles/groups/grants/quals/sessions/login-attempts; new `queries.sql` `ListSessionsByUser :many` (after L68).
-- `internal/tools/ports/ports.go` -- `DSGVOInspectionExportPort { ExportUserInspectionData(ctx, userID) }`; core method; new queries `ListInspectionsByInspector`/`ListReinstatementsByActor` + `inspections_repo.go`; migration `000029_dsgvo_inspector_indexes.{up,down}.sql` (two CREATE INDEX, no schema change).
+- `internal/dsgvo/core/dsgvo.go` NEW -- orchestrator `Service` + `AccessReport` type; `NewService(userPort, toolPort, perms, audit, log)` (`perms` = the User-module repository read-only seam for the defense-in-depth `dsgvo.access_report` re-check, AD-6/AD-12 — wired with `userRepo` in main.go); permission re-check; composes the two module exports; guards a `(nil, nil)` port return; audits `dsgvo.access_report`.
+- `internal/user/ports/ports.go` -- `DSGVOExportPort { ExportUserData(ctx, userID) }` + core method (`internal/user/core/dsgvo.go`: `UserDataExport`/`UserExportProfile`/`UserSessionExport`/`LoginAttemptsExport`, `login_attempts` serializes ABSENT via `omitempty` when no attempts exist) aggregating profile/roles/groups/grants/quals/sessions/login-attempts; new `queries.sql` `GetUserByIDFull :one` + `ListSessionsByUser :many` (no token hash).
+- `internal/tools/ports/ports.go` -- `DSGVOInspectionExportPort { ExportUserInspectionData(ctx, userID) }`; core method (`internal/tools/core/dsgvo.go`); new queries `ListInspectionsByInspector`/`ListInspectionItemsByInspector` (grouped items, one round-trip)/`ListReinstatementsByActor`/`ListToolNamesByIDs` (incl. archived tools) + `inspections_repo.go`/`tools_repo.go`; migration `000029_dsgvo_inspector_indexes.{up,down}.sql` (three CREATE INDEX incl. `sessions (user_id, created_at DESC)`, no schema change).
 - `internal/admin/adapters/http/dsgvo.go` NEW -- `DsgvoRoutes()` + handlers + DTOs + `mapDsgvoError`; reuses `httpapi.WriteJSON`.
-- `cmd/server/main.go` -- wire the orchestrator (userRepo/toolRepo as ports + audit), mount `dsgvoSurface := auth.RequireAnyPermission(..., []string{"dsgvo.access_report","dsgvo.delete"}, ...)(toolHandler/...DsgvoRoutes())` at `/api/v1/admin/dsgvo`.
-- `web/src/pages/admin/AdminDsgvoPage.tsx` (+css, +test) -- replace placeholder: code-gated tabs, user picker, report render + JSON download.
+- `cmd/server/main.go` -- wire the orchestrator (userService/toolService as ports + userRepo as perms/audit), mount `dsgvoSurface := auth.RequireAnyPermission(..., []string{"dsgvo.access_report","dsgvo.delete"}, ...)(dsgvoHandler.DsgvoRoutes())` at `/api/v1/admin/dsgvo`.
+- `web/src/pages/admin/AdminDsgvoPage.tsx` (+css, +test) -- replace placeholder: code-gated tabs, user picker, report render (incl. `pending_email` when present + the `generated_at` timestamp) + JSON download; null-guarded report sections; blank-page fallback; cancellation guard on the report fetch.
 - `web/src/auth/users.ts` -- add the DSGVO report client `getDsgvoReport(userId)` (+ `DSGVO_URL`).
 - Tests -- `internal/dsgvo/core/dsgvo_test.go`, user/tools port tests, `admin/adapters/http/dsgvo_test.go`, `cmd/server/main_test.go`, `AdminDsgvoPage.test.tsx`.
 
 ## Tasks & Acceptance
 
 **Execution:**
-- [ ] Orchestrator + user/tool export ports + queries/indexes -- backend
-- [ ] Admin DSGVO HTTP surface + mount/gate/audit -- backend
-- [ ] SPA DSGVO page (tabs + report + download) -- SPA
-- [ ] Tests -- orchestrator/ports/http/mount/SPA -- verification
+- [x] Orchestrator + user/tool export ports + queries/indexes -- backend
+- [x] Admin DSGVO HTTP surface + mount/gate/audit -- backend
+- [x] SPA DSGVO page (tabs + report + download) -- SPA
+- [x] Tests -- orchestrator/ports/http/mount/SPA -- verification
 
 **Acceptance Criteria:**
 - Given a `dsgvo.access_report` holder selects a user, when they generate the report, then the assembled report shows the profile fields, auth history (sessions + login attempts), qualifications, group memberships, and inspection records (FR-24/AD-8).
@@ -77,6 +77,8 @@ context:
 - Given the report renders, when a section has no data, then it shows a German empty note, never an error.
 
 ## Spec Change Log
+
+- **2026-09-18 (review iteration 1):** (a) the per-inspection item results are fetched via the grouped `ListInspectionItemsByInspector` query (one round-trip) instead of the planned per-inspection `ListInspectionItemsByTool` reuse — same report data, no N+1, mirroring the history-surface pattern (a frozen-Actually-better deviation, KEPT); (b) the SPA renders `pending_email` (a staged email change is data the org holds) and the report `generated_at` timestamp; (c) `migrations/000029` gains the composite `sessions (user_id, created_at DESC)` index for `ListSessionsByUser`; (d) the orchestrator's audit write is a pinned best-effort contract (a failed audit never fails the report; NFR-O1) and the orchestrator guards a `(nil, nil)` export-port return (500, never a `null` user/tools section). `NewService` carries the `perms` resolver seam (per the frozen Always section — wired with `userRepo` in main.go).
 
 ## Design Notes
 
@@ -93,3 +95,42 @@ context:
 
 **Manual checks (if no CLI):**
 - As an admin with `dsgvo.access_report`: open DSGVO → Datenauskunft, pick a user, generate → the report renders profile/auth/qualification/group/inspection sections; download returns JSON; a non-holder sees a 403 and no data.
+
+## Suggested Review Order
+
+**Orchestrator (entry point)**
+
+- The composition-root assembly: user + tool export ports, nil-guard, best-effort audit, permission re-check.
+  [`dsgvo.go:60`](../../internal/dsgvo/core/dsgvo.go#L60)
+
+**Module export ports**
+
+- The user export (profile, roles/groups/grants/quals, sessions, login-attempts; secrets stripped).
+  [`dsgvo.go:40`](../../internal/user/core/dsgvo.go#L40)
+
+- The tool export (per-user inspections/reinstatements + items, per-tool summary).
+  [`dsgvo.go:40`](../../internal/tools/core/dsgvo.go#L40)
+
+**HTTP + mount**
+
+- The DSGVO surface + uniform 404/405/403/400/500 envelope.
+  [`dsgvo.go:60`](../../internal/admin/adapters/http/dsgvo.go#L60)
+
+- The any-of gate mount.
+  [`main.go:245`](../../cmd/server/main.go#L245)
+
+- The inspector/actor/session indexes (migration 000029).
+  [`000029_dsgvo_inspector_indexes.up.sql:1`](../../migrations/000029_dsgvo_inspector_indexes.up.sql#L1)
+
+**SPA**
+
+- The DSGVO page: code-gated tabs, user picker, report render (+ pending_email/generated_at), JSON download, cancellation guard.
+  [`AdminDsgvoPage.tsx:60`](../../web/src/pages/admin/AdminDsgvoPage.tsx#L60)
+
+**Tests**
+
+- Failure paths: generic-error 500, nil-export 500, best-effort audit, 404/405 envelope.
+  [`dsgvo_test.go:60`](../../internal/admin/adapters/http/dsgvo_test.go#L60)
+
+- Orchestrator nil-guard + unknown-user short-circuit.
+  [`dsgvo_test.go:60`](../../internal/dsgvo/core/dsgvo_test.go#L60)

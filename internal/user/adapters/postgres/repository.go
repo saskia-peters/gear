@@ -575,6 +575,56 @@ func (r *Repository) GetUserByID(ctx context.Context, userID string) (*core.User
 	}, nil
 }
 
+// GetUserByIDFull returns the FULL user row by id (Story 3.3, FR-24/AD-8): the
+// same column set as GetUserByEmail — attributes + created_at/updated_at AND
+// the secret columns (password hash, encrypted TOTP secret, pending TOTP
+// secret, one-time-password hash). The DSGVO export reads this row and STRIPS
+// every authenticator in the core before assembly (REPORT_SECRETS); it is
+// deliberately never serialized directly. An unknown or malformed id maps to
+// core.ErrAdminUserNotFound.
+func (r *Repository) GetUserByIDFull(ctx context.Context, userID string) (*core.User, error) {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return nil, core.ErrAdminUserNotFound
+	}
+	row, err := r.queries.GetUserByIDFull(ctx, uid)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, core.ErrAdminUserNotFound
+		}
+		return nil, err
+	}
+	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
+		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail, row.OneTimePasswordHash, row.OneTimePasswordExpiresAt)
+}
+
+// ListSessionsByUser returns the authentication sessions of a user (Story 3.3,
+// FR-24 auth history), newest first. The token hash is deliberately NOT
+// selected — the DSGVO report never carries an authenticator (REPORT_SECRETS);
+// only identity + the created/expiry timestamps are exported. An unknown or
+// malformed user id answers an EMPTY list, nil-safe. The existing
+// sessions.user_id_idx serves the read.
+func (r *Repository) ListSessionsByUser(ctx context.Context, userID string) ([]core.UserSessionExport, error) {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return []core.UserSessionExport{}, nil
+	}
+	rows, err := r.queries.ListSessionsByUser(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]core.UserSessionExport, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, core.UserSessionExport{
+			ID:        uuidToString(row.ID.Bytes),
+			CreatedAt: row.CreatedAt.Time,
+			ExpiresAt: row.ExpiresAt.Time,
+		})
+	}
+	return out, nil
+}
+
 // SetUserOneTimePassword upserts an admin-issued one-time password for an
 // ACTIVE account (Spec 2.8): it stores the Argon2id hash + TTL expiry and flips
 // must_change_password so the next login forces the Story 1.8 change flow. The

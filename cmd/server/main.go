@@ -23,6 +23,7 @@ import (
 	adminpostgres "github.com/saskia-peters/gear/internal/admin/adapters/postgres"
 	admsmtp "github.com/saskia-peters/gear/internal/admin/adapters/smtp"
 	admcore "github.com/saskia-peters/gear/internal/admin/core"
+	dsgvocore "github.com/saskia-peters/gear/internal/dsgvo/core"
 	"github.com/saskia-peters/gear/internal/platform/auth"
 	"github.com/saskia-peters/gear/internal/platform/config"
 	"github.com/saskia-peters/gear/internal/platform/crypto"
@@ -210,6 +211,23 @@ func main() {
 	// PDF bytes.
 	reportSurface := auth.RequirePermission(sessionManager, userRepo, toolscore.ReportExportPermission)(toolHandler.ReportRoutes())
 
+	// Story 3.3 — the DSGVO orchestrator (AD-8): the composition-root assembly
+	// point for the data-access report. It consumes the User module's read-only
+	// export port (userService) and the Tool module's read-only export port
+	// (toolService) plus the User repository READ-ONLY for the defense-in-depth
+	// permission re-check (AD-6/AD-12) and the audit trail (NFR-O1/NFR-O2) — it
+	// never authors another module's SQL (AD-8/AD-11).
+	dsgvoService := dsgvocore.NewService(userService, toolService, userRepo, userRepo, log)
+	dsgvoHandler := adminhttp.NewDsgvoHandler(dsgvoService, log)
+
+	// The DSGVO surface mounts under /api/v1/admin/dsgvo with its OWN gate —
+	// one permission per surface (AD-6): ANY of [dsgvo.access_report,
+	// dsgvo.delete] opens it (the SPA tab bar then applies the per-code gate for
+	// Datenauskunft vs Konto löschen). The orchestrator re-checks
+	// `dsgvo.access_report` defense-in-depth before ANY personal data is
+	// assembled. It deliberately does NOT widen any existing gate.
+	dsgvoSurface := auth.RequireAnyPermission(sessionManager, userRepo, []string{dsgvocore.AccessReportPermission, dsgvocore.DeletePermission}, "dsgvo access denied", log)(dsgvoHandler.DsgvoRoutes())
+
 	// The two /api/v1/tools surfaces are combined into ONE router: the dashboard
 	// list (GET /, dashboard.view), the inspection start + submit (POST
 	// /{id}/inspection/start and POST /{id}/inspection, inspection.submit), the
@@ -245,6 +263,7 @@ func main() {
 		router.WithMount("/api/v1/admin/settings/system", systemSettingsSurface),
 		router.WithMount("/api/v1/admin/tool-types", toolTypesSurface),
 		router.WithMount("/api/v1/admin/tools", toolToolsSurface),
+		router.WithMount("/api/v1/admin/dsgvo", dsgvoSurface),
 		router.WithMount("/api/v1/tools", toolsSurface),
 	)
 
