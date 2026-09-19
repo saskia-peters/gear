@@ -568,7 +568,10 @@ JOIN tool_types tt ON tt.id = u.tool_type_id
 // constraint violation (an FK race: the type archived between the core check
 // and this insert) rolls back and falls back to per-row CreateTool calls in the
 // SAME transaction to isolate the offender. Returns the created tools (one per
-// successfully inserted input, in input order) + the per-index failure map.
+// successfully inserted input) + the per-index failure map. The created slice
+// is NOT order-guaranteed: PostgreSQL does not guarantee RETURNING order over
+// the multi-row INSERT, so callers must treat it as a SET (the core attributes
+// batch failures by name, never by position).
 func (r *Repository) CreateToolsBatch(ctx context.Context, tools []*core.Tool, inventoryPrefix string, inventoryWidth int) ([]*core.Tool, map[int]error, error) {
 	if len(tools) == 0 {
 		return []*core.Tool{}, map[int]error{}, nil

@@ -102,7 +102,7 @@ development_status:
   epic-6-retrospective: done
 
   epic-7: in-progress
-  7-1-ci-pipeline: backlog
+  7-1-ci-pipeline: review
   7-2-production-serving: backlog
   7-3-integration-seed-assertions: backlog
   7-4-parallel-db-test-isolation: backlog

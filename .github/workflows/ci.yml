@@ -1,0 +1,165 @@
+# G.E.A.R. CI pipeline (Story 7.1, NFR-M2/M3).
+# Full quality gate on every push to a tracked branch and every PR: a real
+# PostgreSQL service (so the DB-backed suites RUN instead of skipping),
+# migrations, then Go build/vet/test/lint, web typecheck/build/lint/test, a
+# docs build (no deploy — docs.yml owns the GitHub-Pages deploy), and a
+# dependency audit (hard gate). The pipeline FAILS on any test failure, lint
+# issue, or silent DB-suite skip.
+#
+# CI runs the justfile recipes for the gates that match the runner (build, vet,
+# lint). Two steps deliberately differ for the runner: migrations run the pinned
+# CLI directly against the service container (just migrate-up would try to
+# bring up a podman db), and Go tests run `-p 1` (the DB-backed suites share
+# the one service schema; parallel packages contend on shared test rows —
+# Story 7.4 makes the parallel default safe later). Everything is pinned.
+
+name: ci
+
+on:
+  push:
+    branches:
+      - 'main'
+      - 'feat/**'
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  # Single source for the service connection — shared by migrate + go test.
+  DATABASE_URL: postgres://gear:gear@localhost:5432/gear?sslmode=disable
+
+jobs:
+  quality-gate:
+    name: Go + web + docs + audit
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+
+    # A real PostgreSQL so the DB-backed suites run (they t.Skip when the pool
+    # cannot connect). Credentials match the DATABASE_URL env above.
+    services:
+      postgres:
+        image: postgres:18
+        env:
+          POSTGRES_USER: gear
+          POSTGRES_PASSWORD: gear
+          POSTGRES_DB: gear
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U gear -d gear"
+          --health-interval 5s
+          --health-timeout 3s
+          --health-retries 10
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: |
+            web/package-lock.json
+            docs/package-lock.json
+
+      - name: Install just
+        uses: extractions/setup-just@v2
+
+      # Apply migrations BEFORE any test so the DB-backed suites run for real.
+      # Runs the pinned migrate CLI directly against the service container
+      # (NOT `just migrate-up`, which would try to bring up a podman db — the
+      # Postgres is already provided by the `services:` block above).
+      - name: Apply migrations
+        # Pin comes from the justfile (single source) — MIGRATE_VERSION.
+        run: go run -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@$(just --evaluate MIGRATE_VERSION) -path ./migrations --database "$DATABASE_URL" up
+
+      - name: Install web dependencies
+        working-directory: web
+        run: npm ci
+
+      - name: Install docs dependencies
+        working-directory: docs
+        run: npm ci
+
+      - name: Go build
+        run: just build
+
+      - name: Go vet
+        run: just vet
+
+      - name: Go test (DB-backed)
+        # -p 1 serializes the Go suites. The DB-backed suites share the one
+        # service container's schema, and parallel packages can contend on the
+        # shared test rows/sequences (deferred-work: cross-package flake).
+        # Story 7.4 (parallel-DB isolation) will make the parallel default
+        # safe; until then CI stays deterministic with -p 1.
+        # -v so the skip guard below can detect a silently-skipped suite.
+        run: go test -p 1 -v ./cmd/... ./internal/... 2>&1 | tee /tmp/go-test.log
+
+      - name: Fail on silent DB-suite skips
+        # The DB-backed suites t.Skipf when the pool cannot connect. In CI that
+        # must never happen (the service + migrate steps should make them run).
+        # Any "skipping db integration test" line means the DB-backed coverage
+        # silently vanished — fail the pipeline (spec CI_DB row).
+        run: |
+          if grep -q 'skipping db integration test' /tmp/go-test.log; then
+            echo "::error::DB-backed suites SKIPPED in CI (service/migrate broken?)"
+            grep -n 'skipping db integration test' /tmp/go-test.log | head
+            exit 1
+          fi
+
+      - name: Web test (vitest)
+        working-directory: web
+        run: npm run test
+
+      - name: Lint (Go + web)
+        run: just lint
+
+      - name: Web typecheck
+        working-directory: web
+        run: npm run typecheck
+
+      - name: Web build (production bundle)
+        working-directory: web
+        run: npm run build
+
+      - name: Go mod tidy drift check
+        # A red here means a human forgot `go mod tidy` after a dependency
+        # change. (gofmt is NOT gated repo-wide: ~80 legacy files lack a
+        # trailing newline — normalizing them is a separate housekeeping
+        # change, not part of this pipeline story.)
+        run: |
+          go mod tidy
+          git diff --exit-code go.mod go.sum || { echo "::error::go.mod/go.sum not tidy"; exit 1; }
+
+      - name: Docs build (no deploy — docs.yml owns Pages)
+        working-directory: docs
+        run: npm run build
+
+      # Dependency audit — HARD GATE (NFR-M2/S4). A known vulnerability fails
+      # the pipeline. Tools are pinned so the gate is reproducible.
+      - name: Go dependency audit (govulncheck)
+        run: go run golang.org/x/vuln/cmd/govulncheck@v1.8.0 ./...
+
+      - name: Web dependency audit (npm audit)
+        working-directory: web
+        run: npm audit --audit-level=high
+
+      - name: Docs dependency audit (informational)
+        # The docs site is a build-time toolchain (not shipped code). It has
+        # legacy high-severity findings in dev deps (faker/js-yaml/image-size)
+        # that only clear with `--force` major upgrades which could break the
+        # docs build — deliberately NOT a hard gate (tracked separately).
+        working-directory: docs
+        continue-on-error: true
+        run: npm audit --audit-level=high

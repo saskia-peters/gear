@@ -344,9 +344,13 @@ func TestPostgresFindToolCollisions(t *testing.T) {
 	}
 }
 
-// TestPostgresCreateToolsBatchPreservesExplicitOrder pins that the batch
-// INSERT returns created rows aligned to the input order.
-func TestPostgresCreateToolsBatchPreservesExplicitOrder(t *testing.T) {
+// TestPostgresCreateToolsBatchReturnsAllInputs pins that the batch INSERT
+// creates every input row. It deliberately does NOT assert RETURNING order:
+// PostgreSQL does not guarantee the order of rows returned by a multi-row
+// INSERT over unnest, and the production code attributes batch failures by
+// NAME (createdNames), never by RETURNING position — so order is not part of
+// the contract (see deferred-work 2026-09-19).
+func TestPostgresCreateToolsBatchReturnsAllInputs(t *testing.T) {
 	pool := toolTestPool(t)
 	ctx := context.Background()
 	t.Cleanup(func() { pool.Close() })
@@ -365,10 +369,22 @@ func TestPostgresCreateToolsBatchPreservesExplicitOrder(t *testing.T) {
 	if len(failed) != 0 || len(created) != 2 {
 		t.Fatalf("created/failed = %d/%d, want 2/0", len(created), len(failed))
 	}
-	if created[0].Name != "Test-Batch-Ord-2" || created[0].InventoryNumber != "ORD-2" {
-		t.Errorf("created[0] = %+v, want the first input preserved", created[0])
+	// Assert the SET of created rows by name+inventory, not their order.
+	byName := map[string]string{}
+	for _, c := range created {
+		byName[c.Name] = c.InventoryNumber
 	}
-	if created[1].Name != "Test-Batch-Ord-1" || created[1].InventoryNumber != "ORD-1" {
-		t.Errorf("created[1] = %+v, want the second input preserved", created[1])
+	for _, want := range []struct{ name, inv string }{
+		{name: "Test-Batch-Ord-1", inv: "ORD-1"},
+		{name: "Test-Batch-Ord-2", inv: "ORD-2"},
+	} {
+		got, ok := byName[want.name]
+		if !ok {
+			t.Errorf("created set missing %q; got %v", want.name, byName)
+			continue
+		}
+		if got != want.inv {
+			t.Errorf("created[%q] inventory = %q, want %q", want.name, got, want.inv)
+		}
 	}
 }
