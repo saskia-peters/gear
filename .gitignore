@@ -39,3 +39,9 @@ docs/docs/implementation/
 docs/docs/api/
 docs/openapi/
 docs/api/
+
+# --- OpenTofu / Terraform (infra/) ---
+infra/.terraform/
+infra/.terraform.lock.hcl
+infra/*.tfstate
+infra/*.tfstate.backup

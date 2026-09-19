@@ -31,6 +31,9 @@ func TestLoadDefaults(t *testing.T) {
 	if cfg.AppOrigin != DefaultAppOrigin {
 		t.Errorf("AppOrigin = %q, want default %q", cfg.AppOrigin, DefaultAppOrigin)
 	}
+	if cfg.WebDist != DefaultWebDist {
+		t.Errorf("WebDist = %q, want default %q", cfg.WebDist, DefaultWebDist)
+	}
 }
 
 func TestLoadOverrides(t *testing.T) {
@@ -40,6 +43,7 @@ func TestLoadOverrides(t *testing.T) {
 		"GEAR_LOG_LEVEL":    "debug",
 		"GEAR_SESSION_IDLE": "30m",
 		"GEAR_APP_ORIGIN":   "https://gear.example.com",
+		"GEAR_WEB_DIST":     "/srv/gear/web/dist",
 	}
 	cfg := Load(mapEnv(env))
 
@@ -57,6 +61,9 @@ func TestLoadOverrides(t *testing.T) {
 	}
 	if cfg.AppOrigin != env["GEAR_APP_ORIGIN"] {
 		t.Errorf("AppOrigin = %q, want %q", cfg.AppOrigin, env["GEAR_APP_ORIGIN"])
+	}
+	if cfg.WebDist != env["GEAR_WEB_DIST"] {
+		t.Errorf("WebDist = %q, want %q", cfg.WebDist, env["GEAR_WEB_DIST"])
 	}
 }
 

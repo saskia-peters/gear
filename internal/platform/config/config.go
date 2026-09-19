@@ -5,6 +5,9 @@
 //	GEAR_HTTP_ADDR          listen address for the HTTP server
 //	GEAR_LOG_LEVEL          debug | info | warn | error
 //	GEAR_SESSION_IDLE       server-side session idle lifetime (NFR-S2)
+//	GEAR_WEB_DIST           directory of the built SPA served at / (Story 7.6;
+//	                        default ./web/dist — dev runs Vite, the container
+//	                        embeds/copies web/dist into the image)
 //	GEAR_ENCRYPTION_KEY     32-byte key (hex or base64) for at-rest encryption
 //	                        of TOTP secrets (NFR-S4); generate with
 //	                        `openssl rand -hex 32` or `openssl rand -base64 32`
@@ -35,6 +38,10 @@ const (
 	// DefaultAppOrigin is the public origin of the SPA used to build clickable
 	// password-reset links (review finding 1.8-6). Matches the Vite dev server.
 	DefaultAppOrigin = "http://localhost:5173"
+	// DefaultWebDist is the directory of the built SPA (Story 7.6). Dev runs
+	// Vite; the production container copies web/dist into the image and the
+	// server serves it from here.
+	DefaultWebDist = "./web/dist"
 )
 
 // ErrEncryptionKeyInvalid is returned when GEAR_ENCRYPTION_KEY is missing,
@@ -51,6 +58,9 @@ type Config struct {
 	// AppOrigin is the public origin of the SPA used to build password-reset
 	// links (GEAR_APP_ORIGIN, review finding 1.8-6).
 	AppOrigin string
+	// WebDist is the directory of the built SPA served at / (Story 7.6,
+	// GEAR_WEB_DIST, default ./web/dist).
+	WebDist string
 	// EncryptionKey is the raw GEAR_ENCRYPTION_KEY value (hex or base64) and
 	// EncryptionKeyErr the parse result. When set, EncryptionKeyErr is nil.
 	EncryptionKey    string
@@ -66,6 +76,7 @@ func Load(getenv func(string) string) Config {
 		LogLevel:         logger.ParseLevel(envOr(getenv, "GEAR_LOG_LEVEL", DefaultLogLevel)),
 		SessionIdle:      durationOr(getenv, "GEAR_SESSION_IDLE", DefaultSessionIdle),
 		AppOrigin:        envOr(getenv, "GEAR_APP_ORIGIN", DefaultAppOrigin),
+		WebDist:          envOr(getenv, "GEAR_WEB_DIST", DefaultWebDist),
 		EncryptionKey:    encKey,
 		EncryptionKeyErr: parseEncryptionKey(encKey),
 	}

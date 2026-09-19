@@ -173,6 +173,62 @@ lint: vet
 sqlc-generate:
     go run github.com/sqlc-dev/sqlc/cmd/sqlc@{{SQLC_VERSION}} generate
 
+# ============================================================================
+# Deployable container + portable IaC (Story 7.6)
+# ============================================================================
+
+# Build the deployable app image (multi-stage: web/dist + Go binary → minimal runtime)
+container-build: podman-check
+    podman build -t gear-app .
+
+# Run the full dev stack from the built image (app on host port 8081 + db)
+container-run: podman-check container-build
+    podman compose up -d db --build
+    podman compose up -d app
+
+# Prove the FULL registry-driven deployment flow locally (zero cloud cost):
+# start a local Docker Registry v2 (the same HTTP v2 API IONOS/GCP use), push
+# the image, then run the SAME deployed compose (deploy/compose.prod.yaml,
+# image-pinned, db internal-only) + healthz. Host port 8081 avoids a running
+# `just dev` server on :8080.
+deploy-local-proof: podman-check container-build
+    @echo "==> starting local registry:2 on :5000"
+    @podman run -d --name gear-registry -p 5000:5000 -v gear_registry_data:/var/lib/registry docker.io/library/registry:2 >/dev/null 2>&1 || podman start gear-registry >/dev/null
+    @echo "==> pushing image to localhost:5000/gear:local"
+    podman tag gear-app localhost:5000/gear:local
+    podman push --tls-verify=false localhost:5000/gear:local
+    @echo "==> generating .env.prod (0600) if absent"
+    @if [ ! -f .env.prod ]; then umask 077; { printf 'GEAR_DB_PASSWORD=%s\n' "$(openssl rand -hex 16)"; printf 'GEAR_ENCRYPTION_KEY=%s\n' "$(openssl rand -hex 32)"; } > .env.prod; chmod 0600 .env.prod; fi
+    @echo "==> pulling + up the deployed compose (deploy/compose.prod.yaml)"
+    @set -a; . ./.env.prod; set +a; \
+    export GEAR_IMAGE=localhost:5000/gear:local; \
+    export GEAR_HTTP_PORT=8081; \
+    export GEAR_APP_ORIGIN=http://localhost:8081; \
+    podman pull --tls-verify=false localhost:5000/gear:local && \
+    podman compose -f deploy/compose.prod.yaml up -d && \
+    i=0; until curl -fsS http://localhost:8081/healthz >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 60 ] && { echo "app not healthy after 60s" >&2; exit 1; }; sleep 1; done; \
+    echo "==> proof OK: /healthz 200 on http://localhost:8081"
+
+# Tear down the local-proof stack + registry (keeps nothing behind)
+deploy-local-proof-down:
+    @podman compose -f deploy/compose.prod.yaml down >/dev/null 2>&1 || true
+    @podman rm -f gear-registry >/dev/null 2>&1 || true
+    @rm -f .env.prod
+
+# Validate the OpenTofu IaC (local state; no provisioning)
+infra-validate:
+    tofu -chdir=infra init -backend=false
+    tofu -chdir=infra validate
+
+# Show the GCP plan (requires project/region via -var; no apply)
+infra-plan:
+    tofu -chdir=infra init -backend=false
+    tofu -chdir=infra plan
+
+# Apply the GCP IaC (OPERATOR STEP — provisions real GCP resources)
+infra-apply:
+    tofu -chdir=infra apply
+
 # Local-dev only: set/reset a user's password hash (e.g. unlock a seeded admin).
 # Pass optional EMAIL and PASSWD to run non-interactively:
 #   just set-admin-password admin.1@gear.local 'NewPassw0rd!'

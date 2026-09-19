@@ -7,9 +7,11 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"path/filepath"
 	"regexp"
 	"strings"
 	"testing"
@@ -27,6 +29,7 @@ import (
 	"github.com/saskia-peters/gear/internal/platform/crypto"
 	"github.com/saskia-peters/gear/internal/platform/httpapi"
 	"github.com/saskia-peters/gear/internal/platform/router"
+	"github.com/saskia-peters/gear/internal/platform/spa"
 	toolhttp "github.com/saskia-peters/gear/internal/tools/adapters/http"
 	toolpostgres "github.com/saskia-peters/gear/internal/tools/adapters/postgres"
 	toolscore "github.com/saskia-peters/gear/internal/tools/core"
@@ -2018,4 +2021,105 @@ func TestCompositionDsgvoDeleteMount(t *testing.T) {
 	if rec := doComposedJSONRequest(router401, "", http.MethodDelete, "/api/v1/admin/dsgvo/users/deleted/a-1", ""); rec.Code != http.StatusUnauthorized {
 		t.Errorf("no-token purge: status = %d, want 401", rec.Code)
 	}
+}
+
+// TestComposedRouterSPAMount verifies the Story 7.6 composition-root wiring:
+// the SPA catch-all is mounted LAST at "/", so (a) / and unknown non-API routes
+// serve the SPA index, (b) an unknown /api/* route answers the JSON 404
+// envelope (never the SPA), and (c) a known API route still reaches its handler
+// through the same composed router. This is the story's central deployment
+// surface — a regression in the mount order or cfg.WebDist wiring would leave
+// the served SPA dead with every other test green.
+func TestComposedRouterSPAMount(t *testing.T) {
+	log := discardLogger()
+
+	// Build a minimal SPA dir in a temp path (the handler serves from disk).
+	spaDir := t.TempDir()
+	index := filepath.Join(spaDir, "index.html")
+	if err := os.WriteFile(index, []byte("<html>GEAR-SPA</html>"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+
+	// A real composed router with the SPA catch-all mounted (the "/" mount is
+	// what catches /api/* that no more-specific route claims).
+	r := router.New(stubPinger{}, log,
+		router.WithMount("/", spa.New(spaDir, log)),
+	)
+
+	// (a) SPA at root.
+	rec := httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "GEAR-SPA") {
+		t.Fatalf("GET / = %d (%s), want the SPA index", rec.Code, rec.Body.String())
+	}
+
+	// (a') unknown non-API client route → SPA fallback.
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/tools/xyz", nil))
+	if rec.Code != http.StatusOK || !strings.Contains(rec.Body.String(), "GEAR-SPA") {
+		t.Fatalf("GET /tools/xyz = %d (%s), want the SPA fallback", rec.Code, rec.Body.String())
+	}
+
+	// (b) unknown /api/* → JSON 404 envelope, never the SPA.
+	rec = httptest.NewRecorder()
+	r.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, "/api/v1/nonexistent", nil))
+	if rec.Code != http.StatusNotFound {
+		t.Fatalf("GET /api/v1/nonexistent = %d, want 404", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), "not_found") {
+		t.Errorf("API 404 body = %s, want the JSON envelope", rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "GEAR-SPA") {
+		t.Errorf("API 404 body = %s, an /api path must never render the SPA", rec.Body.String())
+	}
+}
+
+// TestRunHealthcheck verifies the container HEALTHCHECK probe (Story 7.6):
+// exit 0 on a 2xx /healthz, exit 1 on a non-2xx or an unreachable listener,
+// and tolerance of a non-loopback bind address (e.g. 0.0.0.0:PORT).
+func TestRunHealthcheck(t *testing.T) {
+	t.Run("2xx exits 0", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+		t.Setenv("GEAR_HTTP_ADDR", srv.Listener.Addr().String())
+		if got := runHealthcheck(); got != 0 {
+			t.Fatalf("runHealthcheck = %d, want 0", got)
+		}
+	})
+
+	t.Run("503 exits 1", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusServiceUnavailable)
+		}))
+		defer srv.Close()
+		t.Setenv("GEAR_HTTP_ADDR", srv.Listener.Addr().String())
+		if got := runHealthcheck(); got != 1 {
+			t.Fatalf("runHealthcheck = %d, want 1", got)
+		}
+	})
+
+	t.Run("non-loopback bind tolerated", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		}))
+		defer srv.Close()
+		// Simulate a 0.0.0.0:<port> bind by rewriting the host part.
+		_, port, err := net.SplitHostPort(srv.Listener.Addr().String())
+		if err != nil {
+			t.Fatal(err)
+		}
+		t.Setenv("GEAR_HTTP_ADDR", "0.0.0.0:"+port)
+		if got := runHealthcheck(); got != 0 {
+			t.Fatalf("runHealthcheck = %d, want 0 for 0.0.0.0 bind", got)
+		}
+	})
+
+	t.Run("unreachable exits 1", func(t *testing.T) {
+		t.Setenv("GEAR_HTTP_ADDR", "127.0.0.1:1")
+		if got := runHealthcheck(); got != 1 {
+			t.Fatalf("runHealthcheck = %d, want 1 for an unreachable listener", got)
+		}
+	})
 }

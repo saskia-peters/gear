@@ -1,0 +1,29 @@
+# Build context exclusions for the G.E.A.R. Dockerfile (Story 7.6).
+# web/dist is built INSIDE the image (multi-stage) — never copied as source.
+# .env and any secrets must never enter the build context.
+
+.git
+.gitignore
+_agents
+_bmad-output
+deploy
+infra
+docs
+justfile
+compose.yaml
+compose*.yaml
+
+.env
+.env.*
+
+**/node_modules
+web/dist
+web/.vitest
+
+*.test
+*.out
+/server
+/devadmin
+
+# OS junk
+.DS_Store

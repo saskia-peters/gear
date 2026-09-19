@@ -1,0 +1,59 @@
+# G.E.A.R. production compose (Story 7.6) — the file GCP/IONOS/self-hosted
+# hosts actually run via deploy/startup.sh. It is IMAGE-PINNED (the host pulls
+# from a registry, never builds) and the db is INTERNAL-ONLY (no published host
+# port — the app reaches it over the compose network). Secrets come from the
+# generated 0600 .env (GEAR_DB_PASSWORD, GEAR_ENCRYPTION_KEY).
+#
+# Host port is GEAR_HTTP_PORT (default 8080 on a VM; the local proof sets it to
+# 8081 to avoid colliding with a running `just dev` server on :8080).
+#
+# `just deploy-local-proof` drives this file standalone (distinct container
+# names + volume from the dev stack so it never disturbs a running dev session).
+
+services:
+  db:
+    image: docker.io/library/postgres:18
+    container_name: gear-prod-db
+    environment:
+      POSTGRES_USER: gear
+      POSTGRES_PASSWORD: ${GEAR_DB_PASSWORD}
+      POSTGRES_DB: gear
+    volumes:
+      - gear_prod_pgdata:/var/lib/postgresql
+    # Internal-only: no ports: published to the host/edge (NFR-S4 posture).
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gear -d gear"]
+      interval: 5s
+      timeout: 3s
+      start_period: 20s
+      retries: 10
+
+  app:
+    # Image-pinned: the host pulls; it never builds (pull_policy missing is a
+    # docker-compose v2 field; podman-compose pulls on up when the image is
+    # absent, and the startup/proof flow pulls explicitly first).
+    image: ${GEAR_IMAGE:-gear-app:latest}
+    container_name: gear-prod-app
+    environment:
+      GEAR_DATABASE_URL: postgres://gear:${GEAR_DB_PASSWORD}@db:5432/gear?sslmode=disable
+      GEAR_HTTP_ADDR: :8080
+      # GEAR_APP_ORIGIN is set explicitly by the deployer (startup.sh / local
+      # proof) so the public origin always matches the actual host; a compose
+      # default here cannot interpolate the same GEAR_HTTP_PORT variable.
+      GEAR_APP_ORIGIN: ${GEAR_APP_ORIGIN}
+      GEAR_ENCRYPTION_KEY: ${GEAR_ENCRYPTION_KEY}
+      GEAR_WEB_DIST: /app/web/dist
+    ports:
+      - "${GEAR_HTTP_PORT:-8080}:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/app/gear-server", "-healthcheck"]
+      interval: 10s
+      timeout: 5s
+      start_period: 15s
+      retries: 10
+
+volumes:
+  gear_prod_pgdata:

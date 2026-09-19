@@ -7,7 +7,9 @@ package main
 import (
 	"context"
 	"errors"
+	"flag"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"os/signal"
@@ -30,6 +32,7 @@ import (
 	"github.com/saskia-peters/gear/internal/platform/httpapi"
 	"github.com/saskia-peters/gear/internal/platform/logger"
 	"github.com/saskia-peters/gear/internal/platform/router"
+	"github.com/saskia-peters/gear/internal/platform/spa"
 	toolhttp "github.com/saskia-peters/gear/internal/tools/adapters/http"
 	toolpostgres "github.com/saskia-peters/gear/internal/tools/adapters/postgres"
 	toolscore "github.com/saskia-peters/gear/internal/tools/core"
@@ -42,7 +45,52 @@ import (
 // Story 3.1 replaces it with the real SMTP sender built from the Admin
 // settings port (see main); the port contract stays unchanged.
 
+// healthcheckFlag is the container HEALTHCHECK probe switch (Story 7.6). It
+// probes /healthz, which reflects BOTH the HTTP listener AND the database pool
+// (health.New pings the pool) — so a DB outage marks the app not-ready, which
+// is the correct readiness semantics for a DB-backed service. It must run as a
+// short-lived probe, never as the long-running server.
+var healthcheckFlag = flag.Bool("healthcheck", false, "run the container HEALTHCHECK probe and exit")
+
+// runHealthcheck opens a short-lived HTTP request to the local /healthz and
+// returns 0 on 2xx, 1 otherwise. It dials the configured GEAR_HTTP_ADDR (or
+// the :8080 default) on loopback, tolerating a non-loopback bind address
+// (e.g. 0.0.0.0:8080) by extracting the port.
+func runHealthcheck() int {
+	addr := os.Getenv("GEAR_HTTP_ADDR")
+	if addr == "" {
+		addr = config.DefaultHTTPAddr
+	}
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "healthcheck: invalid GEAR_HTTP_ADDR %q: %v\n", addr, err)
+		return 1
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get("http://127.0.0.1:" + port + "/healthz")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "healthcheck: %v\n", err)
+		return 1
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		fmt.Fprintf(os.Stderr, "healthcheck: status %d\n", resp.StatusCode)
+		return 1
+	}
+	return 0
+}
+
 func main() {
+	flag.Parse()
+	// Story 7.6: `-healthcheck` is the container HEALTHCHECK probe (distroless
+	// runtime has no shell/wget). It opens a short-lived HTTP request to
+	// /healthz and exits 0/1 so the orchestrator can gate readiness. The probe
+	// reflects app + DB readiness (healthz pings the pool) — the intended
+	// semantics for a DB-backed container.
+	if *healthcheckFlag {
+		os.Exit(runHealthcheck())
+	}
+
 	cfg := config.Load(os.Getenv)
 	log := logger.New(cfg.LogLevel)
 
@@ -267,6 +315,11 @@ func main() {
 		router.WithMount("/api/v1/admin/tools", toolToolsSurface),
 		router.WithMount("/api/v1/admin/dsgvo", dsgvoSurface),
 		router.WithMount("/api/v1/tools", toolsSurface),
+		// Story 7.6: the SPA catch-all is mounted LAST so chi's most-specific
+		// matching keeps every /api route JSON (an unknown API path answers the
+		// JSON 404, never the SPA). Non-API unknown routes fall back to
+		// index.html (client-side routing). Served from GEAR_WEB_DIST.
+		router.WithMount("/", spa.New(cfg.WebDist, log)),
 	)
 
 	srv := &http.Server{

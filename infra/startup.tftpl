@@ -1,0 +1,45 @@
+#!/usr/bin/env bash
+# G.E.A.R. GCP VM startup script (Story 7.6). Installs docker + compose on a
+# fresh Debian 12 VM, then runs the shared first-boot provisioning from
+# deploy/startup.sh (idempotent). The shared script is copied from the deploy
+# tarball / repo at boot (see infra/README.md) OR inlined below.
+set -euo pipefail
+
+export GEAR_APP_DIR="$${GEAR_APP_DIR:-/opt/gear}"
+export GEAR_IMAGE_REPO="${image_repo}"
+export GEAR_APP_ORIGIN="${app_origin}"
+export GEAR_HTTP_PORT="${app_port}"
+export GEAR_COMPOSE_FILE="deploy/compose.prod.yaml"
+
+echo "[gear] installing docker + compose plugin"
+apt-get update -qq
+apt-get install -y -qq ca-certificates curl gnupg
+
+install -m 0755 -d /etc/apt/keyrings
+curl -fsSL https://download.docker.com/linux/debian/gpg | gpg --dearmor -o /etc/apt/keyrings/docker.gpg
+chmod a+r /etc/apt/keyrings/docker.gpg
+
+ARCH="$$(dpkg --print-architecture)"
+CODENAME="$$(. /etc/os-release && echo "$$VERSION_CODENAME")"
+echo "deb [arch=$${ARCH} signed-by=/etc/apt/keyrings/docker.gpg] https://download.docker.com/linux/debian $${CODENAME} stable" > /etc/apt/sources.list.d/docker.list
+
+apt-get update -qq
+apt-get install -y -qq docker-ce docker-ce-cli containerd.io docker-buildx-plugin docker-compose-plugin
+
+# The repo (compose.yaml + deploy/startup.sh + deploy/compose.prod.yaml) must
+# be present in GEAR_APP_DIR. If it is missing, clone it from repo_url (the
+# operator sets it) so `tofu apply` alone provisions a working VM.
+if [ ! -f "$${GEAR_APP_DIR}/deploy/compose.prod.yaml" ]; then
+  if [ -n "${repo_url}" ]; then
+    echo "[gear] cloning repo from ${repo_url} into $${GEAR_APP_DIR}"
+    apt-get install -y -qq git
+    mkdir -p "$${GEAR_APP_DIR}"
+    git clone --depth 1 "${repo_url}" "$${GEAR_APP_DIR}"
+  else
+    echo "[gear] deploy/compose.prod.yaml missing in $${GEAR_APP_DIR} and no repo_url set; clone/copy the repo there first" >&2
+    exit 1
+  fi
+fi
+
+# Run the shared, idempotent provisioning (secrets on host, compose pull + up).
+bash "$${GEAR_APP_DIR}/deploy/startup.sh"
