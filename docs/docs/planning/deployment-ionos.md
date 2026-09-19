@@ -104,7 +104,89 @@ flowchart LR
 
 ---
 
-## 5. The exact commands (for the technically minded)
+## 5. Step by step on a small IONOS server (with the IONOS registry)
+
+Here is exactly how the pieces fit together once we move to IONOS. The story has two halves: **getting the image into the IONOS registry** (done once, from any machine) and **setting up the small server** (done once, on IONOS).
+
+```mermaid
+flowchart LR
+    subgraph Prepare["Wherever you are"]
+        A["🧑‍💻 Build + push to IONOS registry"] --> B["🏭 IONOS Private Container Registry"]
+    end
+    subgraph IONOS["On IONOS"]
+        C["🖥️ Small server (Basic Cube XS)"] -->|first boot: pull image| B
+        C -->|start app + database| D["✅ G.E.A.R. live"]
+        D --> E["🔐 Database stays private inside the server"]
+    end
+```
+
+### Step 1 — Create the IONOS registry and a login token
+
+In the IONOS cloud console you create a **Private Container Registry** (a few clicks; it costs about **$0.05 per GB per month**). IONOS gives it an address (a domain name). You then create a **token** (a special password) that lets us log in and push images to it. IONOS can also create a **robot account / one-time token** for automated use — the same mechanism CI/CD pipelines use.
+
+### Step 2 — Push the image to the IONOS registry (once)
+
+On any machine with the image (e.g. the laptop where we proved it), we log in and push the *same* image we already tested locally. Only the address changes — the image and the command are identical to the local proof:
+
+```bash
+# 1. Log in to the IONOS registry with the token
+podman login <ionos-registry-address>
+
+# 2. Give the image the IONOS registry's address
+podman tag gear-app <ionos-registry-address>/gear:latest
+
+# 3. Push (store) it there
+podman push <ionos-registry-address>/gear:latest
+```
+
+> Note: IONOS's registry is **HTTPS-secured**, so no `--tls-verify=false` here (that flag is only for the local proof registry on your laptop).
+
+### Step 3 — Create the small server
+
+In the IONOS cloud console (or via their API / Data Center Designer) we create a **Basic Cube XS** server: **1 processor, 2 GB RAM, 60 GB disk, about $5.76 per month**. We give it a secure SSH key so only we can log in. The server runs a normal Linux operating system — there is nothing IONOS-specific about what runs inside it.
+
+### Step 4 — First boot: download the app and start it
+
+We copy the small deployment folder (`compose.prod.yaml` + `startup.sh`) onto the server, log the server into the IONOS registry so it may *pull* the image, and run the first-boot script. The script:
+
+1. generates a **secret password** for the database (stored only on the server, permissions set so nobody else can read it),
+2. **downloads the app image** from the IONOS registry,
+3. starts the app and its private database,
+4. waits until the app answers "I am healthy".
+
+```bash
+# On the IONOS server (once)
+cd /opt/gear
+GEAR_IMAGE_REPO=<ionos-registry-address>/gear:latest \
+GEAR_APP_ORIGIN=https://gear.example.org \
+bash deploy/startup.sh
+```
+
+### Step 5 — Everyone opens the website
+
+After the script finishes, the app is reachable at its public address. The database is **not** exposed to the internet — only the app talks to it, and only the app is reachable from outside.
+
+```mermaid
+flowchart LR
+    U["👥 Users (browser)"] -->|HTTPS via edge/CDN later| A["🖥️ App container"]
+    A -->|internal only| D["🗄️ Database container (private)"]
+    A -->|pulls image once| R["🏭 IONOS registry"]
+```
+
+**What the server does NOT do:** it never builds the app, never compiles code, and needs no development tools — it only downloads and runs a ready-made image. That is why the smallest server is enough.
+
+### Updating the app later
+
+When we release a new version, we simply:
+
+1. build the new image and push it to the IONOS registry (Step 2),
+2. on the server: `docker compose -f deploy/compose.prod.yaml pull && docker compose -f deploy/compose.prod.yaml up -d`.
+
+The database stays untouched; only the app is replaced.
+
+---
+
+## 6. The exact commands (for the technically minded)
 
 All of this runs with **Podman** (a free, open-source container tool already installed on the dev machines — no Docker license needed).
 
