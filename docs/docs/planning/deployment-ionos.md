@@ -236,6 +236,49 @@ Cloudflare is a very widely used, free-forever edge. The steps:
 - `GEAR_APP_ORIGIN` on the server is set to `https://gear.sassisuperdomain.de` (already supported by `deploy/startup.sh`).
 - The firewall on the IONOS server can be tightened later to only accept traffic from the edge provider's IP ranges — a hardening step we can do after the edge is live.
 
+### Hosting state, data residency, and DSGVO / GDPR
+
+G.E.A.R. stores personal data of the Ortsverband's volunteers (names, email addresses, qualifications, inspection records). The **DSGVO (GDPR)** applies — the Ortsverband is the **data controller** and any service that touches personal data is a **data processor**. Choosing an edge/CDN therefore has a legal dimension: where the data physically stays, which law applies, and what the provider signs.
+
+| Fact | bunny.net | Cloudflare |
+|---|---|---|
+| **Company / applicable law** | **EU-based** — BunnyWay d.o.o., Ljubljana (Slovenia, EU). Subject to EU/GDPR + Slovenian law. Explicitly avoids U.S. cloud giants and states it does not fall under the U.S. CLOUD Act. | **U.S.-based** — Cloudflare, Inc. (US). US law applies to the company; GDPR is honoured contractually. Relies on EU SCCs + EU-U.S. Data Privacy Framework for transfers to the US. |
+| **Where the traffic is processed** | Default is a global CDN; can be restricted to **EU-only** with one click (Routing Filters → 24 EU PoPs). Logs are stored in **Germany** and IP-anonymised by default. | Global network; EU-only requires the **Data Localization Suite** (Regional Services / Geo Key Manager), which is largely an **enterprise/paid** feature — the free tier may inspect traffic outside the EU. |
+| **Certifications** | ISO/IEC 27001:2022, GDPR-compliant, DPA signable in the dashboard. | ISO 27001, ISO 27701, ISO 27018, SOC 2 Type II, PCI DSS, European Cloud Code of Conduct, Germany's **C5** (BSI) standard. |
+| **DSGVO posture for a German controller** | Strongest fit: EU company, EU-only routing available, EU (DE) log storage, no US jurisdiction exposure. | Good, but US-based: compliance depends on contractual safeguards (SCCs/DPF) and paid EU-localisation features to keep data in the EU. |
+
+**Bottom line for DSGVO/GDPR:** both are GDPR-compliant, but for a German Ortsverband the **practical risk is lower with bunny.net** — an EU company with EU-only routing and EU log storage, no U.S. jurisdiction exposure. With Cloudflare, keeping data in the EU on the free tier is not guaranteed (the EU-localisation features are paid), so a German controller would need the paid tier or accept SCC/DPF-based transfers. This is a **decision-maker question**, not a technical one.
+
+### Is the traffic between the provider and IONOS encrypted?
+
+Yes — **but only if configured correctly.** There are two separate hops, and they can be encrypted independently:
+
+1. **Visitor → provider (browser → edge):** always HTTPS (TLS 1.2+). This is the padlock users see and is the default with either provider.
+2. **Provider → IONOS server (edge → origin):** this hop is **only encrypted if the IONOS server itself serves HTTPS**.
+
+Because our server currently listens on **plain HTTP** (port 8080, `GEAR_HTTP_ADDR=:8080`), a naive setup leaves the **provider ↔ IONOS hop unencrypted** — the visitor's browser is safe, but the traffic between the CDN and our server travels in clear text. The data (including login and inspection content) passes through the provider's network, so that hop should be encrypted too.
+
+**What makes it encrypted end-to-end:**
+
+- **bunny.net:** configure the Pull Zone's **Origin SSL** to HTTPS and serve HTTPS on the IONOS server (a Let's Encrypt certificate for `gear.sassisuperdomain.de` installed on the IONOS server). bunny.net then fetches the origin over TLS.
+- **Cloudflare:** use SSL mode **Full (strict)** — Cloudflare talks HTTPS to the origin and requires a valid origin certificate. (The **Flexible** mode is the trap: it keeps the browser→Cloudflare hop encrypted but talks **plain HTTP** to the origin — the opposite of what we want.)
+
+**What we need to implement for a fully encrypted path** (in the deploy story, not yet built):
+
+- Serve HTTPS **on the IONOS server itself** — either a small TLS reverse proxy in front of the app (e.g. a Caddy/Traefik/nginx container) or have the Go server terminate TLS directly. The app currently listens on plain HTTP only.
+- Issue a certificate for `gear.sassisuperdomain.de` (Let's Encrypt via the edge's origin-certificate feature, or on the IONOS server via HTTP-01/DNS-01).
+- Keep the app→database hop internal-only (already the case: postgres is never published to the host).
+
+Until that TLS-on-origin step lands, the edge would have to use plain-HTTP origin fetch — acceptable only for a trial, not for real personal data.
+
+```mermaid
+flowchart LR
+    U["🌍 Visitor"] -->|1. HTTPS (encrypted)| E["🛡️ Edge/CDN"]
+    E -->|2. HTTPS (encrypted) IF origin serves TLS| A["🖥️ IONOS app"]
+    A -->|3. internal only (encrypted in-compose)| D["🗄️ Database"]
+    style E fill:#eef
+```
+
 ### Which to choose
 
 | | bunny.net | Cloudflare |
@@ -243,9 +286,11 @@ Cloudflare is a very widely used, free-forever edge. The steps:
 | **Cost** | Cheap, pay-as-you-go CDN | Generous free tier |
 | **Setup** | Pull Zone + one DNS CNAME | Add domain + change name servers (touches the registrar once) |
 | **Caching / CDN** | Excellent, purpose-built | Excellent, plus WAF / bot protection |
-| **Best for** | Simple, low-cost CDN in front of our server | Maximum protection + a "set and forget" free edge |
+| **Applicable law / company** | EU (Slovenia) — no US jurisdiction exposure | US (California) — EU compliance via SCCs/DPF |
+| **EU data residency** | **EU-only routing + EU (DE) logs by default/one click** | EU-only needs the paid Data Localization Suite |
+| **Best for** | Simple, low-cost, EU-sovereign CDN in front of our server | Maximum protection + a "set and forget" free edge |
 
-Both work with the same deployment — this decision does not affect the app, the registry, or the server; it is purely the "front door" configuration.
+Both work with the same deployment — this decision does not affect the app, the registry, or the server; it is purely the "front door" configuration. For a **German Ortsverband under DSGVO**, bunny.net is the simpler choice from a data-residency standpoint; Cloudflare is chosen when the free WAF/protection features outweigh the US-jurisdiction consideration.
 
 ---
 
