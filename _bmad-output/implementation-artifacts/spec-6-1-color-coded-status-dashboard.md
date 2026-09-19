@@ -85,7 +85,7 @@ context:
 - [x] Tests -- backend (status matrix/resilience/DTO/postgres), SPA (row/filter/multi/counts/tap) -- verification
 
 **Acceptance Criteria:**
-- Given I have `dashboard.view`, when the dashboard loads, then every tool is listed color-coded with the shared derived status — Red (past due or OOS), Orange (≤ 14 days), Green (current), never-inspected Red (FR-16/AD-5).
+- Given I have `dashboard.view`, when the dashboard loads, then every tool is listed color-coded with the shared derived status — Red (past due or OOS), Orange (due within one quarter of the tool's own inspection cycle), Green (current), never-inspected Red (FR-16/AD-5).
 - Given the derived statuses, when the dashboard renders, then status is computed on read via the single shared clock function, never stored (AD-4).
 - Given the summary counts, when I tap a count block, then the matching status filter activates (FR-16/UX-DR5).
 - Given the filter chips, when I tap a status chip, then the visible list filters to it, with multiple statuses active at once (FR-16/UX-DR5).
@@ -94,6 +94,7 @@ context:
 ## Spec Change Log
 
 - **Review patches (review 1, 2026-09-14):** status-label/class lookups are defensive (unknown/empty code can't crash the row render; counts switch has a default); a distinct filtered-empty state with an "Alle anzeigen" reset replaces the misleading fleet-empty `EmptyState` when filters match nothing; zero-count summary cards are disabled (not tappable); the filter selection is keyed on the stable status CODE (`ReadonlySet<ToolStatusCode>`) with German labels only for display — label renames can no longer break filtering; the schedule catalog is not read for an empty fleet; `default_schedule_id` added to the HTTP no-leak regression; `.statusOos` dark-mode contrast fixed; refetch-on-remount, chip-deselect, fake-green-carries-next_due, chip-color-class, and nil-status-read tests added; trailing newlines + a required `SummaryGrid.onToggleFilter`; stale `main.go` comment corrected.
+- **2026-09-19, post-done doc reconcile (retro item 31, user decision 2026-09-17):** the orange window is PROPORTIONAL to each tool's own inspection cycle (`window = interval * orangeWindowPercent / 100`, default 25 = one quarter), superseding the earlier fixed 14-day rule (commit 53dd5c2 + Story 5-2c configurable percentage). The Acceptance Criteria above now state the proportional rule; the frozen I/O matrix row DASH_WINDOW ("next_due ≤ 14d") is retained as the historical approved intent — the code and the AC reflect the proportional rule. The deviation is also recorded in `epic-6-context.md:18` and `epic-5-retro-2026-09-17.md:14,26,43`.
 
 ## Design Notes
 

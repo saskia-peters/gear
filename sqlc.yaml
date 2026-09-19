@@ -73,6 +73,13 @@ sql:
   # through the modules' read-only ports (AD-7/AD-10/AD-11). 000024/000025 are
   # appended to THIS block only (per-module scoping, AD-8/AD-11). 000025 also
   # seeds the tool.edit permission (data INSERTs, ignored by sqlc).
+  # DOCUMENTED EXCEPTION (retro item 29): 000029 carries a User-owned
+  # sessions index (sessions_user_id_created_at_idx) alongside the Tool-owned
+  # inspection/reinstatement indexes, because the migrations are the single
+  # schema authority and the index files cannot be split per module. Impact is
+  # nil for codegen: no tool query reads sessions, so the generated tools
+  # package never carries a Session model (verified). The User block's schema
+  # (000003) already covers the sessions table itself.
   - engine: "postgresql"
     schema:
       - "./migrations/000021_tool_types.up.sql"

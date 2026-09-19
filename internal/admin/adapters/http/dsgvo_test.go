@@ -472,10 +472,12 @@ func TestDsgvoDeleteUserUnknownTarget(t *testing.T) {
 }
 
 func TestDsgvoDeleteUserMalformedTarget(t *testing.T) {
-	// A MALFORMED target user id: the Tool rewrite (which runs FIRST) answers
-	// the Tool module's not-found sentinel — the handler maps it to the same
-	// German 404 (DELETE_UNKNOWN), never a 500.
-	svc := &fakeDsgvoService{deleteErr: toolscore.ErrToolNotFound}
+	// A MALFORMED target user id: the DSGVO orchestrator resolves the target via
+	// the User port's GetUserByID BEFORE the Tool rewrite, so a malformed id
+	// surfaces usercore.ErrAdminUserNotFound — the handler maps it to the German
+	// 404 (DELETE_UNKNOWN), never a 500. (The toolscore.ErrToolNotFound mapping
+	// is dead: the Tool rewrite runs after target resolution, retro item 25.)
+	svc := &fakeDsgvoService{deleteErr: usercore.ErrAdminUserNotFound}
 	surface := dsgvoGateway([]string{dsgvocore.DeletePermission}, activeAdmin(), svc)
 	rec := doDsgvoBodyRequest(surface, http.MethodPost, "/users/gibtsnicht-kein-uuid/delete", "tok", `{"reason":"Grund"}`)
 	if rec.Code != http.StatusNotFound {
@@ -501,16 +503,38 @@ func TestDsgvoDeleteUserGated(t *testing.T) {
 }
 
 func TestDsgvoDeleteUserMalformedBody(t *testing.T) {
-	// A non-JSON delete body → the German 400 (invalid_request), service never
-	// reached.
+	// A non-JSON delete body → the German 400 (invalid_request, "Ungültiges
+	// JSON-Format." per the settings/backup convention), service never reached.
+	// Retro item 24: malformed JSON no longer masquerades as a missing reason.
 	svc := &fakeDsgvoService{deleteResult: &dsgvocore.DeleteAccountResult{Message: "Konto u-target wurde gelöscht."}}
 	surface := dsgvoGateway([]string{dsgvocore.DeletePermission}, activeAdmin(), svc)
 	rec := doDsgvoBodyRequest(surface, http.MethodPost, "/users/u-target/delete", "tok", "not-json")
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
 	}
+	if !strings.Contains(rec.Body.String(), "Ungültiges JSON-Format.") {
+		t.Errorf("400 body lacks the invalid-JSON message: %s", rec.Body.String())
+	}
 	if svc.deleteCalls != 0 {
 		t.Errorf("service reached for a malformed body: calls=%d", svc.deleteCalls)
+	}
+}
+
+func TestDsgvoDeleteUserBodyTooLarge(t *testing.T) {
+	// An oversized delete body → the German 400 (invalid_request), service never
+	// reached (http.MaxBytesReader 1 MB, retro item 24).
+	svc := &fakeDsgvoService{deleteResult: &dsgvocore.DeleteAccountResult{Message: "Konto u-target wurde gelöscht."}}
+	surface := dsgvoGateway([]string{dsgvocore.DeletePermission}, activeAdmin(), svc)
+	big := `{"reason":"` + strings.Repeat("x", 2<<20) + `"}`
+	rec := doDsgvoBodyRequest(surface, http.MethodPost, "/users/u-target/delete", "tok", big)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), "Ungültiges JSON-Format.") {
+		t.Errorf("400 body lacks the invalid-JSON message: %s", rec.Body.String())
+	}
+	if svc.deleteCalls != 0 {
+		t.Errorf("service reached for an oversized body: calls=%d", svc.deleteCalls)
 	}
 }
 

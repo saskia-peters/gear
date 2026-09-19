@@ -134,7 +134,7 @@ context:
 
 **Admin surface + tombstone isolation**
 
-- The three HTTP handlers (POST delete, GET list, POST purge).
+- The three HTTP handlers (POST delete, GET list, DELETE purge).
   [`dsgvo.go:60`](../../internal/admin/adapters/http/dsgvo.go#L60)
 
 - Tombstones non-existent: `ListUsers` excludes `deleted`, `UpdateAdminUser` refuses them.

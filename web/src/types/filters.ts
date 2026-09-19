@@ -17,9 +17,11 @@ export const FILTER_OPTIONS: FilterStatus[] = [
 ]
 
 // STATUS_CODES are the server-authoritative derived status codes (AD-4/AD-5,
-// Story 6.1), mirroring the backend ToolStatusCode verbatim. They are the
+// Story 6.1), mirroring the backend status codes verbatim. They are the
 // STABLE selection identity for the dashboard filter — German labels may be
-// edited, the codes never change.
+// edited, the codes never change. The dashboard/list/submit surfaces all use
+// this single union (the former ToolStatusCode was consolidated here, retro
+// item 34).
 export const STATUS_CODES = ['oos', 'red', 'orange', 'green'] as const
 export type StatusCode = (typeof STATUS_CODES)[number]
 

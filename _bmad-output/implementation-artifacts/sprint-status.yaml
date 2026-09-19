@@ -258,21 +258,21 @@ action_items:
     action: "Fix the DSGVO delete-body decode — malformed JSON maps to Ungültiges
       JSON-Format + add http.MaxBytesReader"
     owner: "dev loop"
-    status: open
+    status: done
     ref: "_bmad-output/implementation-artifacts/epic-3-retro-2026-09-18.md"
   - id: "epic-3-retro-item-25-remove-the-dead-toolscore-errtoolnotfoun"
     epic: 3
     action: "Remove the dead toolscore.ErrToolNotFound branch in admin/adapters/http/dsgvo.go
       + correct the ordering comment"
     owner: "dev loop"
-    status: open
+    status: done
     ref: "_bmad-output/implementation-artifacts/epic-3-retro-2026-09-18.md"
   - id: "epic-3-retro-item-26-reconcile-spec-3-4-suggested-review-orde"
     epic: 3
     action: "Reconcile spec-3-4 Suggested Review Order — purge route is DELETE /users/deleted/{archiveId},
       not POST"
     owner: "dev loop"
-    status: open
+    status: done
     ref: "_bmad-output/implementation-artifacts/epic-3-retro-2026-09-18.md"
   - id: "epic-3-retro-item-27-collapse-the-duplicated-permission-audit"
     epic: 3
@@ -293,21 +293,21 @@ action_items:
     action: "Record or fix the 000029 sqlc-scope drift — sessions index is User-owned
       but sits in the Tools sqlc block"
     owner: "dev loop"
-    status: open
+    status: done
     ref: "_bmad-output/implementation-artifacts/epic-3-retro-2026-09-18.md"
   - id: "epic-6-retro-item-30-fix-summarygrid-vocabulary-drift-read-st"
     epic: 6
     action: "Fix SummaryGrid vocabulary drift — read STATUS_VOCAB from filters.ts
       instead of hardcoding the German labels"
     owner: "dev loop"
-    status: open
+    status: done
     ref: "_bmad-output/implementation-artifacts/epic-6-retro-2026-09-18.md"
   - id: "epic-6-retro-item-31-reconcile-the-orange-window-docs-update"
     epic: 6
     action: "Reconcile the orange-window docs — update the stale ≤14 days text in
       spec-6-1 and the DashboardPage.tsx header comment to the proportional rule"
     owner: "dev loop"
-    status: open
+    status: done
     ref: "_bmad-output/implementation-artifacts/epic-6-retro-2026-09-18.md"
   - id: "epic-6-retro-item-32-split-the-tool-module-god-classes-extrac"
     epic: 6
@@ -321,14 +321,14 @@ action_items:
     action: "Log mount-level 403s for tool surfaces — pass a logger + German denyMsg
       to RequirePermission for report.export / inspection.history.view"
     owner: "dev loop"
-    status: open
+    status: done
     ref: "_bmad-output/implementation-artifacts/epic-6-retro-2026-09-18.md"
   - id: "epic-6-retro-item-34-consolidate-the-ts-status-union-drop-too"
     epic: 6
     action: "Consolidate the TS status union — drop ToolStatusCode in favor of the
       shared StatusCode"
     owner: "dev loop"
-    status: open
+    status: done
     ref: "_bmad-output/implementation-artifacts/epic-6-retro-2026-09-18.md"
   - id: "epic-6-retro-item-35-decide-submit-reinstate-idempotency-whet"
     epic: 6

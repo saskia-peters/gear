@@ -14,7 +14,6 @@ import (
 	dsgvocore "github.com/saskia-peters/gear/internal/dsgvo/core"
 	"github.com/saskia-peters/gear/internal/platform/auth"
 	"github.com/saskia-peters/gear/internal/platform/httpapi"
-	toolscore "github.com/saskia-peters/gear/internal/tools/core"
 	usercore "github.com/saskia-peters/gear/internal/user/core"
 )
 
@@ -175,8 +174,8 @@ func (h *DsgvoHandler) DeleteUserAccount(w http.ResponseWriter, r *http.Request)
 	}
 
 	var body DeleteAccountRequest
-	if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
-		httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", dsgvocore.MsgDsgvoReasonRequired)
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&body); err != nil {
+		httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", "Ungültiges JSON-Format.")
 		return
 	}
 
@@ -272,12 +271,6 @@ func (h *DsgvoHandler) mapDsgvoError(w http.ResponseWriter, r *http.Request, err
 	case errors.Is(err, usercore.ErrDeletedAccountNotFound):
 		httpapi.WriteError(w, http.StatusNotFound, "not_found", dsgvocore.MsgDeletedAccountNotFound)
 	case errors.Is(err, usercore.ErrAdminUserNotFound):
-		httpapi.WriteError(w, http.StatusNotFound, "not_found", dsgvocore.MsgUserNotFound)
-	case errors.Is(err, toolscore.ErrToolNotFound):
-		// The delete flow runs the Tool rewrite FIRST: a malformed target user
-		// id surfaces the Tool module's not-found sentinel (parseOptionalUUID)
-		// before the User port can answer — map it to the same German 404
-		// (DELETE_UNKNOWN).
 		httpapi.WriteError(w, http.StatusNotFound, "not_found", dsgvocore.MsgUserNotFound)
 	default:
 		// Client-abort guard: a canceled request has no one to answer.

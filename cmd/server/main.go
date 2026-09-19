@@ -199,7 +199,7 @@ func main() {
 	// defense-in-depth (AD-6). It deliberately does NOT widen the
 	// dashboard.view / inspection.submit gates — a history-less caller can still
 	// read the Werkzeugliste and start/submit but 403s on the history.
-	historySurface := auth.RequirePermission(sessionManager, userRepo, toolscore.InspectionHistoryViewPermission)(toolHandler.HistoryRoutes())
+	historySurface := auth.RequireAnyPermission(sessionManager, userRepo, []string{toolscore.InspectionHistoryViewPermission}, "inspection.history.view access denied", log)(toolHandler.HistoryRoutes())
 
 	// Story 6.2 — the status-report surface under /api/v1/tools with its OWN
 	// gate — one permission per surface (AD-6, FR-17): only `report.export`
@@ -209,7 +209,7 @@ func main() {
 	// inspection.history.view gates — a report-less caller can still read the
 	// Werkzeugliste and start/submit/reinstate but 403s on the export with no
 	// PDF bytes.
-	reportSurface := auth.RequirePermission(sessionManager, userRepo, toolscore.ReportExportPermission)(toolHandler.ReportRoutes())
+	reportSurface := auth.RequireAnyPermission(sessionManager, userRepo, []string{toolscore.ReportExportPermission}, "report.export access denied", log)(toolHandler.ReportRoutes())
 
 	// Story 3.3 + 3.4 — the DSGVO orchestrator (AD-8): the composition-root
 	// assembly point for the data-access report AND the account-deletion

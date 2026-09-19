@@ -16,6 +16,7 @@ bin/
 node_modules/
 web/node_modules/
 web/dist/
+web/.vitest/
 
 # --- local environment overrides ---
 # .env.example is the documented config surface and must stay tracked.

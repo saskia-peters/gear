@@ -17,8 +17,9 @@ import styles from './DashboardPage.module.css'
 // section (Story 4-3b + 6.1) fetches the ACTIVE tool list from /api/v1/tools
 // (gated by dashboard.view on the server — all base roles hold it) and renders
 // name + type name + inventory number plus the server-DERIVED status as a
-// German label + color chip (FR-16/AD-4/AD-5 — Red past due / OOS, Orange ≤14
-// days, Green current, never-inspected Red). The 2×2 summary grid shows the
+// German label + color chip (FR-16/AD-4/AD-5 — Red past due / OOS, Orange due
+// within one quarter of the tool's OWN inspection cycle, Green current,
+// never-inspected Red). The 2×2 summary grid shows the
 // real per-status counts and its NON-ZERO cards are TAPPABLE: tapping a count
 // activates the matching status filter; the filter chips support MULTIPLE
 // active statuses at once (FR-16/UX-DR5). The selection identity is the

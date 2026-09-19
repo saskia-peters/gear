@@ -341,17 +341,14 @@ function buildToolBody(input: ToolInput): Record<string, unknown> {
 // status (Story 6.1 — computed on read, never stored, AD-4).
 // ============================================================================
 
-// ToolStatusCode is a derived tool status code (AD-4/AD-5,
-// server-authoritative): `oos` (Out of Service), `red` (past due / never
-// inspected), `orange` (due within the static window), `green` (current).
-export type ToolStatusCode = 'oos' | 'red' | 'orange' | 'green'
-
 // ToolStatusInfo is the SHARED derived-status shape (Story 6.1): the status
 // code + the next-due timestamp (null for `oos` and the never-inspected
 // `red`). The dashboard list (DashboardTool.status) and the inspection submit
 // response (InspectionSubmitStatus) both use it so the vocabulary never drifts.
+// The status code is the shared StatusCode (types/filters.ts, retro item 34 —
+// ToolStatusCode was consolidated into it).
 export interface ToolStatusInfo {
-  status: ToolStatusCode
+  status: StatusCode
   next_due: string | null
 }
 

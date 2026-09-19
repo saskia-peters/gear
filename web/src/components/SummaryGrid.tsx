@@ -1,5 +1,5 @@
 import styles from './SummaryGrid.module.css'
-import { OOS_STATUS, type StatusCode } from '../types/filters.ts'
+import { STATUS_VOCAB, type StatusCode } from '../types/filters.ts'
 
 // SummaryCounts are the per-status totals of the CURRENT tool list (Story
 // 6.1): derived from the server-returned statuses on the dashboard read.
@@ -30,28 +30,28 @@ export function SummaryGrid({ counts = {}, onToggleFilter }: SummaryGridProps) {
   const items: { id: string; label: string; code: StatusCode; count: number; cardClass: string }[] = [
     {
       id: 'einsatzbereit',
-      label: 'Einsatzbereit',
+      label: STATUS_VOCAB.green.label,
       code: 'green',
       count: einsatzbereit,
       cardClass: styles.cardGreen,
     },
     {
       id: 'ausstehend',
-      label: 'Ausstehend',
+      label: STATUS_VOCAB.orange.label,
       code: 'orange',
       count: ausstehend,
       cardClass: styles.cardOrange,
     },
     {
       id: 'ueberfaellig',
-      label: 'Überfällig',
+      label: STATUS_VOCAB.red.label,
       code: 'red',
       count: ueberfaellig,
       cardClass: styles.cardRed,
     },
     {
       id: 'ausser-betrieb',
-      label: OOS_STATUS,
+      label: STATUS_VOCAB.oos.label,
       code: 'oos',
       count: ausserBetrieb,
       cardClass: styles.cardOos,
