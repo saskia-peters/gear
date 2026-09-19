@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-04-2026 19:40
-last_updated: 09-18-2026 22:00
+last_updated: 09-18-2026 23:00
 project: gear
 project_key: NOKEY
 tracking_system: file-system
@@ -69,7 +69,7 @@ development_status:
   3-2-backup-destination-configuration-admin-settings-backup: done
   3-3-dsgvo-data-access-report: done
   3-4-dsgvo-account-deletion: done
-  epic-3-retrospective: in-progress
+  epic-3-retrospective: done
   5-2c-tool-settings-adoption-and-schedule-polish: done
 
   epic-4: done
@@ -99,7 +99,7 @@ development_status:
   6-3-inspection-history-per-tool: done
   6-3b-tool-details-track-record: done
   6-3c-tool-details-condensed-back: done
-  epic-6-retrospective: in-progress
+  epic-6-retrospective: done
 action_items:
   - id: "epic-1-retro-item-1-extract-a-shared-authheaders-helper-into"
     epic: 1
@@ -246,3 +246,101 @@ action_items:
     owner: "dev loop"
     status: open
     ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-4-retro-2026-09-12.md"
+  - id: "epic-3-retro-item-23-split-admineinstellungenpage-tsx-extract"
+    epic: 3
+    action: "Split AdminEinstellungenPage.tsx — extract the E-Mail/Backup/Schedule/System
+      tabs into sibling files before the next settings story"
+    owner: "dev loop"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-3-retro-2026-09-18.md"
+  - id: "epic-3-retro-item-24-fix-the-dsgvo-delete-body-decode-malform"
+    epic: 3
+    action: "Fix the DSGVO delete-body decode — malformed JSON maps to Ungültiges
+      JSON-Format + add http.MaxBytesReader"
+    owner: "dev loop"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-3-retro-2026-09-18.md"
+  - id: "epic-3-retro-item-25-remove-the-dead-toolscore-errtoolnotfoun"
+    epic: 3
+    action: "Remove the dead toolscore.ErrToolNotFound branch in admin/adapters/http/dsgvo.go
+      + correct the ordering comment"
+    owner: "dev loop"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-3-retro-2026-09-18.md"
+  - id: "epic-3-retro-item-26-reconcile-spec-3-4-suggested-review-orde"
+    epic: 3
+    action: "Reconcile spec-3-4 Suggested Review Order — purge route is DELETE /users/deleted/{archiveId},
+      not POST"
+    owner: "dev loop"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-3-retro-2026-09-18.md"
+  - id: "epic-3-retro-item-27-collapse-the-duplicated-permission-audit"
+    epic: 3
+    action: "Collapse the duplicated permission/audit helpers in the DSGVO orchestrator
+      (requirePermission + audit)"
+    owner: "dev loop"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-3-retro-2026-09-18.md"
+  - id: "epic-3-retro-item-28-decide-the-dsgvo-orchestrator-wire-coupl"
+    epic: 3
+    action: "Decide the DSGVO orchestrator wire-coupling stance (JSON-tagged core
+      structs vs DTOs)"
+    owner: "human"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-3-retro-2026-09-18.md"
+  - id: "epic-3-retro-item-29-record-or-fix-the-000029-sqlc-scope-drif"
+    epic: 3
+    action: "Record or fix the 000029 sqlc-scope drift — sessions index is User-owned
+      but sits in the Tools sqlc block"
+    owner: "dev loop"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-3-retro-2026-09-18.md"
+  - id: "epic-6-retro-item-30-fix-summarygrid-vocabulary-drift-read-st"
+    epic: 6
+    action: "Fix SummaryGrid vocabulary drift — read STATUS_VOCAB from filters.ts
+      instead of hardcoding the German labels"
+    owner: "dev loop"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-6-retro-2026-09-18.md"
+  - id: "epic-6-retro-item-31-reconcile-the-orange-window-docs-update"
+    epic: 6
+    action: "Reconcile the orange-window docs — update the stale ≤14 days text in
+      spec-6-1 and the DashboardPage.tsx header comment to the proportional rule"
+    owner: "dev loop"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-6-retro-2026-09-18.md"
+  - id: "epic-6-retro-item-32-split-the-tool-module-god-classes-extrac"
+    epic: 6
+    action: "Split the Tool-module god-classes — extract the history surface + validation
+      from inspections.go (933 lines) and trim core/tools.go / http/tools.go"
+    owner: "dev loop"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-6-retro-2026-09-18.md"
+  - id: "epic-6-retro-item-33-log-mount-level-403s-for-tool-surfaces-p"
+    epic: 6
+    action: "Log mount-level 403s for tool surfaces — pass a logger + German denyMsg
+      to RequirePermission for report.export / inspection.history.view"
+    owner: "dev loop"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-6-retro-2026-09-18.md"
+  - id: "epic-6-retro-item-34-consolidate-the-ts-status-union-drop-too"
+    epic: 6
+    action: "Consolidate the TS status union — drop ToolStatusCode in favor of the
+      shared StatusCode"
+    owner: "dev loop"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-6-retro-2026-09-18.md"
+  - id: "epic-6-retro-item-35-decide-submit-reinstate-idempotency-whet"
+    epic: 6
+    action: "Decide submit/reinstate idempotency — whether an idempotency key is required
+      before production hardening (Epic 5 item 3)"
+    owner: "human"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-6-retro-2026-09-18.md"
+  - id: "epic-6-retro-item-36-track-proposed-retro-items-in-the-ledger"
+    epic: 6
+    action: "Track proposed retro items in the ledger — append Epic 5s split-inspections.go
+      and idempotency items to sprint-status action_items"
+    owner: "dev loop"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-6-retro-2026-09-18.md"
