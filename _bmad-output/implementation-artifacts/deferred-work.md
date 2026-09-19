@@ -159,3 +159,7 @@ Triage output of review loops — real, non-story-blocking findings that are not
 
 - The CSV-import update-batch `UPDATE … FROM (VALUES …)` has no covering postgres test for the "tool archived between the core list read and the write" race — the zero-row `RETURNING` branch reports `ErrToolImportCollision`. Reachable only under real concurrency; the constraint-violation fallback path is pinned, this race branch is not.
 - `createToolsBatchFallback` (the per-row retry used when the multi-row batch INSERT itself errors) is exercised by no postgres test — the batch tests hit only the ON CONFLICT and happy paths. Likely unreachable in practice with soft-deleted tool_types, but it is new untested batch code.
+
+## Deferred from: god-class split (2026-09-19) of spec-4-5-bulk-csv-import.md
+
+- `TestPostgresCreateToolsBatchPreservesExplicitOrder` asserts the multi-row batch INSERT returns rows in INPUT order, but PostgreSQL does not guarantee `RETURNING` order over an `unnest` INSERT — the test fails deterministically once the dev DB accumulates rows (query plan flips the order). Production is safe: the repo attributes batch failures by NAME (`createdNames`), never by RETURNING order, so per-row error lines stay correct. Fix: add an explicit input-index column to the `RETURNING` and re-sort in `createToolsBatchInTx`, or relax the test to assert the created SET (by name) rather than the order.

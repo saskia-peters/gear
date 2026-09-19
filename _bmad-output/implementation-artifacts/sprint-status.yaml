@@ -251,7 +251,7 @@ action_items:
     action: "Split AdminEinstellungenPage.tsx — extract the E-Mail/Backup/Schedule/System
       tabs into sibling files before the next settings story"
     owner: "dev loop"
-    status: open
+    status: done
     ref: "_bmad-output/implementation-artifacts/epic-3-retro-2026-09-18.md"
   - id: "epic-3-retro-item-24-fix-the-dsgvo-delete-body-decode-malform"
     epic: 3
@@ -314,7 +314,7 @@ action_items:
     action: "Split the Tool-module god-classes — extract the history surface + validation
       from inspections.go (933 lines) and trim core/tools.go / http/tools.go"
     owner: "dev loop"
-    status: open
+    status: done
     ref: "_bmad-output/implementation-artifacts/epic-6-retro-2026-09-18.md"
   - id: "epic-6-retro-item-33-log-mount-level-403s-for-tool-surfaces-p"
     epic: 6
