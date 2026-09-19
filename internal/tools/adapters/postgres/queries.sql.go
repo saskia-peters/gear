@@ -217,6 +217,51 @@ func (q *Queries) DeleteToolTypeChecklistItems(ctx context.Context, toolTypeID p
 	return err
 }
 
+const findToolCollisions = `-- name: FindToolCollisions :many
+SELECT name, lower(inventory_number) AS inventory_number
+FROM tools
+WHERE name = ANY($1::text[]) OR lower(inventory_number) = ANY($2::text[])
+`
+
+type FindToolCollisionsParams struct {
+	Names            []string `json:"names"`
+	InventoryNumbers []string `json:"inventory_numbers"`
+}
+
+type FindToolCollisionsRow struct {
+	Name            string `json:"name"`
+	InventoryNumber string `json:"inventory_number"`
+}
+
+// The Story 4.5 collision pre-check (the 4-3b backstop): the input names /
+// inventory numbers that are ALREADY held by ANY tools row — ACTIVE AND
+// ARCHIVED (an archived tool keeps its name/inventory "taken", so an import
+// row whose name/number an archived tool holds fails with a precise German row
+// error before the batch). Names match EXACTLY (the DB UNIQUE(name) is
+// case-sensitive); inventory matches CASE-INSENSITIVELY via the lower()
+// functional index — the caller passes the lowercased input inventories. The
+// repository filters the returned rows against the exact input sets so a
+// row matched on the OTHER column is never misreported as a hit.
+func (q *Queries) FindToolCollisions(ctx context.Context, arg FindToolCollisionsParams) ([]FindToolCollisionsRow, error) {
+	rows, err := q.db.Query(ctx, findToolCollisions, arg.Names, arg.InventoryNumbers)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var items []FindToolCollisionsRow
+	for rows.Next() {
+		var i FindToolCollisionsRow
+		if err := rows.Scan(&i.Name, &i.InventoryNumber); err != nil {
+			return nil, err
+		}
+		items = append(items, i)
+	}
+	if err := rows.Err(); err != nil {
+		return nil, err
+	}
+	return items, nil
+}
+
 const getInspectionItems = `-- name: GetInspectionItems :many
 SELECT id, inspection_id, item_id, label, position, result
 FROM inspection_items

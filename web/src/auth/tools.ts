@@ -234,6 +234,82 @@ export async function archiveTool(id: string): Promise<ToolWriteResult> {
   })) as ToolWriteResult
 }
 
+// ============================================================================
+// Bulk CSV import (Story 4.5, FR-9/FR-23): upload a CSV whose valid rows are
+// created/updated in a set-partitioned batch and whose invalid rows are
+// reported per-row (file line + German reason). The result view (imported /
+// error counts + a downloadable error report) is rendered from the JSON, and a
+// client-side template CSV is offered so the header the parser accepts and the
+// template can never drift.
+// ============================================================================
+
+// ToolImportRowError is ONE per-row import failure: the 1-based file line +
+// the server's German reason.
+export interface ToolImportRowError {
+  row: number
+  reason: string
+}
+
+// ToolImportResult is the POST /api/v1/admin/tools/import payload: the number
+// of created/updated tools + the per-row errors (an EMPTY errors array means
+// every row succeeded — the server serializes `[]`, never null).
+export interface ToolImportResult {
+  imported: number
+  errors: ToolImportRowError[]
+}
+
+// TOOL_IMPORT_URL is the multipart upload endpoint (tools.manage-only, AD-6).
+const TOOL_IMPORT_URL = '/api/v1/admin/tools/import'
+
+// importToolsCsv POSTs the CSV file as multipart form-data (field `file`,
+// Story 4.5). It is a NEW dedicated call: the JSON `request()` helper stays
+// untouched, and the multipart body must NOT carry the JSON Content-Type — the
+// browser sets the multipart boundary itself, so only the bearer token travels
+// in the header. 200 → the result (imported + per-row errors); 400 → ApiError
+// with the server's German reason (missing header, malformed CSV, no data rows,
+// too large); 403 → ApiError (a non-tools.manage holder, AD-6); 401 → stale
+// session.
+export async function importToolsCsv(file: File): Promise<ToolImportResult> {
+  const form = new FormData()
+  form.append('file', file)
+  // The multipart boundary must be browser-generated — strip the JSON
+  // Content-Type authTokenHeaders() adds and keep only the Authorization.
+  const headers = new Headers(authTokenHeaders())
+  headers.delete('Content-Type')
+  let res: Response
+  try {
+    res = await fetch(TOOL_IMPORT_URL, { method: 'POST', headers, body: form })
+  } catch {
+    throw new ApiError(0, 'Verbindung zum Server fehlgeschlagen. Bitte prüfe deine Internetverbindung.')
+  }
+  const body = await res.json().catch(() => null)
+  if (!res.ok) {
+    const msg = (body as { error?: { message?: unknown } } | null)?.error?.message
+    throw new ApiError(
+      res.status,
+      typeof msg === 'string' && msg !== '' ? msg : 'Der CSV-Import ist fehlgeschlagen.',
+    )
+  }
+  return body as ToolImportResult
+}
+
+// TOOL_IMPORT_TEMPLATE_HEADER / TOOL_IMPORT_TEMPLATE_ROW are the exact header
+// + one example row (a sample row with an EMPTY schedule cell) the template
+// generates — they ARE the parser's accepted column names, so the template and
+// the parser can never drift.
+export const TOOL_IMPORT_TEMPLATE_HEADER = 'name,tool_type,schedule,inventory_number'
+export const TOOL_IMPORT_TEMPLATE_ROW = 'Bohrmaschine-01,Bohrmaschine,,'
+
+// toolImportTemplate returns the client-side downloadable template CSV (Story
+// 4.5, TEMPLATE_DOWNLOAD): the header + one example row. The Blob is
+// client-side (no server endpoint), matching the DSGVO JSON / status-PDF
+// download precedents.
+export function toolImportTemplate(): Blob {
+  return new Blob([`${TOOL_IMPORT_TEMPLATE_HEADER}\n${TOOL_IMPORT_TEMPLATE_ROW}\n`], {
+    type: 'text/csv;charset=utf-8',
+  })
+}
+
 // buildToolBody sends attributes ONLY when the input carries one (Story 4.4):
 // an ABSENT field is omitted so the server's leave-unchanged semantics apply —
 // an attributes-untouched save never wipes the stored JSONB. An EXPLICIT `{}`
@@ -584,4 +660,4 @@ export async function exportStatusReportPdf(filterCodes: readonly StatusCode[]):
   return res.blob()
 }
 
-export { ApiError, DASHBOARD_TOOLS_URL }
+export { ApiError, DASHBOARD_TOOLS_URL, TOOL_IMPORT_URL }

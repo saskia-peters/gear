@@ -445,7 +445,7 @@ func uuidSlice(ids []string) ([]pgtype.UUID, error) {
 }
 
 // isInventoryNumberCollision reports whether err is a UNIQUE-constraint
-// violation on the tools_inventory_number_key index (Story 4-3b): the 
+// violation on the tools_inventory_number_key index (Story 4-3b): the
 // auto-assigned number collided with a manually-entered one, or an update
 // reused a number held by ANOTHER row (active or archived — the Story 4.5
 // import backstop). The CreateTool retry loop branches on it; UpdateTool maps
@@ -457,3 +457,464 @@ func isInventoryNumberCollision(err error) bool {
 
 // Compile-time check: the repository satisfies the core ToolStore port.
 var _ core.ToolStore = (*Repository)(nil)
+
+// ============================================================================
+// Bulk CSV import (Story 4.5, FR-9/FR-23): the SET-PARTITIONED batch store
+// methods — ONE multi-row INSERT / UPDATE per set, each in its own
+// transaction, so a large file imports in ~2-4 round-trips + 2 commits no
+// matter the row count. A concurrent race is absorbed per-row (ON CONFLICT /
+// per-row fallback), never a wholesale abort.
+// ============================================================================
+
+// pgxScanner is the tiny Scan-only subset shared by pgx.Row and pgx.Rows, so
+// one row mapper serves the batch queries' rows AND the per-row QueryRow.
+type pgxScanner interface {
+	Scan(dest ...any) error
+}
+
+// toolFromBatchRow scans one 10-column Tool row (the batch INSERT/UPDATE
+// RETURNING + JOIN shape, identical to the sqlc row shapes) into the domain
+// value.
+func toolFromBatchRow(row pgxScanner) (*core.Tool, error) {
+	var id, toolTypeID, scheduleID pgtype.UUID
+	var name, toolTypeName string
+	var inventoryNumber string
+	var attributes []byte
+	var archivedAt pgtype.Timestamptz
+	var createdAt, updatedAt pgtype.Timestamptz
+	if err := row.Scan(&id, &name, &toolTypeID, &toolTypeName, &scheduleID, &inventoryNumber, &attributes, &archivedAt, &createdAt, &updatedAt); err != nil {
+		return nil, err
+	}
+	return toolFromToolRow(id, name, toolTypeID, toolTypeName, scheduleID, inventoryNumber, attributes, archivedAt, createdAt, updatedAt), nil
+}
+
+// createToolsBatchSQL is the set-partitioned CREATE: ONE multi-row INSERT over
+// the unnest'd arrays with `ON CONFLICT DO NOTHING` (any unique violation — a
+// concurrent name/inventory grab — skips ONLY that row) and `RETURNING` the
+// inserted rows JOINed with their type name. The inventory number honors an
+// EXPLICIT cell (COALESCE) and auto-assigns '<prefix> || zero-padded nextval'
+// in-SQL for an absent one — exactly the single-row CreateTool semantics,
+// batched. The sequence is consumed only for rows WITHOUT an explicit number
+// (COALESCE short-circuits nextval).
+const createToolsBatchSQL = `
+WITH ins AS (
+    INSERT INTO tools (name, tool_type_id, schedule_id, inventory_number, attributes)
+    SELECT n,
+           NULLIF(tt, '')::uuid,
+           NULLIF(sc, '')::uuid,
+           COALESCE(NULLIF(inv, ''), $1 || lpad(nextval('tools_inventory_number_seq')::text, $2, '0')),
+           attr::jsonb
+    FROM unnest($3::text[], $4::text[], $5::text[], $6::text[], $7::text[]) AS t(n, tt, sc, inv, attr)
+    ON CONFLICT DO NOTHING
+    RETURNING id, name, tool_type_id, schedule_id, inventory_number, attributes, archived_at, created_at, updated_at
+)
+SELECT i.id, i.name, i.tool_type_id, tt.name AS tool_type_name, i.schedule_id, i.inventory_number, i.attributes, i.archived_at, i.created_at, i.updated_at
+FROM ins i
+JOIN tool_types tt ON tt.id = i.tool_type_id
+`
+
+// updateToolsBatchSQL is the set-partitioned UPDATE: ONE multi-row
+// `UPDATE ... FROM (VALUES ...)` that applies ONLY the fields a row PROVIDES —
+// tool_type_id always; schedule_id / inventory_number via `CASE WHEN provided
+// THEN value ELSE tools.<col> END` (an absent cell PRESERVES the stored
+// value). attributes/name/archived_at are never in the SET — the absolute
+// no-data-loss rule (FR-9). The `archived_at IS NULL` guard keeps a
+// concurrently-archived tool out (its row simply misses the RETURNING → the
+// repo reports it per-index as a race).
+const updateToolsBatchSQL = `
+WITH input AS (
+    SELECT * FROM unnest(
+        $1::uuid[], $2::uuid[], $3::text[], $4::bool[], $5::text[], $6::bool[]
+    ) AS t(tool_id, tool_type_id, schedule_id, schedule_provided, inventory_number, inventory_provided)
+),
+updated AS (
+    UPDATE tools
+    SET tool_type_id = input.tool_type_id,
+        schedule_id = CASE WHEN input.schedule_provided THEN input.schedule_id::uuid ELSE tools.schedule_id END,
+        inventory_number = CASE WHEN input.inventory_provided THEN input.inventory_number ELSE tools.inventory_number END,
+        updated_at = now()
+    FROM input
+    WHERE tools.id = input.tool_id AND tools.archived_at IS NULL
+    RETURNING tools.id, tools.name, tools.tool_type_id, tools.schedule_id, tools.inventory_number, tools.attributes, tools.archived_at, tools.created_at, tools.updated_at
+)
+SELECT u.id, u.name, u.tool_type_id, tt.name AS tool_type_name, u.schedule_id, u.inventory_number, u.attributes, u.archived_at, u.created_at, u.updated_at
+FROM updated u
+JOIN tool_types tt ON tt.id = u.tool_type_id
+`
+
+// updateToolImportRowSQL is the per-row UPDATE used by the batch fallback (a
+// constraint violation isolated a row) — same no-data-loss CASE semantics, one
+// row at a time, inside the SAME transaction.
+const updateToolImportRowSQL = `
+WITH updated AS (
+    UPDATE tools
+    SET tool_type_id = $1,
+        schedule_id = CASE WHEN $2 THEN $3 ELSE tools.schedule_id END,
+        inventory_number = CASE WHEN $4 THEN $5 ELSE tools.inventory_number END,
+        updated_at = now()
+    WHERE tools.id = $6 AND tools.archived_at IS NULL
+    RETURNING id, name, tool_type_id, schedule_id, inventory_number, attributes, archived_at, created_at, updated_at
+)
+SELECT u.id, u.name, u.tool_type_id, tt.name AS tool_type_name, u.schedule_id, u.inventory_number, u.attributes, u.archived_at, u.created_at, u.updated_at
+FROM updated u
+JOIN tool_types tt ON tt.id = u.tool_type_id
+`
+
+// CreateToolsBatch persists a SET of new tools in ONE batched multi-row INSERT
+// (Story 4.5 set-partitioned execution): explicit inventory numbers honored,
+// absent ones auto-assigned in-SQL, `ON CONFLICT DO NOTHING` skipping ONLY the
+// colliding rows (NEW_BATCH_RACE — reported per-index as core.ErrToolImportCollision)
+// while the rest commit — the batch never aborts wholesale. A non-unique
+// constraint violation (an FK race: the type archived between the core check
+// and this insert) rolls back and falls back to per-row CreateTool calls in the
+// SAME transaction to isolate the offender. Returns the created tools (one per
+// successfully inserted input, in input order) + the per-index failure map.
+func (r *Repository) CreateToolsBatch(ctx context.Context, tools []*core.Tool, inventoryPrefix string, inventoryWidth int) ([]*core.Tool, map[int]error, error) {
+	if len(tools) == 0 {
+		return []*core.Tool{}, map[int]error{}, nil
+	}
+	names := make([]string, len(tools))
+	typeIDs := make([]string, len(tools))
+	scheduleIDs := make([]string, len(tools))
+	inventories := make([]string, len(tools))
+	attrs := make([]string, len(tools))
+	for i, t := range tools {
+		names[i] = t.Name
+		typeID, err := parseToolTypeID(t.ToolTypeID)
+		if err != nil {
+			return nil, nil, err
+		}
+		typeIDs[i] = typeID.String()
+		schedule, err := parseOptionalUUID(t.ScheduleID)
+		if err != nil {
+			return nil, nil, err
+		}
+		if schedule.Valid {
+			scheduleIDs[i] = schedule.String()
+		}
+		inventories[i] = t.InventoryNumber
+		raw, err := marshalToolAttributes(t.Attributes)
+		if err != nil {
+			return nil, nil, err
+		}
+		attrs[i] = string(raw)
+	}
+
+	tx, err := r.beginTx(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	created, failed, err := r.createToolsBatchInTx(ctx, tx, names, typeIDs, scheduleIDs, inventories, attrs, inventoryPrefix, inventoryWidth, tools)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, nil, err
+	}
+	return created, failed, nil
+}
+
+// createToolsBatchInTx runs the batch INSERT inside an open transaction. A
+// savepoint lets a non-unique constraint violation roll back ONLY the failed
+// statement and continue with the per-row fallback in the same transaction.
+func (r *Repository) createToolsBatchInTx(ctx context.Context, tx pgx.Tx, names, typeIDs, scheduleIDs, inventories, attrs []string, inventoryPrefix string, inventoryWidth int, tools []*core.Tool) ([]*core.Tool, map[int]error, error) {
+	if _, err := tx.Exec(ctx, "SAVEPOINT tools_import_create_batch"); err != nil {
+		return nil, nil, err
+	}
+	args := []any{inventoryPrefix, inventoryWidth, names, typeIDs, scheduleIDs, inventories, attrs}
+	rows, err := tx.Query(ctx, createToolsBatchSQL, args...)
+	if err != nil {
+		created, failed, fallbackErr := r.createToolsBatchFallback(ctx, tx, tools, inventoryPrefix, inventoryWidth)
+		return created, failed, fallbackErr
+	}
+	created := []*core.Tool{}
+	createdNames := map[string]struct{}{}
+	for rows.Next() {
+		t, scanErr := toolFromBatchRow(rows)
+		if scanErr != nil {
+			rows.Close()
+			created, failed, fallbackErr := r.createToolsBatchFallback(ctx, tx, tools, inventoryPrefix, inventoryWidth)
+			return created, failed, fallbackErr
+		}
+		created = append(created, t)
+		createdNames[t.Name] = struct{}{}
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		created, failed, fallbackErr := r.createToolsBatchFallback(ctx, tx, tools, inventoryPrefix, inventoryWidth)
+		return created, failed, fallbackErr
+	}
+	// Names are unique within the newSet (the core deduped within-file), so a
+	// missing RETURNING name = a row skipped by ON CONFLICT (a concurrent race).
+	failed := map[int]error{}
+	for i, t := range tools {
+		if _, ok := createdNames[t.Name]; !ok {
+			failed[i] = core.ErrToolImportCollision
+		}
+	}
+	return created, failed, nil
+}
+
+// createToolsBatchFallback rolls back to the savepoint and persists each row
+// individually in the SAME transaction (queries.WithTx) — the FK-race path: the
+// offending row surfaces its German error, the rest commit.
+func (r *Repository) createToolsBatchFallback(ctx context.Context, tx pgx.Tx, tools []*core.Tool, inventoryPrefix string, inventoryWidth int) ([]*core.Tool, map[int]error, error) {
+	if _, err := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT tools_import_create_batch"); err != nil {
+		return nil, nil, err
+	}
+	qt := r.queries.WithTx(tx)
+	created := []*core.Tool{}
+	failed := map[int]error{}
+	for i, t := range tools {
+		// Each row runs behind its OWN savepoint so a failing row (an FK race)
+		// does not abort the transaction for the rows after it.
+		if _, err := tx.Exec(ctx, "SAVEPOINT tools_import_row"); err != nil {
+			return nil, nil, err
+		}
+		typeID, err := parseToolTypeID(t.ToolTypeID)
+		if err != nil {
+			failed[i] = err
+			continue
+		}
+		schedule, err := parseOptionalUUID(t.ScheduleID)
+		if err != nil {
+			failed[i] = err
+			continue
+		}
+		rawAttrs, err := marshalToolAttributes(t.Attributes)
+		if err != nil {
+			failed[i] = err
+			continue
+		}
+		row, err := qt.CreateTool(ctx, CreateToolParams{
+			Name:            t.Name,
+			ToolTypeID:      typeID,
+			ScheduleID:      schedule,
+			Attributes:      rawAttrs,
+			InventoryPrefix: pgtype.Text{String: inventoryPrefix, Valid: inventoryPrefix != ""},
+			InventoryWidth:  int32(inventoryWidth),
+		})
+		if err != nil {
+			if _, rbErr := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT tools_import_row"); rbErr != nil {
+				return nil, nil, rbErr
+			}
+			failed[i] = err
+			continue
+		}
+		if _, rbErr := tx.Exec(ctx, "RELEASE SAVEPOINT tools_import_row"); rbErr != nil {
+			return nil, nil, rbErr
+		}
+		created = append(created, toolFromRow(row))
+	}
+	return created, failed, nil
+}
+
+// UpdateToolsBatch persists a SET of updates in ONE batched multi-row UPDATE
+// (Story 4.5 set-partitioned execution): tool_type_id always; schedule_id /
+// inventory_number only when the row PROVIDES them (CASE WHEN provided) — an
+// absent cell PRESERVES the stored value, attributes/name/archived_at are
+// NEVER touched (the absolute no-data-loss rule, FR-9). A constraint violation
+// (an explicit inventory colliding with an archived row, or an FK race)
+// rolls back the batch and applies each row individually in the SAME
+// transaction to isolate the offender. Returns the updated tools (one per
+// successful update, in input order) + a per-index error slice (nil = success).
+func (r *Repository) UpdateToolsBatch(ctx context.Context, updates []core.ToolImportUpdate) ([]*core.Tool, []error, error) {
+	if len(updates) == 0 {
+		return []*core.Tool{}, []error{}, nil
+	}
+	toolIDs := make([]string, len(updates))
+	typeIDs := make([]string, len(updates))
+	scheduleIDs := make([]string, len(updates))
+	scheduleProvided := make([]bool, len(updates))
+	inventories := make([]string, len(updates))
+	inventoryProvided := make([]bool, len(updates))
+	for i, u := range updates {
+		toolIDs[i] = u.ToolID
+		typeID, err := parseToolTypeID(u.ToolTypeID)
+		if err != nil {
+			return nil, nil, err
+		}
+		typeIDs[i] = typeID.String()
+		if u.ScheduleProvided {
+			schedule, err := parseOptionalUUID(u.ScheduleID)
+			if err != nil {
+				return nil, nil, err
+			}
+			scheduleIDs[i] = schedule.String()
+		}
+		scheduleProvided[i] = u.ScheduleProvided
+		inventories[i] = u.InventoryNumber
+		inventoryProvided[i] = u.InventoryProvided
+	}
+
+	tx, err := r.beginTx(ctx)
+	if err != nil {
+		return nil, nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	updated, errs, err := r.updateToolsBatchInTx(ctx, tx, toolIDs, typeIDs, scheduleIDs, scheduleProvided, inventories, inventoryProvided, updates)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, nil, err
+	}
+	return updated, errs, nil
+}
+
+// updateToolsBatchInTx runs the batch UPDATE inside an open transaction; a
+// constraint violation rolls back to the savepoint and applies each row
+// individually in the same transaction (updateToolsBatchFallback).
+func (r *Repository) updateToolsBatchInTx(ctx context.Context, tx pgx.Tx, toolIDs, typeIDs, scheduleIDs []string, scheduleProvided []bool, inventories []string, inventoryProvided []bool, updates []core.ToolImportUpdate) ([]*core.Tool, []error, error) {
+	if _, err := tx.Exec(ctx, "SAVEPOINT tools_import_update_batch"); err != nil {
+		return nil, nil, err
+	}
+	args := []any{toolIDs, typeIDs, scheduleIDs, scheduleProvided, inventories, inventoryProvided}
+	rows, err := tx.Query(ctx, updateToolsBatchSQL, args...)
+	if err != nil {
+		updated, errs, fallbackErr := r.updateToolsBatchFallback(ctx, tx, updates)
+		return updated, errs, fallbackErr
+	}
+	updatedByID := map[string]*core.Tool{}
+	for rows.Next() {
+		t, scanErr := toolFromBatchRow(rows)
+		if scanErr != nil {
+			rows.Close()
+			updated, errs, fallbackErr := r.updateToolsBatchFallback(ctx, tx, updates)
+			return updated, errs, fallbackErr
+		}
+		updatedByID[t.ID] = t
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		updated, errs, fallbackErr := r.updateToolsBatchFallback(ctx, tx, updates)
+		return updated, errs, fallbackErr
+	}
+	updated := []*core.Tool{}
+	errs := make([]error, len(updates))
+	for i, u := range updates {
+		if t, ok := updatedByID[u.ToolID]; ok {
+			updated = append(updated, t)
+			continue
+		}
+		// The UPDATE affected zero rows — the tool was ARCHIVED between the core
+		// list and this write (the WHERE archived_at IS NULL guard). A race →
+		// generic "bereits vergeben" row error, never an abort.
+		errs[i] = core.ErrToolImportCollision
+	}
+	return updated, errs, nil
+}
+
+// updateToolsBatchFallback rolls back to the savepoint and applies each update
+// individually in the SAME transaction: the offending row surfaces its German
+// error (duplicate inventory / referenced-gone), the rest commit.
+func (r *Repository) updateToolsBatchFallback(ctx context.Context, tx pgx.Tx, updates []core.ToolImportUpdate) ([]*core.Tool, []error, error) {
+	if _, err := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT tools_import_update_batch"); err != nil {
+		return nil, nil, err
+	}
+	updated := []*core.Tool{}
+	errs := make([]error, len(updates))
+	for i := range updates {
+		// Each row runs behind its OWN savepoint so a failing row (a unique
+		// violation / FK race) does not abort the transaction for the rows
+		// after it.
+		if _, err := tx.Exec(ctx, "SAVEPOINT tools_import_row"); err != nil {
+			return nil, nil, err
+		}
+		t, err := r.updateToolImportRow(ctx, tx, updates[i])
+		if err != nil {
+			if _, rbErr := tx.Exec(ctx, "ROLLBACK TO SAVEPOINT tools_import_row"); rbErr != nil {
+				return nil, nil, rbErr
+			}
+			errs[i] = err
+			continue
+		}
+		if _, rbErr := tx.Exec(ctx, "RELEASE SAVEPOINT tools_import_row"); rbErr != nil {
+			return nil, nil, rbErr
+		}
+		updated = append(updated, t)
+	}
+	return updated, errs, nil
+}
+
+// updateToolImportRow applies ONE update row (the per-row fallback) with the
+// same no-data-loss semantics. A UNIQUE violation on the inventory index maps
+// to the German duplicate-inventory 400 (the archived-number backstop); an FK
+// violation maps to the German referenced-gone 400; a missing/archived row is
+// a race (ErrToolImportCollision).
+func (r *Repository) updateToolImportRow(ctx context.Context, tx pgx.Tx, u core.ToolImportUpdate) (*core.Tool, error) {
+	toolID, err := parseOptionalUUID(u.ToolID)
+	if err != nil {
+		return nil, core.ErrToolImportCollision
+	}
+	typeID, err := parseToolTypeID(u.ToolTypeID)
+	if err != nil {
+		return nil, err
+	}
+	// When the schedule is NOT provided the value is ignored by the CASE (the
+	// stored value is preserved); a not-valid pgtype.UUID binds as SQL NULL so
+	// the statement never trips an empty-uuid cast error.
+	schedule, err := parseOptionalUUID(u.ScheduleID)
+	if err != nil {
+		return nil, err
+	}
+	row := tx.QueryRow(ctx, updateToolImportRowSQL, typeID, u.ScheduleProvided, schedule, u.InventoryProvided, u.InventoryNumber, toolID)
+	t, err := toolFromBatchRow(row)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, core.ErrToolImportCollision
+		}
+		if isUniqueViolation(err) {
+			if isInventoryNumberCollision(err) {
+				return nil, &core.InvalidToolError{Message: core.MsgToolInventoryNumberTaken}
+			}
+			return nil, &core.InvalidToolError{Message: core.MsgToolNameTaken}
+		}
+		if isForeignKeyViolation(err) {
+			return nil, &core.InvalidToolError{Message: core.MsgToolReferencedGone}
+		}
+		return nil, err
+	}
+	return t, nil
+}
+
+// FindToolCollisions is the Story 4.5 collision pre-check (the 4-3b backstop):
+// it reports which input names/inventory numbers are already held by ANY tools
+// row (ACTIVE AND ARCHIVED). Names match EXACTLY; inventory matches
+// case-insensitively (the caller passes the lowercased inputs; the returned
+// hit keys are lowercased too). Rows are filtered against the exact input sets
+// so a row matched on the OTHER column is never misreported.
+func (r *Repository) FindToolCollisions(ctx context.Context, names, inventoryNumbers []string) (map[string]struct{}, map[string]struct{}, error) {
+	nameHits := map[string]struct{}{}
+	inventoryHits := map[string]struct{}{}
+	if len(names) == 0 && len(inventoryNumbers) == 0 {
+		return nameHits, inventoryHits, nil
+	}
+	nameSet := make(map[string]struct{}, len(names))
+	for _, n := range names {
+		nameSet[n] = struct{}{}
+	}
+	lowerInv := make([]string, 0, len(inventoryNumbers))
+	invSet := make(map[string]struct{}, len(inventoryNumbers))
+	for _, inv := range inventoryNumbers {
+		l := strings.ToLower(inv)
+		lowerInv = append(lowerInv, l)
+		invSet[l] = struct{}{}
+	}
+	rows, err := r.queries.FindToolCollisions(ctx, FindToolCollisionsParams{Names: names, InventoryNumbers: lowerInv})
+	if err != nil {
+		return nil, nil, err
+	}
+	for _, row := range rows {
+		if _, ok := nameSet[row.Name]; ok {
+			nameHits[row.Name] = struct{}{}
+		}
+		if _, ok := invSet[row.InventoryNumber]; ok {
+			inventoryHits[row.InventoryNumber] = struct{}{}
+		}
+	}
+	return nameHits, inventoryHits, nil
+}

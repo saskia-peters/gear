@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { DASHBOARD_TOOLS_URL, submitInspection } from './tools.ts'
+import { DASHBOARD_TOOLS_URL, submitInspection, importToolsCsv, TOOL_IMPORT_URL } from './tools.ts'
 
 function stubOk(body: unknown) {
   const mock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => body })
@@ -95,6 +95,85 @@ describe('inspection submit client (Story 5.4)', () => {
     await expect(submitInspection('tool-1', { mode: 'pass_fail', result: 'pass', notes: '', items: [] })).rejects.toMatchObject({
       status: 500,
       message: 'Ein interner Fehler ist aufgetreten.',
+    })
+  })
+})
+
+describe('importToolsCsv multipart contract (Story 4.5)', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    localStorage.setItem('gear.session_token', 'sesstoken123')
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('POSTs /api/v1/admin/tools/import as multipart with ONLY the Authorization header and a FormData file body', async () => {
+    const mock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => ({ imported: 2, errors: [] }) })
+    vi.stubGlobal('fetch', mock)
+
+    const file = new File(['name,tool_type\nA,B\n'], 'tools.csv', { type: 'text/csv' })
+    const res = await importToolsCsv(file)
+
+    expect(res.imported).toBe(2)
+    expect(res.errors).toEqual([])
+
+    const [url, init] = mock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe(TOOL_IMPORT_URL)
+    expect(init.method).toBe('POST')
+    // The multipart boundary is browser-generated — the headers carry ONLY the
+    // bearer token, NEVER a JSON Content-Type.
+    const headers = new Headers(init.headers)
+    expect(headers.get('Authorization')).toBe('Bearer sesstoken123')
+    expect(headers.has('Content-Type')).toBe(false)
+    expect(headers.get('Content-Type')).toBeNull()
+    // The body is a FormData carrying the file under the `file` field.
+    expect(init.body).toBeInstanceOf(FormData)
+    const form = init.body as FormData
+    expect(form.get('file')).toBe(file)
+  })
+
+  it('round-trips a 200 result payload', async () => {
+    const mock = vi.fn().mockResolvedValue({
+      ok: true,
+      status: 200,
+      json: async () => ({ imported: 1, errors: [{ row: 3, reason: "Tool Type 'X' nicht gefunden" }] }),
+    })
+    vi.stubGlobal('fetch', mock)
+
+    const res = await importToolsCsv(new File(['name,tool_type\n'], 'tools.csv', { type: 'text/csv' }))
+    expect(res.imported).toBe(1)
+    expect(res.errors).toEqual([{ row: 3, reason: "Tool Type 'X' nicht gefunden" }])
+  })
+
+  it('surfaces a 403 as an ApiError with the German message (tools.manage-only, AD-6)', async () => {
+    const mock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 403,
+      json: async () => ({ error: { code: 'forbidden', message: 'Keine Berechtigung.' } }),
+    })
+    vi.stubGlobal('fetch', mock)
+
+    await expect(importToolsCsv(new File(['x'], 'tools.csv', { type: 'text/csv' }))).rejects.toMatchObject({
+      status: 403,
+      message: 'Keine Berechtigung.',
+    })
+  })
+
+  it('surfaces a 400 German reason (e.g. missing header)', async () => {
+    const mock = vi.fn().mockResolvedValue({
+      ok: false,
+      status: 400,
+      json: async () => ({
+        error: { code: 'invalid_request', message: "Die CSV-Datei muss die Spalten 'name' und 'tool_type' enthalten." },
+      }),
+    })
+    vi.stubGlobal('fetch', mock)
+
+    await expect(importToolsCsv(new File(['foo,bar\n'], 'tools.csv', { type: 'text/csv' }))).rejects.toMatchObject({
+      status: 400,
+      message: "Die CSV-Datei muss die Spalten 'name' und 'tool_type' enthalten.",
     })
   })
 })

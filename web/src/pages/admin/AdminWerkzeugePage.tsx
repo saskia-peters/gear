@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useState } from 'react'
+import { useCallback, useEffect, useRef, useState } from 'react'
 import { useLocation, useNavigate } from 'react-router-dom'
 import { Header } from '../../components/Header.tsx'
 import { AdminNav } from '../../components/AdminNav.tsx'
@@ -12,8 +12,10 @@ import {
   archiveToolType,
   listTools,
   archiveTool,
+  importToolsCsv,
+  toolImportTemplate,
 } from '../../auth/tools.ts'
-import type { ToolType, Tool } from '../../auth/tools.ts'
+import type { ToolType, Tool, ToolImportResult } from '../../auth/tools.ts'
 import { EmptyState } from '../../components/EmptyState.tsx'
 import styles from './AdminWerkzeugePage.module.css'
 
@@ -370,6 +372,14 @@ function ToolsTab({ onApiError, canManageTools }: { onApiError: (err: unknown) =
   const [busy, setBusy] = useState(false)
   const [feedback, setFeedback] = useState<Feedback>(null)
   const [sort, setSort] = useState<{ key: 'name' | 'typ' | 'inventory'; dir: SortDir }>({ key: 'name', dir: 'asc' })
+  // Bulk CSV import (Story 4.5, FR-9/FR-23): importBusy disables the import
+  // buttons while the upload runs; importResult renders the counts + per-row
+  // error list + the error-report/template downloads; importError surfaces a
+  // hard failure (a 400 German reason, e.g. a missing header).
+  const fileInputRef = useRef<HTMLInputElement>(null)
+  const [importBusy, setImportBusy] = useState(false)
+  const [importResult, setImportResult] = useState<ToolImportResult | null>(null)
+  const [importError, setImportError] = useState('')
 
   useEffect(() => {
     let cancelled = false
@@ -449,6 +459,74 @@ function ToolsTab({ onApiError, canManageTools }: { onApiError: (err: unknown) =
     }
   }
 
+  // runImport uploads the selected CSV (Story 4.5): the server imports valid
+  // rows in a set-partitioned batch and reports per-row errors; the result
+  // view shows the counts + the per-row error list, and the tool list is
+  // RELOADED so the newly created/updated tools appear immediately. The reload
+  // is BEST-EFFORT and isolated: the CSV was already persisted, so a reload
+  // failure must never be misattributed as an import failure — it falls back
+  // to a non-fatal stale-list note. A hard IMPORT failure (400 German, 403,
+  // network) surfaces inline.
+  async function runImport(file: File) {
+    setImportBusy(true)
+    setImportResult(null)
+    setImportError('')
+    try {
+      const result = await importToolsCsv(file)
+      setImportResult(result)
+      if (result.imported > 0) {
+        try {
+          const items = await listTools()
+          setTools(items)
+        } catch {
+          setFeedback({
+            kind: 'error',
+            message:
+              'Die Liste konnte nach dem Import nicht aktualisiert werden. Bitte lade die Seite neu.',
+          })
+        }
+      }
+    } catch (err) {
+      if (onApiError(err)) return
+      setImportError(
+        err instanceof Error && err.message !== '' ? err.message : 'Der CSV-Import ist fehlgeschlagen.',
+      )
+    } finally {
+      setImportBusy(false)
+    }
+  }
+
+  // downloadTemplate triggers the client-side template CSV download
+  // (TEMPLATE_DOWNLOAD): the header + one example row — the exact columns the
+  // parser accepts, so the template and the parser can never drift.
+  function downloadTemplate() {
+    const blob = toolImportTemplate()
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'werkzeuge-import-vorlage.csv'
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    // Defer the revoke so the browser's download initiation cannot race it.
+    window.setTimeout(() => URL.revokeObjectURL(url), 0)
+  }
+
+  // downloadErrorReport triggers the client-side error-report download built
+  // from the JSON result (no server-side stored report file, Story 4.5).
+  function downloadErrorReport() {
+    if (!importResult) return
+    const blob = new Blob([JSON.stringify(importResult, null, 2)], { type: 'application/json' })
+    const url = URL.createObjectURL(blob)
+    const a = document.createElement('a')
+    a.href = url
+    a.download = 'werkzeug-import-fehler.json'
+    document.body.appendChild(a)
+    a.click()
+    document.body.removeChild(a)
+    window.setTimeout(() => URL.revokeObjectURL(url), 0)
+  }
+
   return (
     <>
       {feedback && (
@@ -472,14 +550,84 @@ function ToolsTab({ onApiError, canManageTools }: { onApiError: (err: unknown) =
         </div>
       ) : (
         <>
-          {/* The create button is HIDDEN for a tool.edit-only holder (no
-              tools.manage, Story 4-3b). */}
+          {/* The create + import controls are HIDDEN for a tool.edit-only
+              holder (no tools.manage, Story 4-3b + 4.5). */}
           {canManageTools && (
-            <div className={styles.toolbar}>
-              <button type="button" className={styles.saveButton} onClick={() => navigate('/admin/werkzeuge/tools/neu', { state: { tab: 'werkzeuge' } })}>
-                Neues Werkzeug
-              </button>
-            </div>
+            <>
+              <div className={styles.toolbar}>
+                <button type="button" className={styles.saveButton} onClick={() => navigate('/admin/werkzeuge/tools/neu', { state: { tab: 'werkzeuge' } })}>
+                  Neues Werkzeug
+                </button>
+                <input
+                  ref={fileInputRef}
+                  type="file"
+                  accept=".csv,text/csv"
+                  className={styles.visuallyHidden}
+                  aria-label="CSV-Datei für den Import wählen"
+                  disabled={importBusy}
+                  onChange={(e) => {
+                    const file = e.target.files?.[0]
+                    e.target.value = ''
+                    if (file) void runImport(file)
+                  }}
+                />
+                <button
+                  type="button"
+                  className={styles.rowButton}
+                  disabled={importBusy}
+                  onClick={() => fileInputRef.current?.click()}
+                >
+                  CSV importieren
+                </button>
+                <button type="button" className={styles.rowButton} disabled={importBusy} onClick={downloadTemplate}>
+                  Vorlage herunterladen
+                </button>
+              </div>
+              <p className={styles.importGuide}>
+                CSV-Format: name (Pflicht), tool_type (Pflicht), schedule (optional), inventory_number
+                (optional). Spaltennamen sind unabhängig von Groß-/Kleinschreibung. Eine leere
+                schedule- oder inventory_number-Zelle lässt den bestehenden Wert unangetastet.
+              </p>
+              {importBusy && (
+                <p role="status" className={styles.importBusy}>
+                  CSV-Import läuft…
+                </p>
+              )}
+              {importError && (
+                <p role="alert" className={styles.feedbackError}>
+                  {importError}
+                </p>
+              )}
+              {importResult && (
+                <div className={styles.importResult}>
+                  <p
+                    role="status"
+                    className={importResult.errors.length > 0 ? styles.feedbackError : styles.feedbackSuccess}
+                  >
+                    {importResult.imported} Werkzeuge importiert, {importResult.errors.length} Fehler.
+                  </p>
+                  {importResult.errors.length > 0 && (
+                    <>
+                      <ul className={styles.importErrorList} aria-label="Importfehler">
+                        {importResult.errors.map((importErr) => (
+                          <li key={`${importErr.row}-${importErr.reason}`}>
+                            Zeile {importErr.row}: {importErr.reason}
+                          </li>
+                        ))}
+                      </ul>
+                      <div className={styles.rowActions}>
+                        <button type="button" className={styles.rowButton} onClick={downloadErrorReport}>
+                          Fehlerreport herunterladen
+                        </button>
+                        <button type="button" className={styles.rowButton} onClick={() => setImportResult(null)}>
+                          Erneut importieren
+                        </button>
+                      </div>
+                    </>
+                  )}
+                </div>
+              )}
+            </>
           )}
 
           {tools.length === 0 ? (

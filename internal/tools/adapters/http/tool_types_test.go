@@ -122,6 +122,10 @@ func (f *fakeService) ExportStatusReport(_ context.Context, _ string, _ []string
 	return []*toolscore.ReportRow{}, nil
 }
 
+func (f *fakeService) ImportTools(_ context.Context, _ string, _ []toolscore.ToolImportRow) (*toolscore.ToolImportResult, error) {
+	return &toolscore.ToolImportResult{Imported: 0, Errors: []toolscore.ToolImportError{}}, nil
+}
+
 // toolTypeGateway wraps the REAL ToolTypeRoutes() behind the same
 // RequireAnyPermission gate the composition root uses (tool_types.manage), with
 // a fake session validator + permission resolver.

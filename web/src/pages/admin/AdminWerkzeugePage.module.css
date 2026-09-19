@@ -524,3 +524,39 @@
   white-space: nowrap;
   border: 0;
 }
+
+/* Bulk CSV import surface (Story 4.5): the inline format guide, the busy hint
+   and the result view (imported/error counts + the per-row error list). */
+.importGuide {
+  margin: 0;
+  font-size: var(--gear-font-meta-size);
+  line-height: var(--gear-font-meta-line-height);
+  color: var(--gear-color-ink-secondary);
+}
+
+.importBusy {
+  margin: 0;
+  font-size: var(--gear-font-label-size);
+  color: var(--gear-color-ink-secondary);
+}
+
+.importResult {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-3);
+}
+
+.importErrorList {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-1);
+}
+
+.importErrorList li {
+  font-size: var(--gear-font-meta-size);
+  line-height: var(--gear-font-meta-line-height);
+  color: var(--gear-color-ink-primary);
+}

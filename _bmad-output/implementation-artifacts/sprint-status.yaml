@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-04-2026 19:40
-last_updated: 09-18-2026 23:00
+last_updated: 09-19-2026
 project: gear
 project_key: NOKEY
 tracking_system: file-system
@@ -78,7 +78,7 @@ development_status:
   4-3-tool-management: done
   4-3b-inventory-number-tool-edit: done
   4-4-flexible-attributes-on-tools-tool-types: done
-  4-5-bulk-csv-import: deferred
+  4-5-bulk-csv-import: review
   4-6-admin-catalog-lists-and-create-pages: done
   epic-4-retrospective: done
 

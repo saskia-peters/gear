@@ -396,6 +396,20 @@ FROM tools
 WHERE id = ANY($1::uuid[])
 ORDER BY id;
 
+-- name: FindToolCollisions :many
+-- The Story 4.5 collision pre-check (the 4-3b backstop): the input names /
+-- inventory numbers that are ALREADY held by ANY tools row — ACTIVE AND
+-- ARCHIVED (an archived tool keeps its name/inventory "taken", so an import
+-- row whose name/number an archived tool holds fails with a precise German row
+-- error before the batch). Names match EXACTLY (the DB UNIQUE(name) is
+-- case-sensitive); inventory matches CASE-INSENSITIVELY via the lower()
+-- functional index — the caller passes the lowercased input inventories. The
+-- repository filters the returned rows against the exact input sets so a
+-- row matched on the OTHER column is never misreported as a hit.
+SELECT name, lower(inventory_number) AS inventory_number
+FROM tools
+WHERE name = ANY(sqlc.arg('names')::text[]) OR lower(inventory_number) = ANY(sqlc.arg('inventory_numbers')::text[]);
+
 -- ============================================================================
 -- DSGVO account-deletion anonymization queries (Story 3.4, FR-24/AD-8): the
 -- per-reference rewrites behind the Tool module's DSGVODeletionPort. The

@@ -161,6 +161,19 @@ func (f *fakeToolTypeStore) GetToolWithTypeQualification(_ context.Context, _ st
 	return nil, ErrToolNotFound
 }
 
+// The combined store dependency (Story 4.5) requires the batch import surface
+// too. The tool-type fakes never exercise it — these stubs keep the shared
+// constructor compilable without touching tool-type tests.
+func (f *fakeToolTypeStore) CreateToolsBatch(_ context.Context, _ []*Tool, _ string, _ int) ([]*Tool, map[int]error, error) {
+	return []*Tool{}, map[int]error{}, nil
+}
+func (f *fakeToolTypeStore) UpdateToolsBatch(_ context.Context, _ []ToolImportUpdate) ([]*Tool, []error, error) {
+	return []*Tool{}, []error{}, nil
+}
+func (f *fakeToolTypeStore) FindToolCollisions(_ context.Context, _, _ []string) (map[string]struct{}, map[string]struct{}, error) {
+	return map[string]struct{}{}, map[string]struct{}{}, nil
+}
+
 // The combined store dependency (Story 5.3) requires the InspectionStore
 // surface too. The tool-type fakes never exercise the inspection surface —
 // these stubs keep the shared constructor compilable without touching

@@ -796,6 +796,10 @@ func (s *compToolTypeService) ExportStatusReport(_ context.Context, _ string, _ 
 	return []*toolscore.ReportRow{}, nil
 }
 
+func (s *compToolTypeService) ImportTools(_ context.Context, _ string, _ []toolscore.ToolImportRow) (*toolscore.ToolImportResult, error) {
+	return &toolscore.ToolImportResult{Imported: 0, Errors: []toolscore.ToolImportError{}}, nil
+}
+
 var _ toolports.Service = (*compToolTypeService)(nil)
 
 // newCompositionToolTypeRouter mirrors the main() mounts exactly for the Story

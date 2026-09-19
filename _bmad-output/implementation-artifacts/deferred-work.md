@@ -154,3 +154,8 @@ Triage output of review loops — real, non-story-blocking findings that are not
 ## Deferred from: code review (2026-09-14) of spec-5-6-out-of-service-reinstatement.md
 
 - No idempotency / client-supplied key on `POST /api/v1/tools/{id}/reinstatement`; the append-only row has no unique guard. In practice the OOS precondition already mitigates duplicates (a second reinstate on the now-serviceable tool answers the 400 not-OOS), and the SPA disables the button while busy; an explicit idempotency key would harden the API against retried 500s. Revisit if the retry story matures.
+
+## Deferred from: code review (2026-09-19) of spec-4-5-bulk-csv-import.md
+
+- The CSV-import update-batch `UPDATE … FROM (VALUES …)` has no covering postgres test for the "tool archived between the core list read and the write" race — the zero-row `RETURNING` branch reports `ErrToolImportCollision`. Reachable only under real concurrency; the constraint-violation fallback path is pinned, this race branch is not.
+- `createToolsBatchFallback` (the per-row retry used when the multi-row batch INSERT itself errors) is exercised by no postgres test — the batch tests hit only the ON CONFLICT and happy paths. Likely unreachable in practice with soft-deleted tool_types, but it is new untested batch code.

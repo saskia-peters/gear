@@ -32,6 +32,11 @@ type fakeToolStore struct {
 	// core resolved from the AppSettingsPort and passed into the store.
 	createdPrefix string
 	createdWidth  int
+	// batchCreateFail forces CreateToolsBatch to report a race collision
+	// (NEW_BATCH_RACE) for the given indices — lets a test pin the generic
+	// German "bereits vergeben" row error without simulating a real concurrent
+	// insert. The forced-failed rows are NOT created.
+	batchCreateFail map[int]error
 	inspections []*Inspection
 	status      *ToolInspectionStatus
 	statusErr   error
@@ -367,6 +372,135 @@ func (f *fakeToolStore) ArchiveTool(_ context.Context, id string) (*Tool, error)
 		}
 	}
 	return nil, ErrToolNotFound
+}
+
+// CreateToolsBatch emulates the repository's set-partitioned batch INSERT
+// (Story 4.5): explicit inventory numbers honored, absent ones auto-assigned;
+// a name/inventory already held by ANY row (active OR archived — the 4-3b
+// backstop) skips that row (ON CONFLICT DO NOTHING → core.ErrToolImportCollision)
+// while the rest insert.
+func (f *fakeToolStore) CreateToolsBatch(_ context.Context, tools []*Tool, inventoryPrefix string, inventoryWidth int) ([]*Tool, map[int]error, error) {
+	if f.createErr != nil {
+		return nil, nil, f.createErr
+	}
+	created := make([]*Tool, 0, len(tools))
+	failed := map[int]error{}
+	for i, tool := range tools {
+		if f.batchCreateFail != nil {
+			if err, ok := f.batchCreateFail[i]; ok {
+				failed[i] = err
+				continue
+			}
+		}
+		collides := false
+		for _, existing := range f.tools {
+			if strings.EqualFold(existing.Name, tool.Name) {
+				collides = true
+				break
+			}
+			if tool.InventoryNumber != "" && strings.EqualFold(existing.InventoryNumber, tool.InventoryNumber) {
+				collides = true
+				break
+			}
+		}
+		if collides {
+			failed[i] = ErrToolImportCollision
+			continue
+		}
+		persisted := *tool
+		persisted.ID = fmt.Sprintf("id-tool-%s", tool.Name)
+		if persisted.InventoryNumber == "" {
+			persisted.InventoryNumber = fmt.Sprintf("%s%0*d", inventoryPrefix, inventoryWidth, len(f.tools)+1)
+		}
+		f.tools = append(f.tools, &persisted)
+		created = append(created, &persisted)
+	}
+	return created, failed, nil
+}
+
+// UpdateToolsBatch emulates the repository's set-partitioned batch UPDATE
+// (Story 4.5): ONLY the provided fields are applied (tool_type_id always;
+// schedule/inventory when provided — an absent cell PRESERVES the stored
+// value); a provided inventory held by ANOTHER row (active or archived,
+// case-insensitive) is the German duplicate-inventory row error; an archived/
+// missing target is a race (ErrToolImportCollision).
+func (f *fakeToolStore) UpdateToolsBatch(_ context.Context, updates []ToolImportUpdate) ([]*Tool, []error, error) {
+	if f.updateErr != nil {
+		return nil, nil, f.updateErr
+	}
+	updated := make([]*Tool, 0, len(updates))
+	errs := make([]error, len(updates))
+	for i, u := range updates {
+		if u.InventoryProvided {
+			collides := false
+			for _, other := range f.tools {
+				if other.ID == u.ToolID {
+					continue
+				}
+				if strings.EqualFold(other.InventoryNumber, u.InventoryNumber) {
+					collides = true
+					break
+				}
+			}
+			if collides {
+				errs[i] = &InvalidToolError{Message: MsgToolInventoryNumberTaken}
+				continue
+			}
+		}
+		found := false
+		for j, existing := range f.tools {
+			if existing.ID != u.ToolID {
+				continue
+			}
+			if existing.ArchivedAt != nil {
+				errs[i] = ErrToolImportCollision
+				found = true
+				break
+			}
+			persisted := *existing
+			persisted.ToolTypeID = u.ToolTypeID
+			if u.ScheduleProvided {
+				persisted.ScheduleID = u.ScheduleID
+			}
+			if u.InventoryProvided {
+				persisted.InventoryNumber = u.InventoryNumber
+			}
+			f.tools[j] = &persisted
+			updated = append(updated, &persisted)
+			found = true
+			break
+		}
+		if !found {
+			errs[i] = ErrToolImportCollision
+		}
+	}
+	return updated, errs, nil
+}
+
+// FindToolCollisions emulates the repository's collision pre-check (Story 4.5,
+// the 4-3b backstop): exact-name + case-insensitive-inventory hits over ALL
+// rows (active AND archived).
+func (f *fakeToolStore) FindToolCollisions(_ context.Context, names, inventoryNumbers []string) (map[string]struct{}, map[string]struct{}, error) {
+	nameHits := map[string]struct{}{}
+	inventoryHits := map[string]struct{}{}
+	nameSet := map[string]struct{}{}
+	for _, n := range names {
+		nameSet[n] = struct{}{}
+	}
+	invSet := map[string]struct{}{}
+	for _, inv := range inventoryNumbers {
+		invSet[strings.ToLower(inv)] = struct{}{}
+	}
+	for _, t := range f.tools {
+		if _, ok := nameSet[t.Name]; ok {
+			nameHits[t.Name] = struct{}{}
+		}
+		lowerInv := strings.ToLower(t.InventoryNumber)
+		if _, ok := invSet[lowerInv]; ok {
+			inventoryHits[lowerInv] = struct{}{}
+		}
+	}
+	return nameHits, inventoryHits, nil
 }
 
 func (f *fakeToolStore) ListToolTypes(context.Context) ([]*ToolType, error) {

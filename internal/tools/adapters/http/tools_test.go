@@ -62,6 +62,15 @@ type fakeToolService struct {
 	reportNil         bool
 	lastReportFilters []string
 	reportCalls       int
+	// ImportTools fixture (Story 4.5): importResult is the returned payload;
+	// importErr drives the error rows; importNil simulates a nil-returning
+	// service path (a clean 500); lastImportRows captures the parsed rows;
+	// importCalls counts the invocations.
+	importResult   *toolscore.ToolImportResult
+	importErr      error
+	importNil      bool
+	lastImportRows []toolscore.ToolImportRow
+	importCalls    int
 }
 
 func (f *fakeToolService) ListToolTypes(context.Context, string) ([]*toolscore.ToolType, error) {
@@ -255,6 +264,24 @@ func (f *fakeToolService) ExportStatusReport(_ context.Context, _ string, filter
 		return []*toolscore.ReportRow{}, nil
 	}
 	return f.reportRows, nil
+}
+
+// ImportTools serves the Story 4.5 import surface from the in-memory fixture.
+// It captures the parsed rows so a test can assert the header→row mapping;
+// importResult/importErr drive the response rows.
+func (f *fakeToolService) ImportTools(_ context.Context, _ string, rows []toolscore.ToolImportRow) (*toolscore.ToolImportResult, error) {
+	f.importCalls++
+	if f.importErr != nil {
+		return nil, f.importErr
+	}
+	if f.importNil {
+		return nil, nil
+	}
+	f.lastImportRows = rows
+	if f.importResult != nil {
+		return f.importResult, nil
+	}
+	return &toolscore.ToolImportResult{Imported: len(rows), Errors: []toolscore.ToolImportError{}}, nil
 }
 
 var _ toolports.Service = (*fakeToolService)(nil)

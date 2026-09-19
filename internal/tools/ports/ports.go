@@ -75,6 +75,24 @@ type Service interface {
 	// the active list. Audited. Archiving an already-archived tool answers
 	// ErrToolNotFound.
 	ArchiveTool(ctx context.Context, actorID, id string) (*core.Tool, error)
+	// ImportTools persists a bulk CSV import (Story 4.5, FR-9/FR-23): the HTTP
+	// adapter has already parsed the uploaded bytes into structured rows; the
+	// core validates every row and partitions it into a NEW set (name not
+	// active) and an UPDATE set (name active), persisting EACH set as ONE
+	// batched store call in its own transaction (set-partitioned execution —
+	// ~2-4 round-trips + 2 commits, no row-by-row round-trips). An update row
+	// is the DIFF, not the target state: only provided fields are applied
+	// (attributes/name/archived_at never touched; an empty schedule/inventory
+	// cell PRESERVES the stored value — the absolute no-data-loss rule, FR-9).
+	// Invalid rows produce NO tool record and are reported per-row with the
+	// file line + a German reason; valid rows persist even when other rows
+	// fail. A FindToolCollisions pre-check (the 4-3b backstop) rejects
+	// archived-name/archived-inventory rows with precise German row errors
+	// before the batch; a concurrent race is absorbed by ON CONFLICT DO NOTHING
+	// → generic "bereits vergeben" row error, never an abort. Audited ONCE per
+	// call (`tool.import`). Gated `tools.manage`-ONLY (a tool.edit-only holder
+	// gets the uniform 403, AD-6).
+	ImportTools(ctx context.Context, actorID string, rows []core.ToolImportRow) (*core.ToolImportResult, error)
 	// StartInspection is the qualification-gated inspection start (Story 5.1,
 	// FR-11/AD-7): it resolves the tool + its type's required_qualification_id
 	// (intra-module store read) and — when the type requires a qualification —
