@@ -88,4 +88,5 @@ up -d`, and waits for `/healthz`.
   (FR-29/AD-15).
 - **TLS (NFR-S1):** terminate TLS at the edge/CDN layer (Cloudflare or bunny.net,
   spine candidate) in front of the app port; the VM firewall + compose are ready
-  for it (a later story wires the edge).
+  for it. Plain-language setup for both providers (with our `sassisuperdomain.de`
+  domain) is documented in `docs/docs/planning/deployment-ionos.md` §6.

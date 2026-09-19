@@ -186,7 +186,70 @@ The database stays untouched; only the app is replaced.
 
 ---
 
-## 6. The exact commands (for the technically minded)
+## 6. Putting it on the internet: bunny.net or Cloudflare (with sassisuperdomain.de)
+
+The small IONOS server gives us the running app, but for a professional, trustworthy website we put a **"front door"** in front of it. A service such as **bunny.net** or **Cloudflare** sits between the visitors and our server and provides three things the app alone does not:
+
+- **TLS / HTTPS** — the padlock in the browser. All traffic between the visitor and the app is encrypted (NFR-S1: TLS 1.2 or higher).
+- **Caching** — static parts of the site (the G.E.A.R. website files) are stored "close" to the visitor, so pages load faster and the small server does less work.
+- **Protection** — basic DDoS and abuse filtering, so a malicious flood of requests does not knock the app over.
+
+We already own the domain **`sassisuperdomain.de`** — this section explains exactly what is needed to point it at the app through such a service.
+
+```mermaid
+flowchart LR
+    U["🌍 Visitors"] -->|https://gear.sassisuperdomain.de| E["🛡️ Edge / CDN (bunny.net or Cloudflare)"]
+    E -->|HTTPS| A["🖥️ IONOS server — app"]
+    A -->|internal only| D["🗄️ Database (private)"]
+    E -->|DNS| R["🌐 sassisuperdomain.de DNS"]
+```
+
+### What we need regardless of provider
+
+1. **A subdomain** — e.g. `gear.sassisuperdomain.de` — so the app lives at a clean address and the edge/CDN can be pointed at it.
+2. **Access to the domain's DNS** — the registrar (or a DNS provider) must allow us to add the records the edge service gives us. Because we own `sassisuperdomain.de`, this is under our control.
+3. **The app's public address** — the IONOS server's IP (and port 8080 by default). The edge service forwards traffic to this address.
+4. **The app must know its own public address** — so password-reset links point to the real site. We set `GEAR_APP_ORIGIN=https://gear.sassisuperdomain.de` on the server (`deploy/startup.sh` reads it). This is already built into the deployment.
+
+### With bunny.net
+
+bunny.net is a simple, affordable CDN with a built-in "Pull Zone". The steps:
+
+1. **Create an account and a Pull Zone** — in the bunny.net console, create a **Pull Zone** for `gear.sassisuperdomain.de` with the **Origin URL** set to the IONOS server (`http://<ionos-ip>:8080`). This tells bunny.net where to fetch the app.
+2. **Get a TLS certificate** — bunny.net issues a free Let's Encrypt certificate automatically for the zone.
+3. **Add a CNAME record in DNS** — in `sassisuperdomain.de`'s DNS, add a CNAME from `gear` to the Pull Zone address bunny.net shows (e.g. `gear.b-cdn.net`). bunny.net's console gives you the exact record to create.
+4. **Done** — within minutes `https://gear.sassisuperdomain.de` shows the app, encrypted and cached.
+
+### With Cloudflare
+
+Cloudflare is a very widely used, free-forever edge. The steps:
+
+1. **Add the domain to a Cloudflare account** — enter `sassisuperdomain.de`; Cloudflare scans and imports the existing DNS records.
+2. **Switch the domain's name servers** — the registrar for `sassisuperdomain.de` must point the domain's name servers to the two Cloudflare name servers Cloudflare shows (this is the one step that touches the registrar). After that, Cloudflare manages DNS.
+3. **Add a DNS record** — an `A` record for `gear` pointing to the IONOS server's IP (proxied = the orange cloud icon on, so traffic goes through Cloudflare).
+4. **Enable HTTPS** — Cloudflare's "Flexible/Full" SSL setting issues a free certificate; with **Full** it also encrypts the hop between Cloudflare and the IONOS server.
+5. **Done** — `https://gear.sassisuperdomain.de` is served through Cloudflare with TLS, caching, and protection.
+
+### What changes on our side
+
+- The IONOS server keeps listening on its port; the edge service fronts it.
+- `GEAR_APP_ORIGIN` on the server is set to `https://gear.sassisuperdomain.de` (already supported by `deploy/startup.sh`).
+- The firewall on the IONOS server can be tightened later to only accept traffic from the edge provider's IP ranges — a hardening step we can do after the edge is live.
+
+### Which to choose
+
+| | bunny.net | Cloudflare |
+|---|---|---|
+| **Cost** | Cheap, pay-as-you-go CDN | Generous free tier |
+| **Setup** | Pull Zone + one DNS CNAME | Add domain + change name servers (touches the registrar once) |
+| **Caching / CDN** | Excellent, purpose-built | Excellent, plus WAF / bot protection |
+| **Best for** | Simple, low-cost CDN in front of our server | Maximum protection + a "set and forget" free edge |
+
+Both work with the same deployment — this decision does not affect the app, the registry, or the server; it is purely the "front door" configuration.
+
+---
+
+## 7. The exact commands (for the technically minded)
 
 All of this runs with **Podman** (a free, open-source container tool already installed on the dev machines — no Docker license needed).
 
