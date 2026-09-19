@@ -183,3 +183,9 @@ Volunteers perform safety-critical inspections and manage availability. Qualifie
 Users see the current operational truth, and leadership reviews and exports it. All authenticated users view a color-coded status dashboard (Red/Orange/Green, derived) filterable by status; Fuehrung/Admin export the current filtered view as PDF and inspect full per-tool inspection history.
 **FRs covered:** FR-16, FR-17, FR-18
 **Implementation notes:** Status derived on read via single shared clock (AD-4, AD-5); PDF export reflects active filters (FR-17); history reverse-chronological with per-initiation details (FR-18); gated by dashboard.view, report.export, inspection.history.view. UX: UX-DR5/6/7/8/9/10 (dashboard summary counts + filter chips, PDF export current view, history).
+
+### Epic 7: Hardening & Deploy
+**Stories:** [epics/epic-07-hardening-deploy.md](epics/epic-07-hardening-deploy.md)
+G.E.A.R. becomes releasable and dependable. The CI pipeline gates every push/PR (lint + tests + docs + dependency audit); the Go binary serves the production SPA; the cold-start seed and the full DB-backed suite are verified by integration tests that run isolated in parallel; the two append-only write paths are hardened with idempotency keys; the app deploys to staging (Google Cloud Run, scaled to zero) and production (self-hosted single host, compose) with TLS, managed secrets, and a tested backup/restore procedure.
+**FRs covered:** none new (operational)
+**Implementation notes:** The deploy epic/site the spine defers to (NFR-R1–R4, NFR-S1/S4, NFR-M2/M3, AD-13 dual-admin bootstrap). Firm spine choices: single `justfile`; OpenTofu IaC; Cloud Run staging (min_instance_count = 0); production self-hosted compose; edge/CDN = Cloudflare or bunny.net. Pulls the deferred-work items: CI pipeline, production SPA serving, integration/seed assertions, parallel-DB test isolation, idempotency keys, backup/restore.

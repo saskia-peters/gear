@@ -100,6 +100,15 @@ development_status:
   6-3b-tool-details-track-record: done
   6-3c-tool-details-condensed-back: done
   epic-6-retrospective: done
+
+  epic-7: backlog
+  7-1-ci-pipeline: backlog
+  7-2-production-serving: backlog
+  7-3-integration-seed-assertions: backlog
+  7-4-parallel-db-test-isolation: backlog
+  7-5-idempotency-hardening: backlog
+  7-6-deployment-staging-prod: backlog
+  7-7-backup-restore-procedure: backlog
 action_items:
   - id: "epic-1-retro-item-1-extract-a-shared-authheaders-helper-into"
     epic: 1
