@@ -109,6 +109,7 @@ development_status:
   7-5-idempotency-hardening: backlog
   7-6-deployment-staging-prod: review
   7-7-backup-restore-procedure: backlog
+  7-8-performance-testing: backlog
 action_items:
   - id: "epic-1-retro-item-1-extract-a-shared-authheaders-helper-into"
     epic: 1

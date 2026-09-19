@@ -135,3 +135,28 @@ So that the Ortsverband can recover from loss (NFR-R3).
 **Given** a documented restore procedure,
 **When** it is followed,
 **Then** a backup can be restored and verified (tested from initial deployment, NFR-R3).
+### Story 7.8: Performance Testing
+
+As an operator,
+I want to verify the deployed G.E.A.R. app performs well at the Ortsverband's expected scale,
+So that a single small server (e.g. the IONOS Basic Cube XS, 1 vCPU / 2 GB) serves the fleet comfortably (NFR-R4).
+
+**Assumed target scale:** ~300 tools across ~25 tool types, ~20 active users, plus the periodic "everyone inspects on the same evening" spike during inspections.
+
+**Acceptance Criteria:**
+
+**Given** a deployed instance seeded with 300 tools in 25 tool types and 20 active users,
+**When** the dashboard, tool list, inspection history and status report are loaded,
+**Then** each page answers within a defined budget on the small-server profile (e.g. dashboard < 500 ms p95, history/report < 1 s p95 at 20 concurrent users) (NFR-R4, per-page budget in the story spec).
+
+**Given** the N+1 read paths the epic already documents (per-tool `GetToolInspectionStatus` on the dashboard, per-tool latest-inspection on the report),
+**When** they run at 300 tools,
+**Then** the measured result is recorded and compared against the accepted-at-V1 note, with a batched-query follow-up decision if the budget is missed.
+
+**Given** a load test (e.g. `k6` or `hey`) against the deployed app,
+**When** it simulates ~20 concurrent active users doing mixed actions (browse dashboard, open tool details/history, submit an inspection),
+**Then** the results (latency p50/p95, error rate, DB CPU/RAM) are captured in a reproducible performance report in the repo.
+
+**Given** the measured results,
+**When** a budget is missed,
+**Then** a documented mitigation is either implemented (e.g. batched dashboard status reads) or explicitly deferred with a tracked action item (NFR-M2 test evidence).

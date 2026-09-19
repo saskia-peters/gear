@@ -15,6 +15,7 @@ G.E.A.R.'s functional surface is complete (account + auth, permissions, config/c
 - Story 7.5: Idempotency Hardening
 - Story 7.6: Deployment — Staging + Production
 - Story 7.7: Backup & Restore Procedure
+- Story 7.8: Performance Testing
 
 ## Requirements & Constraints
 
@@ -29,6 +30,7 @@ G.E.A.R.'s functional surface is complete (account + auth, permissions, config/c
 - **AD-13 (Dual-admin bootstrap):** exactly two `admin` accounts seeded at deployment; credentials out-of-band; the migration + bootstrap procedure is documented and executable.
 - **Test isolation:** cross-package DB contention (admin/tools/cmd suites sharing `Test-%`/`test-%` rows and the shared `tools_inventory_number_seq`) must be resolved so default parallel `go test ./...` is trustworthy — per-suite test schemas, unique-row/sequence namespacing, or equivalent.
 - **Idempotency:** `POST /api/v1/tools/{id}/inspection` and `POST /api/v1/tools/{id}/reinstatement` must be at-most-once via a client-supplied idempotency key (append-only rows have no unique guard today).
+- **Performance target (Story 7.8):** at the Ortsverband scale (~300 tools in 25 tool types, ~20 active users, plus inspection-evening spikes) the deployed app must meet per-page budgets on a single small server (e.g. IONOS Basic Cube XS, 1 vCPU / 2 GB). The known N+1 read paths (per-tool `GetToolInspectionStatus` on the dashboard, per-tool latest-inspection on the report) are measured and either optimized (batched queries) or explicitly deferred with a tracked item.
 
 ## Technical Decisions
 
