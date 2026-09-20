@@ -29,7 +29,7 @@ context:
   - The role→permission matrix matches the documented base series: `helfende` = dashboard.view + inspection.submit; `schirrmeister` = + tools.manage + tool_types.manage + inspection.history.view + users.view + users.qualifications.manage + tool.edit; `fuehrende` = schirrmeister + report.export + tool.reinstate; `admin` = all 25 codes. (Bold "uniquely-owned" codes per the spine are covered implicitly by exact-set assertions.)
   - Exactly 2 admin accounts: `admin.1@gear.local` and `admin.2@gear.local`, both `active`, both holding the `admin` base role (FR-27/AD-13).
 - **justfile recipe:** `just test-integration` — brings the DB up (reuses `db-wait`/`migrate-up` if the dev DB is down), then runs `go test -tags integration ./internal/user/adapters/postgres/` (the seed test's package) with `DATABASE_URL` set. Idempotent, mirrors the existing recipe style.
-- **CI:** `.github/workflows/ci.yml` adds a step that runs `just test-integration` after the parallel Go gate (the seed assertions use the same postgres service; they must RUN, not skip — a skip in CI is a failure, matching the 7.1 DB-skip guard).
+- **CI:** `.github/workflows/ci.yml` adds a step that runs the integration-tagged tests directly (`go test -tags integration -v ./internal/user/adapters/postgres/`) after the parallel Go gate — `just test-integration` is for local use only (its `db-wait`→`podman-check` dependency can't run on CI runners, which have no podman; the Postgres is the services container, exactly like the migrate step in 7.1). The seed assertions use the same postgres service; they must RUN, not skip — a skip in CI is a failure, matching the 7.1 DB-skip guard.
 
 **Ask First:**
 - None (the deferred-work recommendation is explicit: `//go:build integration` + `just test-integration`, run in CI).
@@ -61,7 +61,7 @@ context:
 - `internal/user/adapters/postgres/users_admin_repo.go` -- `ListUsers` (`:33`), `ListUserGroupNamesByUsers` (`:61`), `GetUserDetail` (`:86`) for the admin accounts' role membership.
 - `internal/user/core/roles.go` -- the base-role constants (`RoleCreatePermission` etc.) + the role-group domain types the assertions compare against.
 - `justfile` -- add `test-integration` recipe (db-wait → `go test -tags integration ./internal/user/adapters/postgres/`).
-- `.github/workflows/ci.yml` -- add a `just test-integration` step after the Go gate; treat a skip as a failure (grep the output for "skipping").
+- `.github/workflows/ci.yml` -- add a step running the integration-tagged tests directly after the Go gate (`just test-integration` needs podman, absent on CI); treat a skip or a vanished suite as a failure (grep the output).
 - Tests: the seed assertions are themselves the verification (plus a negative check that a deliberately-broken expectation fails).
 
 ## Tasks & Acceptance
@@ -79,7 +79,7 @@ context:
 
 ## Spec Change Log
 
-- **2026-09-19, review patches (review 1):** (a) the seed test now asserts EXACTLY 2 admin-role holders (an extra seeded admin no longer ships undetected); (b) the permission catalog is pinned against an INDEPENDENT 25-code list, not derived from the same matrix the role test uses (a code dropped from both can no longer pass silently); (c) the catalog label check uses TrimSpace and the correct field (the repo's `ListAllPermissions` returns `Label`, not `Description`); (d) the CI step now runs `just test-integration` (no duplicated package list — the CI==justfile principle) and fails if the seed suite did NOT run (grep for `TestIntegrationSeed`) or skipped; (e) the step uses `set -o pipefail` so a failing `go test` is not masked by `tee`; (f) stdlib `slices.Sorted`/`slices.Equal`/`maps.Keys` replace bespoke helpers (no tag-scope collision); `core.StateActive` replaces a hardcoded `"active"`; duplicate base-role detection added; trailing newlines added; (g) the recipe/CI run only the user package (the only integration suite) with `-v`; (h) the spec's catalog count corrected to 25 (the spine matrix's 22 + three later additions) — the pre-existing `23-code`/`24-code` comments in `groups.go`/`roles.go` are stale and deferred, not this story's code. KEEP: exact-permission-set matrix assertions and the fresh-schema `dbtest` approach.
+- **2026-09-19, review patches (review 1):** (a) the seed test now asserts EXACTLY 2 admin-role holders (an extra seeded admin no longer ships undetected); (b) the permission catalog is pinned against an INDEPENDENT 25-code list, not derived from the same matrix the role test uses (a code dropped from both can no longer pass silently); (c) the catalog label check uses TrimSpace and the correct field (the repo's `ListAllPermissions` returns `Label`, not `Description`); (d) the CI step runs the integration-tagged tests directly (`just test-integration` needs podman, absent on CI — same constraint as the 7.1 migrate step) and fails if the seed suite did NOT run (grep for `TestIntegrationSeed`) or skipped; (e) the step uses `set -o pipefail` so a failing `go test` is not masked by `tee`; (f) stdlib `slices.Sorted`/`slices.Equal`/`maps.Keys` replace bespoke helpers (no tag-scope collision); `core.StateActive` replaces a hardcoded `"active"`; duplicate base-role detection added; trailing newlines added; (g) the recipe/CI run only the user package (the only integration suite) with `-v`; (h) the spec's catalog count corrected to 25 (the spine matrix's 22 + three later additions) — the pre-existing `23-code`/`24-code` comments in `groups.go`/`roles.go` are stale and deferred, not this story's code. KEEP: exact-permission-set matrix assertions and the fresh-schema `dbtest` approach.
 
 ## Design Notes
 
@@ -117,5 +117,5 @@ context:
 
 - `just test-integration` — brings the DB up, runs the tagged suite with -v (single source of truth for CI)
   [`justfile:168`](../../justfile#L168)
-- CI step calls the recipe and fails if the seed suite did not RUN or skipped (pipefail + positive grep)
+- CI step runs the tagged tests directly (no podman on runners) and fails if the seed suite did not RUN or skipped (pipefail + positive grep)
   [`ci.yml:118`](../../.github/workflows/ci.yml#L118)

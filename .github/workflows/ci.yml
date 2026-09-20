@@ -117,13 +117,15 @@ jobs:
 
       - name: Integration & seed assertions (Story 7.3)
         # Pins the cold-start seed (base roles, permission catalog, AD-12
-        # matrix, dual-admin accounts) against a fresh migrated schema via the
-        # same `just test-integration` recipe a maintainer runs (no drift). The
-        # step fails if the seed assertions do not RUN — a vanished suite or a
-        # silent skip is a seed-regression signal.
+        # matrix, dual-admin accounts) against a fresh migrated schema.
+        # `just test-integration` depends on `podman-check`/db-wait (podman is
+        # not on CI runners — the Postgres is the services container), so this
+        # step runs the tagged tests directly, exactly like the migrate step.
+        # The step fails if the seed assertions do not RUN — a vanished suite
+        # or a silent skip is a seed-regression signal.
         run: |
           set -o pipefail
-          just test-integration 2>&1 | tee /tmp/integration.log
+          go test -tags integration -v ./internal/user/adapters/postgres/ 2>&1 | tee /tmp/integration.log
           if ! grep -q 'TestIntegrationSeed' /tmp/integration.log; then
             echo "::error::integration/seed assertions did not run (suite vanished?)"
             exit 1
