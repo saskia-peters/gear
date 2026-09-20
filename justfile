@@ -160,6 +160,14 @@ test:
     go test ./cmd/... ./internal/...
     npm --prefix web run test
 
+# Run the DB-backed INTEGRATION tests (Story 7.3): the cold-start seed
+# assertions (+ any future //go:build integration suites). Brings the dev DB
+# up (idempotent) then runs the tagged tests against a FRESH migrated schema
+# (dbtest applies the migrations itself — no migrate-up needed). Not part of
+# `just test` — these couple to a live DB by design (NFR-R2/AD-12/AD-13).
+test-integration: db-wait
+    go test -tags integration -v ./internal/user/adapters/postgres/
+
 # Vet all Go packages
 vet:
     go vet ./cmd/... ./internal/...
