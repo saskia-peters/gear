@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest'
-import { DASHBOARD_TOOLS_URL, submitInspection, importToolsCsv, TOOL_IMPORT_URL } from './tools.ts'
+import { DASHBOARD_TOOLS_URL, submitInspection, reinstateTool, importToolsCsv, TOOL_IMPORT_URL } from './tools.ts'
 
 function stubOk(body: unknown) {
   const mock = vi.fn().mockResolvedValue({ ok: true, status: 200, json: async () => body })
@@ -36,14 +36,18 @@ describe('inspection submit client (Story 5.4)', () => {
     vi.unstubAllGlobals()
   })
 
-  it('submitInspection POSTs /api/v1/tools/{id}/inspection with the bearer token and the pass_fail body, and casts the response', async () => {
+  it('submitInspection POSTs /api/v1/tools/{id}/inspection with the bearer token, the pass_fail body AND the client idempotency_key, and casts the response', async () => {
     const mock = stubOk(submitOk('green'))
-    const res = await submitInspection('tool-1', {
-      mode: 'pass_fail',
-      result: 'pass',
-      notes: 'Alles in Ordnung.',
-      items: [],
-    })
+    const res = await submitInspection(
+      'tool-1',
+      {
+        mode: 'pass_fail',
+        result: 'pass',
+        notes: 'Alles in Ordnung.',
+        items: [],
+      },
+      '11111111-1111-1111-1111-111111111111',
+    )
     expect(res.inspection.overall_result).toBe('pass')
     expect(res.inspection.mode).toBe('pass_fail')
     expect(res.inspection.items).toEqual([])
@@ -62,12 +66,13 @@ describe('inspection submit client (Story 5.4)', () => {
       result: 'pass',
       notes: 'Alles in Ordnung.',
       items: [],
+      idempotency_key: '11111111-1111-1111-1111-111111111111',
     })
   })
 
   it('submitInspection encodes the tool id into the path', async () => {
     const mock = stubOk(submitOk('green'))
-    await submitInspection('tool/with special chars', { mode: 'pass_fail', result: 'pass', notes: '', items: [] })
+    await submitInspection('tool/with special chars', { mode: 'pass_fail', result: 'pass', notes: '', items: [] }, '11111111-1111-1111-1111-111111111111')
     const url = mock.mock.calls[0][0] as string
     expect(url).toBe(`${DASHBOARD_TOOLS_URL}/tool%2Fwith%20special%20chars/inspection`)
   })
@@ -79,7 +84,7 @@ describe('inspection submit client (Story 5.4)', () => {
       json: async () => ({ error: { code: 'invalid_request', message: 'Bitte wähle ein gültiges Prüfergebnis.' } }),
     })
     vi.stubGlobal('fetch', mock)
-    await expect(submitInspection('tool-1', { mode: 'pass_fail', result: 'fail', notes: '', items: [] })).rejects.toMatchObject({
+    await expect(submitInspection('tool-1', { mode: 'pass_fail', result: 'fail', notes: '', items: [] }, '11111111-1111-1111-1111-111111111111')).rejects.toMatchObject({
       status: 400,
       message: 'Bitte wähle ein gültiges Prüfergebnis.',
     })
@@ -92,9 +97,53 @@ describe('inspection submit client (Story 5.4)', () => {
       json: async () => ({ error: { code: 'internal_error', message: 'Ein interner Fehler ist aufgetreten.' } }),
     })
     vi.stubGlobal('fetch', mock)
-    await expect(submitInspection('tool-1', { mode: 'pass_fail', result: 'pass', notes: '', items: [] })).rejects.toMatchObject({
+    await expect(submitInspection('tool-1', { mode: 'pass_fail', result: 'pass', notes: '', items: [] }, '11111111-1111-1111-1111-111111111111')).rejects.toMatchObject({
       status: 500,
       message: 'Ein interner Fehler ist aufgetreten.',
+    })
+  })
+})
+
+describe('reinstate client (Story 5.6 + Story 7.5)', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    localStorage.setItem('gear.session_token', 'sesstoken123')
+  })
+
+  afterEach(() => {
+    vi.unstubAllGlobals()
+  })
+
+  it('reinstateTool POSTs /api/v1/tools/{id}/reinstatement with the reason AND the client idempotency_key', async () => {
+    const mock = stubOk({
+      status: { status: 'green', next_due: '2027-01-01T00:00:00Z' },
+      message: 'Das Gerät wurde wiederhergestellt.',
+    })
+    const res = await reinstateTool('tool-1', 'Ersatzteil eingetroffen', '22222222-2222-2222-2222-222222222222')
+    expect(res.message).toBe('Das Gerät wurde wiederhergestellt.')
+    expect(res.status.status).toBe('green')
+
+    const [url, init] = mock.mock.calls[0] as [string, RequestInit]
+    expect(url).toBe(`${DASHBOARD_TOOLS_URL}/tool-1/reinstatement`)
+    expect(init.method).toBe('POST')
+    expect(JSON.parse(init.body as string)).toEqual({
+      reason: 'Ersatzteil eingetroffen',
+      idempotency_key: '22222222-2222-2222-2222-222222222222',
+    })
+  })
+
+  it('reinstateTool surfaces a 400 as an ApiError with the server German reason', async () => {
+    vi.stubGlobal(
+      'fetch',
+      vi.fn().mockResolvedValue({
+        ok: false,
+        status: 400,
+        json: async () => ({ error: { code: 'invalid_request', message: 'Das Gerät ist nicht außer Betrieb.' } }),
+      }),
+    )
+    await expect(reinstateTool('tool-1', 'x', '22222222-2222-2222-2222-222222222222')).rejects.toMatchObject({
+      status: 400,
+      message: 'Das Gerät ist nicht außer Betrieb.',
     })
   })
 })

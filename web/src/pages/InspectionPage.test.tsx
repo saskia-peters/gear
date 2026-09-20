@@ -423,12 +423,15 @@ describe('InspectionPage UX foundation (Story 5.2)', () => {
     fireEvent.click(button)
     await act(async () => {})
 
-    // The real client POSTs { mode: 'pass_fail', result, notes, items: [] } to
-    // /api/v1/tools/{id}/inspection (FR-13: identity/timestamp/result/notes).
+    // The real client POSTs { mode: 'pass_fail', result, notes, items: [],
+    // idempotency_key } to /api/v1/tools/{id}/inspection (FR-13:
+    // identity/timestamp/result/notes; Story 7.5: the client-supplied key).
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(url).toBe('/api/v1/tools/id-w1/inspection')
     expect(init.method).toBe('POST')
-    expect(JSON.parse(init.body as string)).toEqual({ mode: 'pass_fail', result: 'pass', notes: '', items: [] })
+    const body = JSON.parse(init.body as string)
+    expect(body).toMatchObject({ mode: 'pass_fail', result: 'pass', notes: '', items: [] })
+    expect(body.idempotency_key).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
 
     // Inline confirmation, announced via role=status, names the tool + the
     // recorded outcome + a generic saved consequence (UX-DR7).
@@ -661,12 +664,14 @@ describe('InspectionPage UX foundation (Story 5.2)', () => {
     await act(async () => {})
 
     // The real client POSTs { mode: 'checklist', result, notes, items: the
-    // type's checklist with each item's result } to
-    // /api/v1/tools/{id}/inspection (FR-12: per-item + overall result persisted).
+    // type's checklist with each item's result, idempotency_key } to
+    // /api/v1/tools/{id}/inspection (FR-12: per-item + overall result persisted;
+    // Story 7.5: the client-supplied key).
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(url).toBe('/api/v1/tools/id-w1/inspection')
     expect(init.method).toBe('POST')
-    expect(JSON.parse(init.body as string)).toEqual({
+    const body = JSON.parse(init.body as string)
+    expect(body).toMatchObject({
       mode: 'checklist',
       result: 'pass',
       notes: '',
@@ -676,6 +681,7 @@ describe('InspectionPage UX foundation (Story 5.2)', () => {
         { item_id: 'item-3', result: 'pass' },
       ],
     })
+    expect(body.idempotency_key).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
 
     const status = screen.getByRole('status')
     expect(status).toHaveTextContent(/Bohrmaschine-01/)
@@ -787,7 +793,7 @@ describe('InspectionPage UX foundation (Story 5.2)', () => {
 
     const [url, init] = fetchMock.mock.calls[0] as [string, RequestInit]
     expect(url).toBe('/api/v1/tools/id-w1/inspection')
-    expect(JSON.parse(init.body as string)).toEqual({
+    expect(JSON.parse(init.body as string)).toMatchObject({
       mode: 'checklist',
       result: 'pass',
       notes: '',
@@ -1065,6 +1071,61 @@ describe('InspectionPage UX foundation (Story 5.2)', () => {
     expect(screen.queryByText('Dashboard')).not.toBeInTheDocument()
     // The submit re-enables for a retry.
     expect(button).toBeEnabled()
+  })
+
+  it('KEY_REUSE_ON_RETRY: a retried submit after an inline error resends the SAME idempotency key (Story 7.5)', async () => {
+    // SPA_RETRY: the first attempt fails inline (400); the retry must carry the
+    // SAME key so a server-side commit replays instead of duplicating.
+    let calls = 0
+    const fetchMock = vi.fn().mockImplementation(async () => {
+      calls += 1
+      if (calls === 1) {
+        return { ok: false, status: 500, json: async () => ({ error: { code: 'internal_error', message: 'Ein interner Fehler ist aufgetreten.' } }) }
+      }
+      return submitOkResponse('pass', 'green')
+    })
+    vi.stubGlobal('fetch', fetchMock)
+    renderLoaded()
+
+    fireEvent.click(screen.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    const button = screen.getByRole('button', { name: 'Prüfung speichern' })
+    fireEvent.click(button)
+    await act(async () => {})
+    expect(screen.getByRole('alert')).toHaveTextContent('Ein interner Fehler ist aufgetreten.')
+
+    // The user retries after the inline error — same intent, same key.
+    fireEvent.click(button)
+    await act(async () => {})
+
+    expect(calls).toBe(2)
+    const firstBody = JSON.parse((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string)
+    const secondBody = JSON.parse((fetchMock.mock.calls[1] as [string, RequestInit])[1].body as string)
+    expect(firstBody.idempotency_key).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+    expect(secondBody.idempotency_key).toBe(firstBody.idempotency_key)
+    // The retry succeeds → the confirmation renders.
+    expect(screen.getByRole('status')).toHaveTextContent(/gespeichert/)
+  })
+
+  it('FRESH_INTENT_GETS_FRESH_KEY: a NEW inspection page (a fresh submit intent) generates a NEW key', async () => {
+    // SPA_FRESH_INTENT: navigating to a new inspection (a new mount) starts a
+    // fresh intent with a fresh key. The first submit's key is captured, then a
+    // second submit on a RE-RENDERED page (new mount) uses a different key.
+    const fetchMock = vi.fn().mockResolvedValue(submitOkResponse('pass', 'green'))
+    vi.stubGlobal('fetch', fetchMock)
+    renderLoaded()
+    fireEvent.click(screen.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Prüfung speichern' }))
+    await act(async () => {})
+    const firstKey = JSON.parse((fetchMock.mock.calls[0] as [string, RequestInit])[1].body as string).idempotency_key
+
+    // A fresh mount of the page = a fresh submit intent.
+    cleanup()
+    renderLoaded()
+    fireEvent.click(screen.getByRole('radio', { name: 'OK/BESTANDEN' }))
+    fireEvent.click(screen.getByRole('button', { name: 'Prüfung speichern' }))
+    await act(async () => {})
+    const secondKey = JSON.parse((fetchMock.mock.calls[1] as [string, RequestInit])[1].body as string).idempotency_key
+    expect(secondKey).not.toBe(firstKey)
   })
 
   it('SUBMIT_403: a gating 403 shows the German reason inline with no navigation or confirmation', async () => {

@@ -9,13 +9,14 @@ import (
 )
 
 type Inspection struct {
-	ID            pgtype.UUID        `json:"id"`
-	ToolID        pgtype.UUID        `json:"tool_id"`
-	InspectorID   pgtype.UUID        `json:"inspector_id"`
-	Mode          string             `json:"mode"`
-	OverallResult string             `json:"overall_result"`
-	Notes         pgtype.Text        `json:"notes"`
-	SubmittedAt   pgtype.Timestamptz `json:"submitted_at"`
+	ID             pgtype.UUID        `json:"id"`
+	ToolID         pgtype.UUID        `json:"tool_id"`
+	InspectorID    pgtype.UUID        `json:"inspector_id"`
+	Mode           string             `json:"mode"`
+	OverallResult  string             `json:"overall_result"`
+	Notes          pgtype.Text        `json:"notes"`
+	SubmittedAt    pgtype.Timestamptz `json:"submitted_at"`
+	IdempotencyKey pgtype.UUID        `json:"idempotency_key"`
 }
 
 type InspectionItem struct {
@@ -28,11 +29,12 @@ type InspectionItem struct {
 }
 
 type Reinstatement struct {
-	ID        pgtype.UUID        `json:"id"`
-	ToolID    pgtype.UUID        `json:"tool_id"`
-	ActorID   pgtype.UUID        `json:"actor_id"`
-	Reason    string             `json:"reason"`
-	CreatedAt pgtype.Timestamptz `json:"created_at"`
+	ID             pgtype.UUID        `json:"id"`
+	ToolID         pgtype.UUID        `json:"tool_id"`
+	ActorID        pgtype.UUID        `json:"actor_id"`
+	Reason         string             `json:"reason"`
+	CreatedAt      pgtype.Timestamptz `json:"created_at"`
+	IdempotencyKey pgtype.UUID        `json:"idempotency_key"`
 }
 
 type Tool struct {

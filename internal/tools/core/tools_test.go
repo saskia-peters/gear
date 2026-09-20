@@ -73,10 +73,13 @@ type fakeToolStore struct {
 
 // reinstatementRecord is the in-memory reinstatement row (Story 5.6). CreatedAt
 // mirrors the DB created_at = now() so tests can pin the derived clock anchor.
+// Key is the CLIENT-SUPPLIED idempotency key (Story 7.5) so the replay lookup
+// can match it.
 type reinstatementRecord struct {
 	ToolID    string
 	ActorID   string
 	Reason    string
+	Key       string
 	CreatedAt time.Time
 }
 
@@ -86,8 +89,16 @@ type reinstatementRecord struct {
 // semantics: a committed inspection anchors the status fixture — a fail becomes
 // the latest fail (the OOS anchor), a pass the latest success (the clock
 // anchor) — so a post-submit GetToolInspectionStatus reflects the new record,
-// exactly like the repository's read-after-write.
-func (f *fakeToolStore) InsertInspection(_ context.Context, inspection *Inspection) (*Inspection, error) {
+// exactly like the repository's read-after-write. The CLIENT-SUPPLIED
+// idempotencyKey (Story 7.5) is stored on the record so the replay lookup can
+// match it (the real DB UNIQUE constraint is emulated: a second insert with the
+// same tool + key REPLAYS the FIRST record and reports `replayed=true`).
+func (f *fakeToolStore) InsertInspection(_ context.Context, inspection *Inspection, idempotencyKey string) (*Inspection, bool, error) {
+	for _, existing := range f.inspections {
+		if existing.ToolID == inspection.ToolID && existing.IdempotencyKey == idempotencyKey {
+			return existing, true, nil
+		}
+	}
 	persisted := *inspection
 	if persisted.ID == "" {
 		persisted.ID = "id-insp-" + inspection.ToolID
@@ -95,6 +106,7 @@ func (f *fakeToolStore) InsertInspection(_ context.Context, inspection *Inspecti
 	if persisted.SubmittedAt.IsZero() {
 		persisted.SubmittedAt = time.Now()
 	}
+	persisted.IdempotencyKey = idempotencyKey
 	f.inspections = append(f.inspections, &persisted)
 	if f.status == nil {
 		f.status = &ToolInspectionStatus{}
@@ -105,7 +117,18 @@ func (f *fakeToolStore) InsertInspection(_ context.Context, inspection *Inspecti
 	} else if f.status.LastSuccessAt == nil || t.After(*f.status.LastSuccessAt) {
 		f.status.LastSuccessAt = &t
 	}
-	return &persisted, nil
+	return &persisted, false, nil
+}
+
+// FindInspectionByToolAndKey emulates the repository's EARLY replay lookup
+// (Story 7.5): the existing record for a tool + key, or nil when none matches.
+func (f *fakeToolStore) FindInspectionByToolAndKey(_ context.Context, toolID, idempotencyKey string) (*Inspection, error) {
+	for _, insp := range f.inspections {
+		if insp.ToolID == toolID && insp.IdempotencyKey == idempotencyKey {
+			return insp, nil
+		}
+	}
+	return nil, nil
 }
 
 // GetToolInspectionStatus returns the status-read fixture a test set (nil-safe:
@@ -143,19 +166,57 @@ func (f *fakeToolStore) GetToolInspectionStatus(_ context.Context, toolID string
 // persisted shape. It ALSO mirrors the real DB read semantics: the row becomes
 // the clock's "latest reinstatement" anchor (LastReinstatedAt), so a post-write
 // GetToolInspectionStatus reflects the new row — exactly like InsertInspection's
-// read-after-write upgrade — and the tool leaves OOS.
-func (f *fakeToolStore) InsertReinstatement(_ context.Context, toolID, actorID, reason string) error {
+// read-after-write upgrade — and the tool leaves OOS. The CLIENT-SUPPLIED
+// idempotencyKey (Story 7.5) is stored on the row so the replay lookup can
+// match it; a duplicate tool + key REPLAYS the existing row (reported via
+// `replayed=true`, no second row, no error).
+func (f *fakeToolStore) InsertReinstatement(_ context.Context, toolID, actorID, reason, idempotencyKey string) (*Reinstatement, bool, error) {
 	if f.reinstateErr != nil {
-		return f.reinstateErr
+		return nil, false, f.reinstateErr
+	}
+	for i, existing := range f.reinstatements {
+		if existing.ToolID == toolID && existing.Key == idempotencyKey {
+			return &Reinstatement{
+				ID:        fmt.Sprintf("id-rein-%d", i),
+				ToolID:    existing.ToolID,
+				ActorID:   existing.ActorID,
+				Reason:    existing.Reason,
+				CreatedAt: existing.CreatedAt,
+			}, true, nil
+		}
 	}
 	createdAt := time.Now()
-	f.reinstatements = append(f.reinstatements, reinstatementRecord{ToolID: toolID, ActorID: actorID, Reason: reason, CreatedAt: createdAt})
+	f.reinstatements = append(f.reinstatements, reinstatementRecord{ToolID: toolID, ActorID: actorID, Reason: reason, Key: idempotencyKey, CreatedAt: createdAt})
 	if f.status == nil {
 		f.status = &ToolInspectionStatus{}
 	}
 	t := createdAt
 	f.status.LastReinstatedAt = &t
-	return nil
+	return &Reinstatement{
+		ID:        fmt.Sprintf("id-rein-%d", len(f.reinstatements)-1),
+		ToolID:    toolID,
+		ActorID:   actorID,
+		Reason:    reason,
+		CreatedAt: createdAt,
+	}, false, nil
+}
+
+// FindReinstatementByToolAndKey emulates the repository's EARLY replay lookup
+// (Story 7.5): the existing reinstatement for a tool + key, or nil when none
+// matches.
+func (f *fakeToolStore) FindReinstatementByToolAndKey(_ context.Context, toolID, idempotencyKey string) (*Reinstatement, error) {
+	for i, r := range f.reinstatements {
+		if r.ToolID == toolID && r.Key == idempotencyKey {
+			return &Reinstatement{
+				ID:        fmt.Sprintf("id-rein-%d", i),
+				ToolID:    r.ToolID,
+				ActorID:   r.ActorID,
+				Reason:    r.Reason,
+				CreatedAt: r.CreatedAt,
+			}, nil
+		}
+	}
+	return nil, nil
 }
 
 // AnonymizeUserReferences emulates the repository's transactional reference

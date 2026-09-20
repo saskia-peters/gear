@@ -36,37 +36,37 @@ func TestPostgresDsgvoInspectionExport(t *testing.T) {
 	// Two inspections by the subject: a checklist pass with two snapshot items,
 	// then a fail (newer). A foreign inspection by another inspector must never
 	// leak into the export.
-	pass, err := repo.InsertInspection(ctx, &core.Inspection{
+	pass, _, err := repo.InsertInspection(ctx, &core.Inspection{
 		ToolID: tool.ID, InspectorID: inspectorID,
 		Mode: core.InspectionModeChecklist, OverallResult: core.InspectionResultPass, Notes: "ok",
 		Items: []core.InspectionItem{
 			{ItemID: "11111111-1111-1111-1111-111111111111", Label: "Kabel", Position: 0, Result: core.InspectionResultPass},
 			{ItemID: "22222222-2222-2222-2222-222222222222", Label: "Bohrfutter", Position: 1, Result: core.InspectionResultPass},
 		},
-	})
+	}, "00000000-0000-0000-0000-000000000001")
 	if err != nil {
 		t.Fatalf("InsertInspection(pass) err = %v", err)
 	}
-	fail, err := repo.InsertInspection(ctx, &core.Inspection{
+	fail, _, err := repo.InsertInspection(ctx, &core.Inspection{
 		ToolID: tool.ID, InspectorID: inspectorID,
 		Mode: core.InspectionModeChecklist, OverallResult: core.InspectionResultFail, Notes: "",
-	})
+	}, "00000000-0000-0000-0000-000000000002")
 	if err != nil {
 		t.Fatalf("InsertInspection(fail) err = %v", err)
 	}
-	foreign, err := repo.InsertInspection(ctx, &core.Inspection{
+	foreign, _, err := repo.InsertInspection(ctx, &core.Inspection{
 		ToolID: tool.ID, InspectorID: "00000000-0000-0000-0000-0000000000fe",
 		Mode: core.InspectionModePassFail, OverallResult: core.InspectionResultPass,
-	})
+	}, "00000000-0000-0000-0000-000000000003")
 	if err != nil {
 		t.Fatalf("InsertInspection(foreign) err = %v", err)
 	}
 
 	// The subject's reinstatement + a foreign one.
-	if err := repo.InsertReinstatement(ctx, tool.ID, inspectorID, "Ersatzteil eingetroffen"); err != nil {
+	if _, _, err := repo.InsertReinstatement(ctx, tool.ID, inspectorID, "Ersatzteil eingetroffen", "00000000-0000-0000-0000-000000000004"); err != nil {
 		t.Fatalf("InsertReinstatement err = %v", err)
 	}
-	if err := repo.InsertReinstatement(ctx, tool.ID, "00000000-0000-0000-0000-0000000000fe", "fremde Aktion"); err != nil {
+	if _, _, err := repo.InsertReinstatement(ctx, tool.ID, "00000000-0000-0000-0000-0000000000fe", "fremde Aktion", "00000000-0000-0000-0000-000000000005"); err != nil {
 		t.Fatalf("InsertReinstatement(foreign) err = %v", err)
 	}
 
@@ -160,23 +160,23 @@ func TestPostgresAnonymizeUserReferences(t *testing.T) {
 	subject := "00000000-0000-0000-0000-0000000000ff"
 	foreign := "00000000-0000-0000-0000-0000000000fe"
 
-	if _, err := repo.InsertInspection(ctx, &core.Inspection{
+	if _, _, err := repo.InsertInspection(ctx, &core.Inspection{
 		ToolID: tool.ID, InspectorID: subject,
 		Mode: core.InspectionModePassFail, OverallResult: core.InspectionResultPass,
-	}); err != nil {
+	}, "00000000-0000-0000-0000-000000000006"); err != nil {
 		t.Fatalf("InsertInspection(subject) err = %v", err)
 	}
-	foreignInsp, err := repo.InsertInspection(ctx, &core.Inspection{
+	foreignInsp, _, err := repo.InsertInspection(ctx, &core.Inspection{
 		ToolID: tool.ID, InspectorID: foreign,
 		Mode: core.InspectionModePassFail, OverallResult: core.InspectionResultPass,
-	})
+	}, "00000000-0000-0000-0000-000000000007")
 	if err != nil {
 		t.Fatalf("InsertInspection(foreign) err = %v", err)
 	}
-	if err := repo.InsertReinstatement(ctx, tool.ID, subject, "erased"); err != nil {
+	if _, _, err := repo.InsertReinstatement(ctx, tool.ID, subject, "erased", "00000000-0000-0000-0000-000000000008"); err != nil {
 		t.Fatalf("InsertReinstatement(subject) err = %v", err)
 	}
-	if err := repo.InsertReinstatement(ctx, tool.ID, foreign, "foreign"); err != nil {
+	if _, _, err := repo.InsertReinstatement(ctx, tool.ID, foreign, "foreign", "00000000-0000-0000-0000-000000000009"); err != nil {
 		t.Fatalf("InsertReinstatement(foreign) err = %v", err)
 	}
 

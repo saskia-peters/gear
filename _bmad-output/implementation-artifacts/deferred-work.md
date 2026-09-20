@@ -174,3 +174,9 @@ Triage output of review loops — real, non-story-blocking findings that are not
 
 - The docs site (docs/) has 8 high-severity npm audit findings in DEV toolchain deps (`@faker-js/faker`, `image-size`, `js-yaml`) that only clear with `--force` major upgrades which could break the docs build. The CI docs-audit step is informational (continue-on-error). Tracked: review the docs toolchain separately (bump majors + verify `npm run build`).
 - Repo-wide gofmt drift: ~80 legacy Go files lack a trailing newline at EOF (gofmt wants one). CI deliberately does NOT gate gofmt repo-wide to avoid forcing a mass formatting commit; a one-time `gofmt -w` normalization is a separate housekeeping change.
+
+## Deferred from: code review (2026-09-20) of spec-7-5-idempotency-hardening.md
+
+- `core.Reinstatement` has no `IdempotencyKey` field while `core.Inspection` does — `reinstatementFromRow` drops the key the DB returns. Currently no consumer reads the key off a `*Reinstatement` (the reinstate response echoes only Status), so it is cosmetic; add the field if a read-back consumer appears.
+- The core early `Find*ByToolAndKey` replay check and the repository `ON CONFLICT DO NOTHING` replay are two independent implementations of the same contract with no single test tying them together (a repo-level absorbed replay returns the same record/items/status as a core-level replay). A drift between them would go unnoticed; the concurrent-race test pins the repo side, the core tests pin the core side, but not their equivalence.
+- The repository's defense-in-depth `parseIdempotencyKey` error path is not covered by any repo test — it is unreachable through the production entry point (the HTTP handler pre-validates). Coverage debt, not a gap.

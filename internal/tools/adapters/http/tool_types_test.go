@@ -103,11 +103,11 @@ func (f *fakeService) StartInspection(_ context.Context, _, _ string) (*toolscor
 	return nil, toolscore.ErrToolNotFound
 }
 
-func (f *fakeService) SubmitInspection(_ context.Context, _, _ string, _ toolscore.InspectionInput) (*toolscore.SubmitInspectionResult, error) {
+func (f *fakeService) SubmitInspection(_ context.Context, _, _ string, _ toolscore.InspectionInput, _ string) (*toolscore.SubmitInspectionResult, error) {
 	return nil, toolscore.ErrToolNotFound
 }
 
-func (f *fakeService) ReinstateTool(_ context.Context, _, _, _ string) (*toolscore.ReinstateResult, error) {
+func (f *fakeService) ReinstateTool(_ context.Context, _, _, _, _ string) (*toolscore.ReinstateResult, error) {
 	return nil, toolscore.ErrToolNotFound
 }
 

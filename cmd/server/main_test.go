@@ -766,7 +766,7 @@ func (s *compToolTypeService) StartInspection(_ context.Context, _, toolID strin
 	return &toolscore.InspectionStartResult{ToolID: toolID, ToolName: "test", InspectionMode: toolscore.InspectionModePassFail}, nil
 }
 
-func (s *compToolTypeService) SubmitInspection(_ context.Context, _, toolID string, input toolscore.InspectionInput) (*toolscore.SubmitInspectionResult, error) {
+func (s *compToolTypeService) SubmitInspection(_ context.Context, _, toolID string, input toolscore.InspectionInput, _ string) (*toolscore.SubmitInspectionResult, error) {
 	// Echo the {id} path param + the persisted record + a green status, so the
 	// composed submit test proves the path param reaches the service AND the
 	// submit response DTO round-trips (Story 5.3).
@@ -780,7 +780,7 @@ func (s *compToolTypeService) SubmitInspection(_ context.Context, _, toolID stri
 	}, nil
 }
 
-func (s *compToolTypeService) ReinstateTool(_ context.Context, _, toolID, _ string) (*toolscore.ReinstateResult, error) {
+func (s *compToolTypeService) ReinstateTool(_ context.Context, _, toolID, _, _ string) (*toolscore.ReinstateResult, error) {
 	// Echo the {id} path param + a green status, so the composed reinstate test
 	// proves the path param reaches the service AND the reinstate response DTO
 	// round-trips (Story 5.6).
@@ -1348,7 +1348,7 @@ func TestCompositionInspectionStartMountGating(t *testing.T) {
 // tool data); an inspection.submit holder reaches it and the {id} path param
 // round-trips through the composed router.
 func TestCompositionInspectionSubmitMountGating(t *testing.T) {
-	submitBody := `{"mode":"pass_fail","result":"pass","notes":"","items":[]}`
+	submitBody := `{"mode":"pass_fail","result":"pass","notes":"","items":[],"idempotency_key":"11111111-1111-1111-1111-111111111111"}`
 
 	// 401: no token.
 	if rec := doComposedJSONRequest(newCompositionToolsRouter([]string{}, nil), "", http.MethodPost, "/api/v1/tools/id-a/inspection", submitBody); rec.Code != http.StatusUnauthorized {
@@ -1400,7 +1400,7 @@ func TestCompositionInspectionSubmitMountGating(t *testing.T) {
 // but the reinstatement answers 403 (no tool data); a tool.reinstate holder
 // reaches it and the {id} path param round-trips through the composed router.
 func TestCompositionReinstateMountGating(t *testing.T) {
-	reinstateBody := `{"reason":"Ersatzteil eingetroffen"}`
+	reinstateBody := `{"reason":"Ersatzteil eingetroffen","idempotency_key":"11111111-1111-1111-1111-111111111111"}`
 
 	// 401: no token.
 	if rec := doComposedJSONRequest(newCompositionToolsRouter([]string{}, nil), "", http.MethodPost, "/api/v1/tools/id-a/reinstatement", reinstateBody); rec.Code != http.StatusUnauthorized {

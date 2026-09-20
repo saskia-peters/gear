@@ -110,16 +110,26 @@ type Service interface {
 	// ErrInspectionInvalid (400, German); missing/expired qualification → 403.
 	// Persists the inspection + its snapshot items transactionally, audits
 	// `inspection.submit` and returns the persisted record + the shared derived
-	// status (AD-4/AD-5: `oos` on a failed inspection — never stored).
-	SubmitInspection(ctx context.Context, actorID, toolID string, input core.InspectionInput) (*core.SubmitInspectionResult, error)
+	// status (AD-4/AD-5: `oos` on a failed inspection — never stored). The
+	// CLIENT-SUPPLIED idempotencyKey makes the write at-most-once (Story 7.5,
+	// NFR-R1): an existing record for (toolID, idempotencyKey) is a REPLAY that
+	// returns the committed record + the same derived status (no re-audit, no
+	// second row) — checked BEFORE the OOS gate so a retried FAIL submit (the
+	// tool is now OOS) replays 200, not 403.
+	SubmitInspection(ctx context.Context, actorID, toolID string, input core.InspectionInput, idempotencyKey string) (*core.SubmitInspectionResult, error)
 	// ReinstateTool reinstates an OOS tool (Story 5.6, FR-15/AD-9): it re-checks
 	// `tool.reinstate` defense-in-depth (AD-6), loads the tool (unknown/archived
 	// → ErrToolNotFound 404), validates the MANDATORY reason (empty or > 2000
 	// runes → ErrInspectionInvalid 400, German), persists the reinstatement,
 	// audits `tool.reinstate` and returns the newly derived not-OOS status
 	// (next_due = reinstatement + resolved interval, AD-5). Reinstatement is the
-	// SOLE exit from OOS (FR-15).
-	ReinstateTool(ctx context.Context, actorID, toolID, reason string) (*core.ReinstateResult, error)
+	// SOLE exit from OOS (FR-15). The CLIENT-SUPPLIED idempotencyKey makes the
+	// write at-most-once (Story 7.5): an existing reinstatement for (toolID,
+	// idempotencyKey) is a REPLAY that returns the same derived status (no
+	// re-audit, no second row) — checked BEFORE the OOS precondition so a
+	// retried reinstate of an already-committed row (now serviceable) replays
+	// 200, not the NOT-OOS 400.
+	ReinstateTool(ctx context.Context, actorID, toolID, reason, idempotencyKey string) (*core.ReinstateResult, error)
 	// ListInspectionHistory returns the per-tool audit trail (Story 6.3, FR-18):
 	// every inspection (newest first, each naming the inspector + timestamp +
 	// outcome + notes + mode + the snapshotted per-checklist-item results) and

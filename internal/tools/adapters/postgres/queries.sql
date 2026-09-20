@@ -228,10 +228,27 @@ JOIN tool_types tt ON tt.id = a.tool_type_id;
 -- name: InsertInspection :one
 -- Insert one inspection record and return the persisted row. The
 -- overall_result and mode were validated by the core; inspector_id and notes
--- are snapshotted plain values (no FK, AD-8/3.4).
-INSERT INTO inspections (tool_id, inspector_id, mode, overall_result, notes)
-VALUES ($1, $2, $3, $4, $5)
-RETURNING id, tool_id, inspector_id, mode, overall_result, notes, submitted_at;
+-- are snapshotted plain values (no FK, AD-8/3.4). The CLIENT-SUPPLIED
+-- idempotency_key (Story 7.5, NFR-R1) is the at-most-once guard: ON CONFLICT
+-- (tool_id, idempotency_key) DO NOTHING makes a retried insert of an
+-- already-committed record affect ZERO rows (the repository then replays the
+-- existing record instead of failing — a retried client sees the same
+-- committed result).
+INSERT INTO inspections (tool_id, inspector_id, mode, overall_result, notes, idempotency_key)
+VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT (tool_id, idempotency_key) DO NOTHING
+RETURNING id, tool_id, inspector_id, mode, overall_result, notes, submitted_at, idempotency_key;
+
+-- name: FindInspectionByToolAndKey :one
+-- The EARLY replay lookup (Story 7.5): does a record with this tool +
+-- client-supplied idempotency_key already exist? Runs right after the
+-- permission gate + tool load, BEFORE the OOS/qualification gates, so a
+-- retried submit of an already-committed FAIL inspection (the tool is now OOS)
+-- replays 200 instead of hitting the OOS 403. No row → pgx.ErrNoRows (the
+-- repository maps it to a nil replay).
+SELECT id, tool_id, inspector_id, mode, overall_result, notes, submitted_at, idempotency_key
+FROM inspections
+WHERE tool_id = $1 AND idempotency_key = $2;
 
 -- name: InsertInspectionItem :exec
 -- Insert one snapshotted checklist item of an inspection (FR-12/FR-23): the
@@ -298,10 +315,27 @@ LIMIT 1;
 -- MANDATORY reason, created_at = DB now(). The reason was validated by the
 -- core (non-empty, ≤ 2000 runes); actor_id is a plain uuid (no FK, AD-8/3.4).
 -- The row immediately flips the derived status — a fail before the latest
--- reinstatement is not OOS (AD-4).
-INSERT INTO reinstatements (tool_id, actor_id, reason)
-VALUES ($1, $2, $3)
-RETURNING id, tool_id, actor_id, reason, created_at;
+-- reinstatement is not OOS (AD-4). The CLIENT-SUPPLIED idempotency_key (Story
+-- 7.5) is the at-most-once guard: ON CONFLICT (tool_id, idempotency_key) DO
+-- NOTHING makes a retried insert affect zero rows (the repository replays the
+-- existing row, never an error — a retried client sees the same committed
+-- result).
+INSERT INTO reinstatements (tool_id, actor_id, reason, idempotency_key)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (tool_id, idempotency_key) DO NOTHING
+RETURNING id, tool_id, actor_id, reason, created_at, idempotency_key;
+
+-- name: FindReinstatementByToolAndKey :one
+-- The EARLY replay lookup for the reinstatement write (Story 7.5): does a
+-- reinstatement with this tool + client-supplied idempotency_key already
+-- exist? Runs right after the permission gate + tool load, BEFORE the OOS
+-- precondition, so a retried reinstate of an already-committed row (which
+-- flipped the tool serviceable — the NOT-OOS 400 would otherwise reject it)
+-- replays 200 instead. No row → pgx.ErrNoRows (the repository maps it to a
+-- nil replay).
+SELECT id, tool_id, actor_id, reason, created_at, idempotency_key
+FROM reinstatements
+WHERE tool_id = $1 AND idempotency_key = $2;
 
 -- ============================================================================
 -- History queries (Story 6.3, FR-18/AD-6/AD-8): the per-tool audit trail of
@@ -318,7 +352,7 @@ RETURNING id, tool_id, actor_id, reason, created_at;
 -- inspections_tool_id_submitted_at_idx already supports it). A tool with no
 -- inspections answers an empty set (the history surface renders the German
 -- empty state, never a 404).
-SELECT id, tool_id, inspector_id, mode, overall_result, notes, submitted_at
+SELECT id, tool_id, inspector_id, mode, overall_result, notes, submitted_at, idempotency_key
 FROM inspections
 WHERE tool_id = $1
 ORDER BY submitted_at DESC, id DESC;
@@ -328,7 +362,7 @@ ORDER BY submitted_at DESC, id DESC;
 -- tiebreak (created_at DESC, id DESC — the existing 000027 index
 -- reinstatements_tool_id_created_at_idx already supports it). A tool with no
 -- reinstatements answers an empty set.
-SELECT id, tool_id, actor_id, reason, created_at
+SELECT id, tool_id, actor_id, reason, created_at, idempotency_key
 FROM reinstatements
 WHERE tool_id = $1
 ORDER BY created_at DESC, id DESC;
@@ -359,7 +393,7 @@ ORDER BY ii.inspection_id, ii.position;
 -- the id tiebreak. The repository attaches the snapshotted per-checklist-item
 -- results in one grouped round-trip. A user with no inspections answers an
 -- empty set (the report renders the German empty note, never a 404).
-SELECT id, tool_id, inspector_id, mode, overall_result, notes, submitted_at
+SELECT id, tool_id, inspector_id, mode, overall_result, notes, submitted_at, idempotency_key
 FROM inspections
 WHERE inspector_id = $1
 ORDER BY submitted_at DESC, id DESC;
@@ -378,7 +412,7 @@ ORDER BY ii.inspection_id, ii.position;
 -- name: ListReinstatementsByActor :many
 -- Every reinstatement the user performed as actor (FR-24), newest first with
 -- the id tiebreak. A user with no reinstatements answers an empty set.
-SELECT id, tool_id, actor_id, reason, created_at
+SELECT id, tool_id, actor_id, reason, created_at, idempotency_key
 FROM reinstatements
 WHERE actor_id = $1
 ORDER BY created_at DESC, id DESC;

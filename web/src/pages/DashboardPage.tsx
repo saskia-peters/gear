@@ -67,6 +67,28 @@ export function DashboardPage() {
   // to null and close the dialog mid-input (the captured data is all the dialog
   // needs).
   const [reinstateDialog, setReinstateDialog] = useState<{ toolId: string; toolName: string } | null>(null)
+  // reinstateKeysRef holds the CLIENT-SUPPLIED idempotency key of the CURRENT
+  // reinstate intent per tool, bound to the reason it was generated for (Story
+  // 7.5, NFR-R1): generated on the first submit and REUSED across retries of
+  // the SAME logical write (a retry after an inline error must carry the SAME
+  // key so a server-side commit replays instead of inserting a duplicate), and
+  // regenerated when the reason differs (a changed reason is a NEW logical
+  // write). DELETED at a definitive end state — after the success flow fully
+  // completes (loadTools resolves) or when the dialog is dismissed without a
+  // pending retry — so a fresh reinstate intent generates a fresh key.
+  const reinstateKeysRef = useRef<Record<string, { key: string; reason: string }>>({})
+
+  // reinstateIdempotencyKey returns the idempotency key for a reinstate
+  // intent, generating a fresh one when the intent identity (tool + reason)
+  // differs from the key it was created for — an unchanged retry reuses the
+  // key so the server replays, a changed reason is a new logical write.
+  function reinstateIdempotencyKey(toolId: string, reason: string): string {
+    const existing = reinstateKeysRef.current[toolId]
+    if (existing === undefined || existing.reason !== reason) {
+      reinstateKeysRef.current[toolId] = { key: crypto.randomUUID(), reason }
+    }
+    return reinstateKeysRef.current[toolId].key
+  }
   // reinstateBusy disables the dialog form + the row's reinstate buttons while
   // the reinstatement is in flight (double-submit guard).
   const [reinstateBusy, setReinstateBusy] = useState(false)
@@ -285,10 +307,21 @@ export function DashboardPage() {
     setReinstateBusy(true)
     setConfirmMessage('')
     try {
-      const result = await reinstateTool(toolId, reason)
+      // The idempotency key (Story 7.5) is scoped to the reinstate intent
+      // (tool + reason): generated on the first submit and REUSED across
+      // retries of the SAME logical write — a retried reinstate after an
+      // inline error must carry the SAME key so the server replays the
+      // committed result instead of inserting a duplicate.
+      const idempotencyKey = reinstateIdempotencyKey(toolId, reason)
+      const result = await reinstateTool(toolId, reason, idempotencyKey)
       setReinstateDialog(null)
       setConfirmMessage(result.message)
       await loadTools()
+      // The intent is FULLY complete (committed + refetched): the next
+      // reinstate starts with a fresh key. Deleted AFTER loadTools so the key
+      // survives the "committed but refetch failed" window — a retry then
+      // replays instead of a NOT-OOS 400.
+      delete reinstateKeysRef.current[toolId]
     } catch (err) {
       setReinstateDialog(null)
       const status = err instanceof Error && 'status' in err ? (err as { status: number }).status : 0
@@ -492,6 +525,9 @@ export function DashboardPage() {
                             // WITHOUT row navigation (Story 6.1b, ROW_REINSTATE).
                             onClick={(e) => {
                               e.stopPropagation()
+                              // Story 7.5: the reinstate intent's idempotency key
+                              // is generated lazily on the first submit (bound to
+                              // the reason) — see reinstateIdempotencyKey.
                               setReinstateDialog({ toolId: tool.id, toolName: tool.name })
                             }}
                           >
@@ -532,7 +568,17 @@ export function DashboardPage() {
           busy={reinstateBusy}
           onSubmit={(reason) => void handleReinstate(reason)}
           onClose={() => {
-            if (!reinstateBusy) setReinstateDialog(null)
+            if (!reinstateBusy) {
+              const toolId = reinstateDialog?.toolId
+              // A dismissed dialog is a definitive end state for the intent
+              // UNLESS a failed attempt left a pending retry (an inline row
+              // error) — that key must survive so a retry replays the committed
+              // row instead of a NOT-OOS 400.
+              if (toolId && !rowErrors[toolId]) {
+                delete reinstateKeysRef.current[toolId]
+              }
+              setReinstateDialog(null)
+            }
           }}
         />
       )}

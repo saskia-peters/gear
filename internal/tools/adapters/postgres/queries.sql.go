@@ -217,6 +217,71 @@ func (q *Queries) DeleteToolTypeChecklistItems(ctx context.Context, toolTypeID p
 	return err
 }
 
+const findInspectionByToolAndKey = `-- name: FindInspectionByToolAndKey :one
+SELECT id, tool_id, inspector_id, mode, overall_result, notes, submitted_at, idempotency_key
+FROM inspections
+WHERE tool_id = $1 AND idempotency_key = $2
+`
+
+type FindInspectionByToolAndKeyParams struct {
+	ToolID         pgtype.UUID `json:"tool_id"`
+	IdempotencyKey pgtype.UUID `json:"idempotency_key"`
+}
+
+// The EARLY replay lookup (Story 7.5): does a record with this tool +
+// client-supplied idempotency_key already exist? Runs right after the
+// permission gate + tool load, BEFORE the OOS/qualification gates, so a
+// retried submit of an already-committed FAIL inspection (the tool is now OOS)
+// replays 200 instead of hitting the OOS 403. No row → pgx.ErrNoRows (the
+// repository maps it to a nil replay).
+func (q *Queries) FindInspectionByToolAndKey(ctx context.Context, arg FindInspectionByToolAndKeyParams) (Inspection, error) {
+	row := q.db.QueryRow(ctx, findInspectionByToolAndKey, arg.ToolID, arg.IdempotencyKey)
+	var i Inspection
+	err := row.Scan(
+		&i.ID,
+		&i.ToolID,
+		&i.InspectorID,
+		&i.Mode,
+		&i.OverallResult,
+		&i.Notes,
+		&i.SubmittedAt,
+		&i.IdempotencyKey,
+	)
+	return i, err
+}
+
+const findReinstatementByToolAndKey = `-- name: FindReinstatementByToolAndKey :one
+SELECT id, tool_id, actor_id, reason, created_at, idempotency_key
+FROM reinstatements
+WHERE tool_id = $1 AND idempotency_key = $2
+`
+
+type FindReinstatementByToolAndKeyParams struct {
+	ToolID         pgtype.UUID `json:"tool_id"`
+	IdempotencyKey pgtype.UUID `json:"idempotency_key"`
+}
+
+// The EARLY replay lookup for the reinstatement write (Story 7.5): does a
+// reinstatement with this tool + client-supplied idempotency_key already
+// exist? Runs right after the permission gate + tool load, BEFORE the OOS
+// precondition, so a retried reinstate of an already-committed row (which
+// flipped the tool serviceable — the NOT-OOS 400 would otherwise reject it)
+// replays 200 instead. No row → pgx.ErrNoRows (the repository maps it to a
+// nil replay).
+func (q *Queries) FindReinstatementByToolAndKey(ctx context.Context, arg FindReinstatementByToolAndKeyParams) (Reinstatement, error) {
+	row := q.db.QueryRow(ctx, findReinstatementByToolAndKey, arg.ToolID, arg.IdempotencyKey)
+	var i Reinstatement
+	err := row.Scan(
+		&i.ID,
+		&i.ToolID,
+		&i.ActorID,
+		&i.Reason,
+		&i.CreatedAt,
+		&i.IdempotencyKey,
+	)
+	return i, err
+}
+
 const findToolCollisions = `-- name: FindToolCollisions :many
 SELECT name, lower(inventory_number) AS inventory_number
 FROM tools
@@ -459,17 +524,19 @@ func (q *Queries) GetToolWithTypeQualification(ctx context.Context, id pgtype.UU
 
 const insertInspection = `-- name: InsertInspection :one
 
-INSERT INTO inspections (tool_id, inspector_id, mode, overall_result, notes)
-VALUES ($1, $2, $3, $4, $5)
-RETURNING id, tool_id, inspector_id, mode, overall_result, notes, submitted_at
+INSERT INTO inspections (tool_id, inspector_id, mode, overall_result, notes, idempotency_key)
+VALUES ($1, $2, $3, $4, $5, $6)
+ON CONFLICT (tool_id, idempotency_key) DO NOTHING
+RETURNING id, tool_id, inspector_id, mode, overall_result, notes, submitted_at, idempotency_key
 `
 
 type InsertInspectionParams struct {
-	ToolID        pgtype.UUID `json:"tool_id"`
-	InspectorID   pgtype.UUID `json:"inspector_id"`
-	Mode          string      `json:"mode"`
-	OverallResult string      `json:"overall_result"`
-	Notes         pgtype.Text `json:"notes"`
+	ToolID         pgtype.UUID `json:"tool_id"`
+	InspectorID    pgtype.UUID `json:"inspector_id"`
+	Mode           string      `json:"mode"`
+	OverallResult  string      `json:"overall_result"`
+	Notes          pgtype.Text `json:"notes"`
+	IdempotencyKey pgtype.UUID `json:"idempotency_key"`
 }
 
 // ============================================================================
@@ -481,7 +548,12 @@ type InsertInspectionParams struct {
 // ============================================================================
 // Insert one inspection record and return the persisted row. The
 // overall_result and mode were validated by the core; inspector_id and notes
-// are snapshotted plain values (no FK, AD-8/3.4).
+// are snapshotted plain values (no FK, AD-8/3.4). The CLIENT-SUPPLIED
+// idempotency_key (Story 7.5, NFR-R1) is the at-most-once guard: ON CONFLICT
+// (tool_id, idempotency_key) DO NOTHING makes a retried insert of an
+// already-committed record affect ZERO rows (the repository then replays the
+// existing record instead of failing — a retried client sees the same
+// committed result).
 func (q *Queries) InsertInspection(ctx context.Context, arg InsertInspectionParams) (Inspection, error) {
 	row := q.db.QueryRow(ctx, insertInspection,
 		arg.ToolID,
@@ -489,6 +561,7 @@ func (q *Queries) InsertInspection(ctx context.Context, arg InsertInspectionPara
 		arg.Mode,
 		arg.OverallResult,
 		arg.Notes,
+		arg.IdempotencyKey,
 	)
 	var i Inspection
 	err := row.Scan(
@@ -499,6 +572,7 @@ func (q *Queries) InsertInspection(ctx context.Context, arg InsertInspectionPara
 		&i.OverallResult,
 		&i.Notes,
 		&i.SubmittedAt,
+		&i.IdempotencyKey,
 	)
 	return i, err
 }
@@ -532,24 +606,35 @@ func (q *Queries) InsertInspectionItem(ctx context.Context, arg InsertInspection
 }
 
 const insertReinstatement = `-- name: InsertReinstatement :one
-INSERT INTO reinstatements (tool_id, actor_id, reason)
-VALUES ($1, $2, $3)
-RETURNING id, tool_id, actor_id, reason, created_at
+INSERT INTO reinstatements (tool_id, actor_id, reason, idempotency_key)
+VALUES ($1, $2, $3, $4)
+ON CONFLICT (tool_id, idempotency_key) DO NOTHING
+RETURNING id, tool_id, actor_id, reason, created_at, idempotency_key
 `
 
 type InsertReinstatementParams struct {
-	ToolID  pgtype.UUID `json:"tool_id"`
-	ActorID pgtype.UUID `json:"actor_id"`
-	Reason  string      `json:"reason"`
+	ToolID         pgtype.UUID `json:"tool_id"`
+	ActorID        pgtype.UUID `json:"actor_id"`
+	Reason         string      `json:"reason"`
+	IdempotencyKey pgtype.UUID `json:"idempotency_key"`
 }
 
 // Persist one reinstatement (Story 5.6, FR-15/AD-9): tool, actor and the
 // MANDATORY reason, created_at = DB now(). The reason was validated by the
 // core (non-empty, ≤ 2000 runes); actor_id is a plain uuid (no FK, AD-8/3.4).
 // The row immediately flips the derived status — a fail before the latest
-// reinstatement is not OOS (AD-4).
+// reinstatement is not OOS (AD-4). The CLIENT-SUPPLIED idempotency_key (Story
+// 7.5) is the at-most-once guard: ON CONFLICT (tool_id, idempotency_key) DO
+// NOTHING makes a retried insert affect zero rows (the repository replays the
+// existing row, never an error — a retried client sees the same committed
+// result).
 func (q *Queries) InsertReinstatement(ctx context.Context, arg InsertReinstatementParams) (Reinstatement, error) {
-	row := q.db.QueryRow(ctx, insertReinstatement, arg.ToolID, arg.ActorID, arg.Reason)
+	row := q.db.QueryRow(ctx, insertReinstatement,
+		arg.ToolID,
+		arg.ActorID,
+		arg.Reason,
+		arg.IdempotencyKey,
+	)
 	var i Reinstatement
 	err := row.Scan(
 		&i.ID,
@@ -557,6 +642,7 @@ func (q *Queries) InsertReinstatement(ctx context.Context, arg InsertReinstateme
 		&i.ActorID,
 		&i.Reason,
 		&i.CreatedAt,
+		&i.IdempotencyKey,
 	)
 	return i, err
 }
@@ -660,7 +746,7 @@ func (q *Queries) ListInspectionItemsByTool(ctx context.Context, toolID pgtype.U
 
 const listInspectionsByInspector = `-- name: ListInspectionsByInspector :many
 
-SELECT id, tool_id, inspector_id, mode, overall_result, notes, submitted_at
+SELECT id, tool_id, inspector_id, mode, overall_result, notes, submitted_at, idempotency_key
 FROM inspections
 WHERE inspector_id = $1
 ORDER BY submitted_at DESC, id DESC
@@ -696,6 +782,7 @@ func (q *Queries) ListInspectionsByInspector(ctx context.Context, inspectorID pg
 			&i.OverallResult,
 			&i.Notes,
 			&i.SubmittedAt,
+			&i.IdempotencyKey,
 		); err != nil {
 			return nil, err
 		}
@@ -709,7 +796,7 @@ func (q *Queries) ListInspectionsByInspector(ctx context.Context, inspectorID pg
 
 const listInspectionsByTool = `-- name: ListInspectionsByTool :many
 
-SELECT id, tool_id, inspector_id, mode, overall_result, notes, submitted_at
+SELECT id, tool_id, inspector_id, mode, overall_result, notes, submitted_at, idempotency_key
 FROM inspections
 WHERE tool_id = $1
 ORDER BY submitted_at DESC, id DESC
@@ -745,6 +832,7 @@ func (q *Queries) ListInspectionsByTool(ctx context.Context, toolID pgtype.UUID)
 			&i.OverallResult,
 			&i.Notes,
 			&i.SubmittedAt,
+			&i.IdempotencyKey,
 		); err != nil {
 			return nil, err
 		}
@@ -757,7 +845,7 @@ func (q *Queries) ListInspectionsByTool(ctx context.Context, toolID pgtype.UUID)
 }
 
 const listReinstatementsByActor = `-- name: ListReinstatementsByActor :many
-SELECT id, tool_id, actor_id, reason, created_at
+SELECT id, tool_id, actor_id, reason, created_at, idempotency_key
 FROM reinstatements
 WHERE actor_id = $1
 ORDER BY created_at DESC, id DESC
@@ -780,6 +868,7 @@ func (q *Queries) ListReinstatementsByActor(ctx context.Context, actorID pgtype.
 			&i.ActorID,
 			&i.Reason,
 			&i.CreatedAt,
+			&i.IdempotencyKey,
 		); err != nil {
 			return nil, err
 		}
@@ -792,7 +881,7 @@ func (q *Queries) ListReinstatementsByActor(ctx context.Context, actorID pgtype.
 }
 
 const listReinstatementsByTool = `-- name: ListReinstatementsByTool :many
-SELECT id, tool_id, actor_id, reason, created_at
+SELECT id, tool_id, actor_id, reason, created_at, idempotency_key
 FROM reinstatements
 WHERE tool_id = $1
 ORDER BY created_at DESC, id DESC
@@ -817,6 +906,7 @@ func (q *Queries) ListReinstatementsByTool(ctx context.Context, toolID pgtype.UU
 			&i.ActorID,
 			&i.Reason,
 			&i.CreatedAt,
+			&i.IdempotencyKey,
 		); err != nil {
 			return nil, err
 		}

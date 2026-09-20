@@ -178,14 +178,20 @@ func (f *fakeToolTypeStore) FindToolCollisions(_ context.Context, _, _ []string)
 // surface too. The tool-type fakes never exercise the inspection surface —
 // these stubs keep the shared constructor compilable without touching
 // tool-type tests.
-func (f *fakeToolTypeStore) InsertInspection(_ context.Context, _ *Inspection) (*Inspection, error) {
-	return nil, ErrToolNotFound
+func (f *fakeToolTypeStore) InsertInspection(_ context.Context, _ *Inspection, _ string) (*Inspection, bool, error) {
+	return nil, false, ErrToolNotFound
+}
+func (f *fakeToolTypeStore) FindInspectionByToolAndKey(_ context.Context, _, _ string) (*Inspection, error) {
+	return nil, nil
 }
 func (f *fakeToolTypeStore) GetToolInspectionStatus(_ context.Context, _ string) (*ToolInspectionStatus, error) {
 	return nil, ErrToolNotFound
 }
-func (f *fakeToolTypeStore) InsertReinstatement(_ context.Context, _, _, _ string) error {
-	return ErrToolNotFound
+func (f *fakeToolTypeStore) InsertReinstatement(_ context.Context, _, _, _, _ string) (*Reinstatement, bool, error) {
+	return nil, false, ErrToolNotFound
+}
+func (f *fakeToolTypeStore) FindReinstatementByToolAndKey(_ context.Context, _, _ string) (*Reinstatement, error) {
+	return nil, nil
 }
 func (f *fakeToolTypeStore) ListInspectionsByTool(_ context.Context, _ string) ([]*Inspection, error) {
 	return []*Inspection{}, nil

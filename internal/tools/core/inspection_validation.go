@@ -3,12 +3,29 @@ package core
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"strings"
 	"time"
 	"unicode/utf8"
 
 	admcore "github.com/saskia-peters/gear/internal/admin/core"
 )
+
+// idempotencyKeyUUIDPattern is the canonical UUID form (8-4-4-4-12 hex) a
+// client-supplied idempotency key must match (Story 7.5, NFR-R1). The HTTP
+// adapter normalizes + validates first; this pattern is the DOMAIN backstop so
+// a direct caller can never reach the store with an empty/malformed key (which
+// would surface an opaque internal error). It mirrors the HTTP adapter's
+// idempotencyKeyPattern so the two layers accept exactly the same surface.
+var idempotencyKeyUUIDPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// validIdempotencyKey reports whether the client-supplied idempotency key is a
+// parseable canonical UUID (Story 7.5 defense-in-depth). A missing or malformed
+// key fails the write with the German 400 sentinel — the at-most-once guard
+// must never be silently bypassable.
+func validIdempotencyKey(key string) bool {
+	return idempotencyKeyUUIDPattern.MatchString(strings.TrimSpace(key))
+}
 
 // resolveToolScheduleInterval resolves the tool's EFFECTIVE inspection
 // schedule interval (AD-5/AD-16): the per-tool override when set, else the

@@ -262,20 +262,30 @@ const (
 	MsgToolNotOutOfService = "Das Gerät ist nicht außer Betrieb."
 	// MsgToolReinstated is the German confirmation of a successful reinstatement.
 	MsgToolReinstated = "Das Gerät wurde wiederhergestellt."
+	// MsgIdempotencyKeyInvalid is the 400 message for a MISSING or non-UUID
+	// idempotency_key on the inspection submit / reinstatement bodies (Story
+	// 7.5, NFR-R1): the at-most-once guard REQUIRES the client-supplied key, so
+	// a request without a parseable UUID fails fast — the guard must never be
+	// silently bypassable.
+	MsgIdempotencyKeyInvalid = "Der Idempotenzschlüssel fehlt oder ist ungültig."
 )
 
 // Inspection is the domain representation of one persisted inspection record
 // (FR-12/FR-13): the inspector + timestamp + mode + overall result + notes and
 // the snapshotted per-item results (FR-12). Items is empty for pass_fail.
+// IdempotencyKey is the CLIENT-SUPPLIED at-most-once key (Story 7.5) — carried
+// on the write and read back so a replay round-trips the committed record
+// exactly.
 type Inspection struct {
-	ID            string
-	ToolID        string
-	InspectorID   string
-	Mode          string
-	OverallResult string
-	Notes         string
-	SubmittedAt   time.Time
-	Items         []InspectionItem
+	ID             string
+	ToolID         string
+	InspectorID    string
+	Mode           string
+	OverallResult  string
+	Notes          string
+	IdempotencyKey string
+	SubmittedAt    time.Time
+	Items          []InspectionItem
 }
 
 // InspectionItem is one snapshotted checklist result of an inspection (FR-12):
@@ -346,13 +356,43 @@ type LatestInspection struct {
 // append-only). GetToolInspectionStatus is the derived-status input read: the
 // latest-fail + latest pass/reinstatement anchors (nil-safe).
 type InspectionStore interface {
-	InsertInspection(ctx context.Context, inspection *Inspection) (*Inspection, error)
+	// InsertInspection persists an inspection AND its snapshot items in ONE
+	// transaction, with the CLIENT-SUPPLIED idempotency_key (Story 7.5,
+	// NFR-R1): the DB UNIQUE (tool_id, idempotency_key) makes the write
+	// at-most-once — a retried / concurrent duplicate is absorbed by ON
+	// CONFLICT DO NOTHING and answered by REPLAYING the already-persisted
+	// record (row + items), never an error. The returned `replayed` flag
+	// signals an ABSORBED replay (the DB deduped a retry/race; the repository
+	// fetched the winner's record) vs a FRESH insert — the core never
+	// re-audits an absorbed replay.
+	InsertInspection(ctx context.Context, inspection *Inspection, idempotencyKey string) (*Inspection, bool, error)
+	// FindInspectionByToolAndKey is the EARLY replay lookup (Story 7.5): the
+	// existing record (WITH its ordered snapshot items) for a tool + the
+	// client-supplied idempotency key, or (nil, nil) when none matches. The
+	// core calls it right after the permission gate, BEFORE the tool load and
+	// the OOS/qualification gates, so a retried submit of an already-committed
+	// FAIL inspection (the tool is now OOS, or archived between commit and
+	// retry) replays 200 instead of the OOS 403 / the 404.
+	FindInspectionByToolAndKey(ctx context.Context, toolID, idempotencyKey string) (*Inspection, error)
 	GetToolInspectionStatus(ctx context.Context, toolID string) (*ToolInspectionStatus, error)
 	// InsertReinstatement persists one reinstatement row (Story 5.6, FR-15/AD-9):
 	// tool, actor and the mandatory reason, created_at = DB now(). One
 	// transaction-free single-row insert; the row immediately flips the derived
-	// status (a fail before the latest reinstatement is not OOS).
-	InsertReinstatement(ctx context.Context, toolID, actorID, reason string) error
+	// status (a fail before the latest reinstatement is not OOS). The
+	// CLIENT-SUPPLIED idempotency_key (Story 7.5) makes the write at-most-once —
+	// a retried / concurrent duplicate is absorbed by ON CONFLICT DO NOTHING
+	// (the repository then returns the already-persisted row + `replayed=true`,
+	// never an error). The returned row is the replay signal: non-nil + true =
+	// the insert was absorbed; the core never re-audits an absorbed replay.
+	InsertReinstatement(ctx context.Context, toolID, actorID, reason, idempotencyKey string) (*Reinstatement, bool, error)
+	// FindReinstatementByToolAndKey is the EARLY replay lookup for the
+	// reinstatement write (Story 7.5): the existing reinstatement for a tool +
+	// the client-supplied idempotency key, or (nil, nil) when none matches. The
+	// core calls it right after the permission gate, BEFORE the tool load and
+	// the OOS precondition, so a retried reinstate of an already-committed row
+	// (which flipped the tool serviceable) replays 200 instead of the NOT-OOS
+	// 400 / the 404.
+	FindReinstatementByToolAndKey(ctx context.Context, toolID, idempotencyKey string) (*Reinstatement, error)
 	// ListInspectionsByTool reads the FULL inspection history of a tool (Story
 	// 6.3, FR-18): every inspection row, reverse-chronological (submitted_at
 	// DESC, id DESC — deterministic), EACH WITH its snapshotted ordered checklist
@@ -408,9 +448,25 @@ type InspectionStore interface {
 // snapshot items transactionally. Audited (inspection.submit). Returns the
 // persisted record + the shared derived status (OOS on a failed inspection).
 //
+// The CLIENT-SUPPLIED idempotencyKey makes the write at-most-once (Story 7.5,
+// NFR-R1): the key rides on the insert and is unique per tool. An EXISTING
+// record for (toolID, idempotencyKey) is a REPLAY — the service returns the
+// already-persisted record + the same post-commit derived status, skipping the
+// tool load, OOS/qualification/validation gates and the insert (no re-audit, no
+// second row). The replay check runs EARLY — right after the permission gate,
+// BEFORE the tool load and the OOS gate — so a retried submit of an
+// already-committed FAIL inspection (the tool is now OOS) replays 200 (never
+// the OOS 403) and an archived tool (archived between commit and retry) replays
+// 200 (never the 404). A CONCURRENT_RACE that slips past the early check is
+// absorbed by the DB UNIQUE constraint; the repository reports `replayed` and
+// the core treats it identically (no re-audit).
+//
 // I/O matrix:
 //   - SUBMIT_PASSFAIL / SUBMIT_CHECKLIST: valid body → 200 with the record +
 //     derived status (Green when fresh; `oos` on a failed inspection).
+//   - REPLAY: same tool + key, first attempt already committed → 200 with the
+//     EXISTING record + derived status, no second row — even when the tool is
+//     now OOS or archived.
 //   - SUBMIT_GATED: caller lacks inspection.submit OR the tool's required
 //     qualification → ErrForbidden / ErrToolQualificationMissing (403, no
 //     record persisted).
@@ -419,9 +475,32 @@ type InspectionStore interface {
 //   - SUBMIT_INVALID: bad mode / bad result / notes > 4000 runes / checklist
 //     mismatch (unanswered or extra item) / items on a pass_fail mode →
 //     ErrInspectionInvalid (400, no record persisted).
-func (s *Service) SubmitInspection(ctx context.Context, actorID, toolID string, input InspectionInput) (*SubmitInspectionResult, error) {
+func (s *Service) SubmitInspection(ctx context.Context, actorID, toolID string, input InspectionInput, idempotencyKey string) (*SubmitInspectionResult, error) {
+	// The idempotency key is REQUIRED and must be a parseable UUID (Story 7.5,
+	// defense-in-depth): the HTTP adapter validates + normalizes first; this is
+	// the domain backstop so a direct caller can never reach the store with an
+	// empty/malformed key (which would surface an opaque internal error).
+	if !validIdempotencyKey(idempotencyKey) {
+		return nil, &InvalidInspectionError{Message: MsgIdempotencyKeyInvalid}
+	}
+
 	if err := s.requireToolsPermission(ctx, actorID, []string{InspectionSubmitPermission}); err != nil {
 		return nil, err
+	}
+
+	// EARLY REPLAY CHECK (Story 7.5): an already-committed record for this tool
+	// + key is a retried submit — return the existing record + the same
+	// post-commit derived status. It runs BEFORE the tool load so an archived
+	// tool (archived between commit and retry) can NEVER 404 a replay. A replay
+	// NEVER re-audits and NEVER double-inserts.
+	existing, err := s.store.FindInspectionByToolAndKey(ctx, toolID, idempotencyKey)
+	if err != nil {
+		return nil, fmt.Errorf("tools core: failed to resolve inspection replay: %w", err)
+	}
+	if existing != nil {
+		s.log().Info("inspection submit replayed",
+			"actor", actorID, "tool", toolID, "key", idempotencyKey)
+		return &SubmitInspectionResult{Inspection: existing, Status: s.replayInspectionStatus(ctx, toolID, existing)}, nil
 	}
 
 	tool, err := s.store.GetToolWithTypeQualification(ctx, toolID)
@@ -480,16 +559,27 @@ func (s *Service) SubmitInspection(ctx context.Context, actorID, toolID string, 
 	}
 
 	submitted := &Inspection{
-		ToolID:        tool.ID,
-		InspectorID:   actorID,
-		Mode:          input.Mode,
-		OverallResult: input.Result,
-		Notes:         input.Notes,
-		Items:         items,
+		ToolID:         tool.ID,
+		InspectorID:    actorID,
+		Mode:           input.Mode,
+		OverallResult:  input.Result,
+		Notes:          input.Notes,
+		IdempotencyKey: idempotencyKey,
+		Items:          items,
 	}
-	persisted, err := s.store.InsertInspection(ctx, submitted)
+	persisted, replayed, err := s.store.InsertInspection(ctx, submitted, idempotencyKey)
 	if err != nil {
 		return nil, fmt.Errorf("tools core: failed to persist inspection: %w", err)
+	}
+	// A CONCURRENT_RACE (Story 7.5): the DB unique constraint absorbed the
+	// duplicate (ON CONFLICT DO NOTHING → the repository replayed the winner's
+	// row). From the client's perspective this is a REPLAY — NEVER re-audit,
+	// and derive exactly like the early-replay path (an absorbed request must
+	// not add an audit row for a write it did not perform).
+	if replayed {
+		s.log().Info("inspection submit replayed (concurrent)",
+			"actor", actorID, "tool", toolID, "key", idempotencyKey)
+		return &SubmitInspectionResult{Inspection: persisted, Status: s.replayInspectionStatus(ctx, toolID, persisted)}, nil
 	}
 
 	s.auditTool(ctx, actorID, AuditOperationInspectionSubmit, "action=submit target=tool id="+toolID)
@@ -500,12 +590,22 @@ func (s *Service) SubmitInspection(ctx context.Context, actorID, toolID string, 
 	// record alone — a pass anchors the clock at its submitted_at (green when
 	// fresh), a fail reads as `oos` (its submitted_at is the latest fail and no
 	// reinstatement is known to follow).
-	//
+	return &SubmitInspectionResult{Inspection: persisted, Status: s.deriveInspectionStatus(ctx, toolID, persisted, interval)}, nil
+}
+
+// deriveInspectionStatus derives the status AFTER an inspection record exists
+// (AD-4/AD-5), best-effort: a post-commit status-read failure is logged and
+// the status is derived from the persisted record alone — a client retry must
+// never surface an error for an already-committed record. The interval is
+// passed in (the fresh path resolved it BEFORE the insert and fails loudly;
+// the idempotent replay resolves it best-effort). Shared by the fresh submit's
+// post-commit block and the Story 7.5 replay, so the two always derive
+// identically.
+func (s *Service) deriveInspectionStatus(ctx context.Context, toolID string, persisted *Inspection, interval time.Duration) ToolStatus {
 	// The orange-window percentage (Story 5-2c, D1) resolves ONCE per request;
 	// a settings failure falls back to the default 25 so the post-commit
 	// derivation never fails (it is best-effort by design).
 	orangeWindowPercent := s.orangeWindowPercent(ctx)
-	var status ToolStatus
 	statusInput, err := s.store.GetToolInspectionStatus(ctx, toolID)
 	if err != nil {
 		s.log().Warn("tools core: inspection status read failed after commit; deriving from the record alone",
@@ -518,13 +618,41 @@ func (s *Service) SubmitInspection(ctx context.Context, actorID, toolID string, 
 			t := persisted.SubmittedAt
 			lastSuccessAt = &t
 		}
-		status = deriveToolStatus(latestFailAt, lastSuccessAt, nil, interval, orangeWindowPercent, time.Now())
-	} else {
-		status = deriveToolStatus(statusInput.LatestFailAt, statusInput.LastSuccessAt, statusInput.LastReinstatedAt,
-			interval, orangeWindowPercent, time.Now())
+		return deriveToolStatus(latestFailAt, lastSuccessAt, nil, interval, orangeWindowPercent, time.Now())
 	}
+	return deriveToolStatus(statusInput.LatestFailAt, statusInput.LastSuccessAt, statusInput.LastReinstatedAt,
+		interval, orangeWindowPercent, time.Now())
+}
 
-	return &SubmitInspectionResult{Inspection: persisted, Status: status}, nil
+// replayScheduleInterval resolves the effective inspection-schedule interval
+// for a replay / post-commit derivation BEST-EFFORT (Story 7.5): the replay
+// check runs BEFORE the tool load (an archived tool must never 404 a replay),
+// so the interval is resolved via a tool reload; a tool that cannot be loaded
+// (archived/unknown) or a schedule resolution failure returns an error the
+// caller logs and falls back from (the derive renders `oos` for a fail and a
+// conservative red/orange for a pass — never falsely serviceable).
+func (s *Service) replayScheduleInterval(ctx context.Context, toolID string) (time.Duration, error) {
+	tool, err := s.store.GetToolWithTypeQualification(ctx, toolID)
+	if err != nil {
+		return 0, err
+	}
+	return s.resolveToolScheduleInterval(ctx, tool)
+}
+
+// replayInspectionStatus is the idempotent-replay derivation (Story 7.5): the
+// record already committed, so a schedule resolution failure must NEVER surface
+// as an error (a retried client would fail for nothing) — it is logged and the
+// status derives from the existing record alone with a zero interval. Used by
+// both the early-replay check and the absorbed-concurrent-replay path, so every
+// replay derives identically.
+func (s *Service) replayInspectionStatus(ctx context.Context, toolID string, existing *Inspection) ToolStatus {
+	interval, err := s.replayScheduleInterval(ctx, toolID)
+	if err != nil {
+		s.log().Warn("tools core: schedule resolution failed during replay; deriving from the record alone",
+			"tool", toolID, "error", err)
+		interval = 0
+	}
+	return s.deriveInspectionStatus(ctx, toolID, existing, interval)
 }
 
 // ReinstateResult is the reinstate response (Story 5.6, FR-15/AD-9): the newly
@@ -576,8 +704,25 @@ func (s *Service) toolIsOutOfService(ctx context.Context, toolID string) (bool, 
 // `tool.reinstate` and returns the newly derived status. Reinstatement resets
 // the clock — `next_due = lastReinstatedAt + interval` (AD-5).
 //
+// The CLIENT-SUPPLIED idempotencyKey makes the write at-most-once (Story 7.5,
+// NFR-R1): the key rides on the insert and is unique per tool. An EXISTING
+// reinstatement for (toolID, idempotencyKey) is a REPLAY — the service returns
+// the same post-commit derived status, skipping the tool load, OOS
+// precondition, reason validation and the insert (no re-audit, no second row).
+// The replay check runs EARLY — right after the permission gate, BEFORE the
+// tool load and the OOS precondition — so a retried reinstate of an
+// already-committed row (which flipped the tool serviceable — the NOT-OOS 400
+// would otherwise reject it) replays 200, and an archived tool (archived
+// between commit and retry) replays 200 (never the 404). A CONCURRENT_RACE
+// that slips past the early check is absorbed by the DB UNIQUE constraint; the
+// repository reports `replayed` and the core treats it identically (no
+// re-audit).
+//
 // I/O matrix:
 //   - REINSTATE_OK: OOS holder + valid reason → 200 with the not-OOS derived status.
+//   - REPLAY: same tool + key, first attempt already committed → 200 with the
+//     same not-OOS derived status, no second row — even when the tool is now
+//     serviceable or archived.
 //   - REINSTATE_NOT_OOS: tool is NOT out of service → ErrInspectionInvalid (400,
 //     MsgToolNotOutOfService), no write.
 //   - REINSTATE_GATED: caller lacks tool.reinstate → ErrForbidden (403, no write).
@@ -585,9 +730,34 @@ func (s *Service) toolIsOutOfService(ctx context.Context, toolID string) (bool, 
 //     ErrToolNotFound (404).
 //   - REINSTATE_EMPTY / REINSTATE_LONG: empty or > 2000-rune reason →
 //     ErrInspectionInvalid (400, no write).
-func (s *Service) ReinstateTool(ctx context.Context, actorID, toolID, reason string) (*ReinstateResult, error) {
+func (s *Service) ReinstateTool(ctx context.Context, actorID, toolID, reason, idempotencyKey string) (*ReinstateResult, error) {
+	// The idempotency key is REQUIRED and must be a parseable UUID (Story 7.5,
+	// defense-in-depth): the HTTP adapter validates + normalizes first; this is
+	// the domain backstop so a direct caller can never reach the store with an
+	// empty/malformed key (which would surface an opaque internal error).
+	if !validIdempotencyKey(idempotencyKey) {
+		return nil, &InvalidInspectionError{Message: MsgIdempotencyKeyInvalid}
+	}
+
 	if err := s.requireToolsPermission(ctx, actorID, []string{ToolReinstatePermission}); err != nil {
 		return nil, err
+	}
+
+	// EARLY REPLAY CHECK (Story 7.5): an already-committed reinstatement for
+	// this tool + key is a retried reinstate — return the same post-commit
+	// derived status. It runs BEFORE the tool load so an archived tool
+	// (archived between commit and retry) can NEVER 404 a replay, and BEFORE
+	// the OOS precondition (the committed row flipped the tool serviceable, so
+	// the NOT-OOS 400 would otherwise reject the retry). A replay NEVER
+	// re-audits and NEVER double-inserts.
+	existing, err := s.store.FindReinstatementByToolAndKey(ctx, toolID, idempotencyKey)
+	if err != nil {
+		return nil, fmt.Errorf("tools core: failed to resolve reinstatement replay: %w", err)
+	}
+	if existing != nil {
+		s.log().Info("reinstatement replayed",
+			"actor", actorID, "tool", toolID, "key", idempotencyKey)
+		return &ReinstateResult{Status: s.deriveReinstatementStatus(ctx, toolID)}, nil
 	}
 
 	tool, err := s.store.GetToolWithTypeQualification(ctx, toolID)
@@ -623,16 +793,22 @@ func (s *Service) ReinstateTool(ctx context.Context, actorID, toolID, reason str
 		return nil, &InvalidInspectionError{Message: MsgReinstatementReasonTooLong}
 	}
 
-	if err := s.store.InsertReinstatement(ctx, tool.ID, actorID, reason); err != nil {
+	_, replayed, err := s.store.InsertReinstatement(ctx, tool.ID, actorID, reason, idempotencyKey)
+	if err != nil {
 		return nil, fmt.Errorf("tools core: failed to persist reinstatement: %w", err)
+	}
+	// A CONCURRENT_RACE (Story 7.5): the DB unique constraint absorbed the
+	// duplicate (ON CONFLICT DO NOTHING → the repository replayed the winner's
+	// row). From the client's perspective this is a REPLAY — NEVER re-audit an
+	// absorbed request (it must not add an audit row for a write it did not
+	// perform).
+	if replayed {
+		s.log().Info("reinstatement replayed (concurrent)",
+			"actor", actorID, "tool", toolID, "key", idempotencyKey)
+		return &ReinstateResult{Status: s.deriveReinstatementStatus(ctx, toolID)}, nil
 	}
 
 	s.auditTool(ctx, actorID, AuditOperationToolReinstate, "action=reinstate target=tool id="+tool.ID)
-
-	// The orange-window percentage (Story 5-2c, D1) resolves ONCE per request;
-	// a settings failure falls back to the default 25 so the post-commit
-	// derivation never fails (it is best-effort by design).
-	orangeWindowPercent := s.orangeWindowPercent(ctx)
 
 	// Derive the new status (AD-4/AD-5) BEST-EFFORT after the row committed: a
 	// schedule/status resolution failure AFTER the write must NOT surface as an
@@ -640,22 +816,38 @@ func (s *Service) ReinstateTool(ctx context.Context, actorID, toolID, reason str
 	// and answer a conservative NON-OOS status — the row committed, so the tool
 	// is out of OOS (green with nil next_due; the SPA refetches the real status
 	// from the dashboard list). The row is the audit source of truth regardless.
-	interval, err := s.resolveToolScheduleInterval(ctx, tool)
+	return &ReinstateResult{Status: s.deriveReinstatementStatus(ctx, toolID)}, nil
+}
+
+// deriveReinstatementStatus is the post-commit reinstatement derivation
+// (AD-4/AD-5), best-effort: a schedule or status resolution failure AFTER the
+// row committed must never surface as an error (a client retry would duplicate
+// the row) — both are logged and a conservative NON-OOS status is answered
+// (the row committed, so the tool is out of OOS). Shared by the fresh write,
+// the idempotent replay and the absorbed-concurrent-replay (Story 7.5) so they
+// all derive identically. The interval is resolved best-effort via a tool
+// reload (the replay runs before the tool load), so it also covers an archived
+// tool.
+func (s *Service) deriveReinstatementStatus(ctx context.Context, toolID string) ToolStatus {
+	interval, err := s.replayScheduleInterval(ctx, toolID)
 	if err != nil {
 		s.log().Warn("tools core: schedule resolution failed after reinstatement; answering conservative non-OOS",
-			"tool", tool.ID, "error", err)
-		return &ReinstateResult{Status: ToolStatus{Status: ToolStatusCodeGreen}}, nil
+			"tool", toolID, "error", err)
+		return ToolStatus{Status: ToolStatusCodeGreen}
 	}
-	statusInput, err := s.store.GetToolInspectionStatus(ctx, tool.ID)
+	// The orange-window percentage (Story 5-2c, D1) resolves ONCE per request;
+	// a settings failure falls back to the default 25 so the post-commit
+	// derivation never fails (it is best-effort by design).
+	orangeWindowPercent := s.orangeWindowPercent(ctx)
+	statusInput, err := s.store.GetToolInspectionStatus(ctx, toolID)
 	if err != nil {
 		s.log().Warn("tools core: status read failed after reinstatement; answering conservative non-OOS",
-			"tool", tool.ID, "error", err)
-		return &ReinstateResult{Status: ToolStatus{Status: ToolStatusCodeGreen}}, nil
+			"tool", toolID, "error", err)
+		return ToolStatus{Status: ToolStatusCodeGreen}
 	}
 	if statusInput == nil {
 		statusInput = &ToolInspectionStatus{}
 	}
-	status := deriveToolStatus(statusInput.LatestFailAt, statusInput.LastSuccessAt, statusInput.LastReinstatedAt,
+	return deriveToolStatus(statusInput.LatestFailAt, statusInput.LastSuccessAt, statusInput.LastReinstatedAt,
 		interval, orangeWindowPercent, time.Now())
-	return &ReinstateResult{Status: status}, nil
 }

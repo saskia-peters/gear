@@ -492,12 +492,19 @@ export interface InspectionSubmitResult {
 // identity/timestamp/result/notes and returns the record + derived status.
 // 200 → the confirmation is server-driven; 400/403/404 → ApiError with the
 // server's German reason; 401 → stale/revoked session (the caller logs in
-// again).
-export async function submitInspection(toolId: string, input: InspectionSubmitInput): Promise<InspectionSubmitResult> {
+// again). The CLIENT-SUPPLIED idempotencyKey (Story 7.5, NFR-R1) is the
+// at-most-once guard: the SPA generates it per submit intent and REUSES the
+// same value across retries, so a retried request replays the committed
+// record instead of inserting a duplicate.
+export async function submitInspection(
+  toolId: string,
+  input: InspectionSubmitInput,
+  idempotencyKey: string,
+): Promise<InspectionSubmitResult> {
   return (await request(`${DASHBOARD_TOOLS_URL}/${encodeURIComponent(toolId)}/inspection`, {
     method: 'POST',
     headers: authTokenHeaders(),
-    body: JSON.stringify(input),
+    body: JSON.stringify({ ...input, idempotency_key: idempotencyKey }),
   })) as InspectionSubmitResult
 }
 
@@ -521,12 +528,15 @@ export interface ReinstateResult {
 // reinstateTool POSTs the reinstatement for an OOS tool with the mandatory
 // reason. 200 → the tool leaves OOS (the dashboard refetches); 400/403/404 →
 // ApiError with the server's German reason; 401 → stale/revoked session (the
-// caller logs in again).
-export async function reinstateTool(toolId: string, reason: string): Promise<ReinstateResult> {
+// caller logs in again). The CLIENT-SUPPLIED idempotencyKey (Story 7.5,
+// NFR-R1) is the at-most-once guard: the SPA generates it per reinstate
+// intent and REUSES the same value across retries, so a retried reinstate
+// replays the committed result instead of inserting a duplicate.
+export async function reinstateTool(toolId: string, reason: string, idempotencyKey: string): Promise<ReinstateResult> {
   return (await request(`${DASHBOARD_TOOLS_URL}/${encodeURIComponent(toolId)}/reinstatement`, {
     method: 'POST',
     headers: authTokenHeaders(),
-    body: JSON.stringify({ reason }),
+    body: JSON.stringify({ reason, idempotency_key: idempotencyKey }),
   })) as ReinstateResult
 }
 

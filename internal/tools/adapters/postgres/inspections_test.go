@@ -45,10 +45,10 @@ func TestPostgresInspectionStore(t *testing.T) {
 
 	// SUBMIT_PASSFAIL (fail): a pass_fail inspection with NO items persists
 	// with the actor + a NULL notes column (reads back as "").
-	fail, err := repo.InsertInspection(ctx, &core.Inspection{
+	fail, _, err := repo.InsertInspection(ctx, &core.Inspection{
 		ToolID: tool.ID, InspectorID: "00000000-0000-0000-0000-0000000000ff",
 		Mode: core.InspectionModePassFail, OverallResult: core.InspectionResultFail, Notes: "",
-	})
+	}, "00000000-0000-0000-0000-000000000001")
 	if err != nil {
 		t.Fatalf("InsertInspection(fail) err = %v", err)
 	}
@@ -77,14 +77,14 @@ func TestPostgresInspectionStore(t *testing.T) {
 
 	// SUBMIT_CHECKLIST: an inspection WITH the snapshotted items persists the
 	// label/position snapshot (the item_id is the plain FK-less reference).
-	check, err := repo.InsertInspection(ctx, &core.Inspection{
+	check, _, err := repo.InsertInspection(ctx, &core.Inspection{
 		ToolID: tool.ID, InspectorID: "00000000-0000-0000-0000-0000000000ff",
 		Mode: core.InspectionModeChecklist, OverallResult: core.InspectionResultFail, Notes: "Bohrfutter locker",
 		Items: []core.InspectionItem{
 			{ItemID: "11111111-1111-1111-1111-111111111111", Label: "Kabel", Position: 0, Result: core.InspectionResultPass},
 			{ItemID: "22222222-2222-2222-2222-222222222222", Label: "Bohrfutter", Position: 1, Result: core.InspectionResultFail},
 		},
-	})
+	}, "00000000-0000-0000-0000-000000000002")
 	if err != nil {
 		t.Fatalf("InsertInspection(checklist) err = %v", err)
 	}
@@ -121,10 +121,10 @@ func TestPostgresInspectionStore(t *testing.T) {
 	// A later PASS inspection becomes the last-success anchor — but does NOT
 	// clear the latest-FAIL OOS anchor (AD-4: a passing inspection is not the
 	// exit from OOS; reinstatement is).
-	pass, err := repo.InsertInspection(ctx, &core.Inspection{
+	pass, _, err := repo.InsertInspection(ctx, &core.Inspection{
 		ToolID: tool.ID, InspectorID: "00000000-0000-0000-0000-0000000000ff",
 		Mode: core.InspectionModePassFail, OverallResult: core.InspectionResultPass, Notes: "Ok",
-	})
+	}, "00000000-0000-0000-0000-000000000003")
 	if err != nil {
 		t.Fatalf("InsertInspection(pass) err = %v", err)
 	}
@@ -140,10 +140,11 @@ func TestPostgresInspectionStore(t *testing.T) {
 	}
 
 	// A reinstatement (Story 5.6 owns the WRITE path — seeded here directly for
-	// the DERIVE_REINSTATED consult) becomes the clock anchor.
+	// the DERIVE_REINSTATED consult) becomes the clock anchor. The raw seed
+	// supplies its own idempotency_key (the column is NOT NULL — Story 7.5).
 	var reinstatedAt time.Time
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO reinstatements (tool_id, actor_id, reason) VALUES ($1, '00000000-0000-0000-0000-0000000000aa', 'wieder freigegeben')
+		`INSERT INTO reinstatements (tool_id, actor_id, reason, idempotency_key) VALUES ($1, '00000000-0000-0000-0000-0000000000aa', 'wieder freigegeben', '00000000-0000-0000-0000-0000000000a1')
 		 RETURNING created_at`, tool.ID,
 	).Scan(&reinstatedAt); err != nil {
 		t.Fatalf("seeding reinstatement err = %v", err)
@@ -181,14 +182,14 @@ func TestPostgresInspectionItemsRollback(t *testing.T) {
 		_, _ = pool.Exec(ctx, "DELETE FROM inspections WHERE tool_id = $1", tool.ID)
 	})
 
-	_, err = repo.InsertInspection(ctx, &core.Inspection{
+	_, _, err = repo.InsertInspection(ctx, &core.Inspection{
 		ToolID: tool.ID, InspectorID: "00000000-0000-0000-0000-0000000000ff",
 		Mode: core.InspectionModeChecklist, OverallResult: core.InspectionResultPass,
 		Items: []core.InspectionItem{
 			{ItemID: "11111111-1111-1111-1111-111111111111", Label: "Kabel", Position: 0, Result: core.InspectionResultPass},
 			{ItemID: "22222222-2222-2222-2222-222222222222", Label: "Bohrfutter", Position: 1, Result: "maybe"},
 		},
-	})
+	}, "00000000-0000-0000-0000-000000000004")
 	if err == nil {
 		t.Fatal("InsertInspection(bad item result) err = nil, want the CHECK constraint to reject it")
 	}
@@ -223,10 +224,10 @@ func TestPostgresInsertReinstatement(t *testing.T) {
 	})
 
 	// A failing inspection makes the tool OOS (a latest fail, no reinstatement).
-	if _, err := repo.InsertInspection(ctx, &core.Inspection{
+	if _, _, err := repo.InsertInspection(ctx, &core.Inspection{
 		ToolID: tool.ID, InspectorID: "00000000-0000-0000-0000-0000000000ff",
 		Mode: core.InspectionModePassFail, OverallResult: core.InspectionResultFail,
-	}); err != nil {
+	}, "00000000-0000-0000-0000-000000000005"); err != nil {
 		t.Fatalf("InsertInspection(fail) err = %v", err)
 	}
 	oos, err := repo.GetToolInspectionStatus(ctx, tool.ID)
@@ -239,7 +240,7 @@ func TestPostgresInsertReinstatement(t *testing.T) {
 
 	// InsertReinstatement round-trip: actor + reason persist, created_at is the
 	// DB now(), and the latest reinstatement becomes the clock reset anchor.
-	if err := repo.InsertReinstatement(ctx, tool.ID, "00000000-0000-0000-0000-0000000000aa", "  Ersatzteil eingetroffen  "); err != nil {
+	if _, _, err := repo.InsertReinstatement(ctx, tool.ID, "00000000-0000-0000-0000-0000000000aa", "  Ersatzteil eingetroffen  ", "00000000-0000-0000-0000-000000000006"); err != nil {
 		t.Fatalf("InsertReinstatement err = %v", err)
 	}
 	after, err := repo.GetToolInspectionStatus(ctx, tool.ID)
@@ -266,10 +267,10 @@ func TestPostgresInsertReinstatement(t *testing.T) {
 
 	// A NEW fail after the reinstatement flips it back to OOS: the latest fail
 	// is at-or-after the latest reinstatement (the tie boundary favors safety).
-	if _, err := repo.InsertInspection(ctx, &core.Inspection{
+	if _, _, err := repo.InsertInspection(ctx, &core.Inspection{
 		ToolID: tool.ID, InspectorID: "00000000-0000-0000-0000-0000000000ff",
 		Mode: core.InspectionModePassFail, OverallResult: core.InspectionResultFail,
-	}); err != nil {
+	}, "00000000-0000-0000-0000-000000000007"); err != nil {
 		t.Fatalf("InsertInspection(new fail) err = %v", err)
 	}
 	flipped, err := repo.GetToolInspectionStatus(ctx, tool.ID)
@@ -284,8 +285,264 @@ func TestPostgresInsertReinstatement(t *testing.T) {
 	}
 
 	// A malformed tool id answers the 404 sentinel (never a raw parse error).
-	if err := repo.InsertReinstatement(ctx, "nonsense", "00000000-0000-0000-0000-0000000000aa", "x"); !errors.Is(err, core.ErrToolNotFound) {
+	if _, _, err := repo.InsertReinstatement(ctx, "nonsense", "00000000-0000-0000-0000-0000000000aa", "x", "00000000-0000-0000-0000-000000000008"); !errors.Is(err, core.ErrToolNotFound) {
 		t.Fatalf("malformed id err = %v, want ErrToolNotFound", err)
+	}
+}
+
+// TestPostgresInspectionIdempotentReplay exercises the Story 7.5 at-most-once
+// contract over the dev database: a retried insert with the SAME tool +
+// idempotency_key replays the FIRST record (same id, its snapshot items read
+// back — never a second row, never an error), while the SAME key on a
+// DIFFERENT tool is a fresh insert (the UNIQUE is scoped per tool). The early
+// FindInspectionByToolAndKey lookup answers the committed record too.
+func TestPostgresInspectionIdempotentReplay(t *testing.T) {
+	pool := toolTestPool(t)
+	ctx := context.Background()
+	t.Cleanup(func() { pool.Close() })
+
+	repo := NewRepository(New(pool))
+	toolTypeID, _ := seedToolRefs(t, ctx, pool)
+	tool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Idempotent-Werkzeug", ToolTypeID: toolTypeID}, "GEAR", 9)
+	if err != nil {
+		t.Fatalf("CreateTool err = %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, "DELETE FROM inspections WHERE tool_id = $1", tool.ID)
+	})
+	key := "00000000-0000-0000-0000-0000000000b1"
+
+	// FRESH_SUBMIT: a checklist inspection with the key persists with its items.
+	first, firstReplayed, err := repo.InsertInspection(ctx, &core.Inspection{
+		ToolID: tool.ID, InspectorID: "00000000-0000-0000-0000-0000000000ff",
+		Mode: core.InspectionModeChecklist, OverallResult: core.InspectionResultFail, Notes: "Bohrfutter locker",
+		Items: []core.InspectionItem{
+			{ItemID: "11111111-1111-1111-1111-111111111111", Label: "Kabel", Position: 0, Result: core.InspectionResultPass},
+			{ItemID: "22222222-2222-2222-2222-222222222222", Label: "Bohrfutter", Position: 1, Result: core.InspectionResultFail},
+		},
+	}, key)
+	if err != nil {
+		t.Fatalf("InsertInspection(first) err = %v", err)
+	}
+	if firstReplayed {
+		t.Errorf("first insert replayed = true, want false (a FRESH insert is never a replay)")
+	}
+	if first.IdempotencyKey != key {
+		t.Errorf("record idempotency_key = %q, want %q (round-trips the client key)", first.IdempotencyKey, key)
+	}
+
+	// RETRY_AFTER_COMMIT: the same tool + key → the EXISTING record (same id +
+	// items), no second row, no error, and `replayed=true` (the signal the core
+	// uses to never re-audit an absorbed write).
+	replay, replayFlag, err := repo.InsertInspection(ctx, &core.Inspection{
+		ToolID: tool.ID, InspectorID: "00000000-0000-0000-0000-0000000000ff",
+		Mode: core.InspectionModeChecklist, OverallResult: core.InspectionResultFail, Notes: "other",
+		Items: []core.InspectionItem{{ItemID: "99999999-9999-9999-9999-999999999999", Label: "Falsch", Position: 9, Result: core.InspectionResultFail}},
+	}, key)
+	if err != nil {
+		t.Fatalf("InsertInspection(replay) err = %v, want a replay not an error", err)
+	}
+	if !replayFlag {
+		t.Errorf("replayed = false, want true (the duplicate was absorbed by the unique constraint)")
+	}
+	if replay.ID != first.ID {
+		t.Fatalf("replay id = %q, want the FIRST id %q (no second row)", replay.ID, first.ID)
+	}
+	if replay.OverallResult != core.InspectionResultFail || replay.Notes != "Bohrfutter locker" {
+		t.Errorf("replay = %+v, want the FIRST committed record (ignores the re-submitted body)", replay)
+	}
+	if len(replay.Items) != 2 || replay.Items[0].Label != "Kabel" {
+		t.Errorf("replay items = %+v, want the FIRST record's snapshot items", replay.Items)
+	}
+	var count int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM inspections WHERE tool_id = $1", tool.ID).Scan(&count); err != nil {
+		t.Fatalf("counting inspections err = %v", err)
+	}
+	if count != 1 {
+		t.Errorf("inspections = %d, want exactly 1 (at-most-once)", count)
+	}
+
+	// KEY_REUSED_OTHER_TOOL: the SAME key on a DIFFERENT tool is a fresh insert.
+	other, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Idempotent-Anderes", ToolTypeID: toolTypeID}, "GEAR", 9)
+	if err != nil {
+		t.Fatalf("CreateTool(other) err = %v", err)
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, "DELETE FROM inspections WHERE tool_id = $1", other.ID) })
+	if _, _, err := repo.InsertInspection(ctx, &core.Inspection{
+		ToolID: other.ID, InspectorID: "00000000-0000-0000-0000-0000000000ff",
+		Mode: core.InspectionModePassFail, OverallResult: core.InspectionResultPass,
+	}, key); err != nil {
+		t.Fatalf("InsertInspection(other tool, same key) err = %v, want success (scope is per tool)", err)
+	}
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM inspections WHERE tool_id = $1", other.ID).Scan(&count); err != nil {
+		t.Fatalf("counting other inspections err = %v", err)
+	}
+	if count != 1 {
+		t.Errorf("other tool inspections = %d, want 1 (the same key is legal across tools)", count)
+	}
+
+	// FindInspectionByToolAndKey: the early replay lookup answers the record
+	// (with items); a missing key pair answers (nil, nil).
+	found, err := repo.FindInspectionByToolAndKey(ctx, tool.ID, key)
+	if err != nil {
+		t.Fatalf("FindInspectionByToolAndKey err = %v", err)
+	}
+	if found == nil || found.ID != first.ID || len(found.Items) != 2 {
+		t.Errorf("found = %+v, want the first record WITH its snapshot items", found)
+	}
+	missing, err := repo.FindInspectionByToolAndKey(ctx, tool.ID, "00000000-0000-0000-0000-0000000000b9")
+	if err != nil {
+		t.Fatalf("FindInspectionByToolAndKey(missing) err = %v", err)
+	}
+	if missing != nil {
+		t.Errorf("missing = %+v, want nil (no replay for an unknown key)", missing)
+	}
+}
+
+// TestPostgresInspectionConcurrentRace exercises the CONCURRENT_RACE matrix row
+// of Story 7.5 under REAL concurrency (the sequential replay tests cannot reach
+// it): two goroutines insert the SAME (tool, key) checklist inspection at once.
+// The DB UNIQUE (tool_id, idempotency_key) constraint is the authority — exactly
+// ONE insert wins, the other is an ABSORBED replay (reported via `replayed`),
+// and the DB holds exactly one inspection row + its one snapshot item set. Both
+// goroutines succeed (the loser replays the winner's record, never an error).
+func TestPostgresInspectionConcurrentRace(t *testing.T) {
+	pool := toolTestPool(t)
+	ctx := context.Background()
+	t.Cleanup(func() { pool.Close() })
+
+	repo := NewRepository(New(pool))
+	toolTypeID, _ := seedToolRefs(t, ctx, pool)
+	tool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Race-Werkzeug", ToolTypeID: toolTypeID}, "GEAR", 9)
+	if err != nil {
+		t.Fatalf("CreateTool err = %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, "DELETE FROM inspections WHERE tool_id = $1", tool.ID)
+	})
+	key := "00000000-0000-0000-0000-0000000000d1"
+	insp := &core.Inspection{
+		ToolID: tool.ID, InspectorID: "00000000-0000-0000-0000-0000000000ff",
+		Mode: core.InspectionModeChecklist, OverallResult: core.InspectionResultFail,
+		Items: []core.InspectionItem{
+			{ItemID: "11111111-1111-1111-1111-111111111111", Label: "Kabel", Position: 0, Result: core.InspectionResultPass},
+			{ItemID: "22222222-2222-2222-2222-222222222222", Label: "Bohrfutter", Position: 1, Result: core.InspectionResultFail},
+		},
+	}
+
+	// Deterministic sync: both goroutines wait on `start`, then race the insert.
+	start := make(chan struct{})
+	type insertResult struct {
+		record   *core.Inspection
+		replayed bool
+		err      error
+	}
+	results := make(chan insertResult, 2)
+	for i := 0; i < 2; i++ {
+		go func() {
+			<-start
+			record, replayed, err := repo.InsertInspection(ctx, insp, key)
+			results <- insertResult{record: record, replayed: replayed, err: err}
+		}()
+	}
+	close(start)
+	resA, resB := <-results, <-results
+	if resA.err != nil || resB.err != nil {
+		t.Fatalf("concurrent insert errs = %v / %v, want both to succeed (the loser replays)", resA.err, resB.err)
+	}
+	if resA.record == nil || resB.record == nil {
+		t.Fatal("a concurrent insert returned a nil record")
+	}
+	// Exactly ONE insert wins; the other is an absorbed replay (the DB unique
+	// constraint dedupes, the loser fetches + returns the winner's record).
+	if resA.replayed == resB.replayed {
+		t.Fatalf("replayed flags = %v / %v, want exactly one absorbed replay", resA.replayed, resB.replayed)
+	}
+	if resA.record.ID != resB.record.ID {
+		t.Errorf("record ids = %q / %q, want the SAME winner row (the loser replays it)", resA.record.ID, resB.record.ID)
+	}
+
+	var count int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM inspections WHERE tool_id = $1", tool.ID).Scan(&count); err != nil {
+		t.Fatalf("counting inspections err = %v", err)
+	}
+	if count != 1 {
+		t.Errorf("inspections = %d, want exactly 1 (CONCURRENT_RACE → at-most-once)", count)
+	}
+	var itemCount int
+	if err := pool.QueryRow(ctx,
+		"SELECT count(*) FROM inspection_items ii JOIN inspections i ON i.id = ii.inspection_id WHERE i.tool_id = $1", tool.ID).Scan(&itemCount); err != nil {
+		t.Fatalf("counting inspection_items err = %v", err)
+	}
+	if itemCount != 2 {
+		t.Errorf("inspection_items = %d, want exactly 2 (the winner's snapshot, no duplicates)", itemCount)
+	}
+}
+
+// TestPostgresReinstatementIdempotentReplay exercises the Story 7.5
+// at-most-once contract for the reinstatement write: a retried insert with the
+// SAME tool + idempotency_key is a no-op replay (nil error, still one row); the
+// early FindReinstatementByToolAndKey lookup answers the committed row.
+func TestPostgresReinstatementIdempotentReplay(t *testing.T) {
+	pool := toolTestPool(t)
+	ctx := context.Background()
+	t.Cleanup(func() { pool.Close() })
+
+	repo := NewRepository(New(pool))
+	toolTypeID, _ := seedToolRefs(t, ctx, pool)
+	tool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Reinstate-Idempotent", ToolTypeID: toolTypeID}, "GEAR", 9)
+	if err != nil {
+		t.Fatalf("CreateTool err = %v", err)
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, "DELETE FROM reinstatements WHERE tool_id = $1", tool.ID) })
+	key := "00000000-0000-0000-0000-0000000000c1"
+
+	// A reinstatement needs no prior inspection to persist (the row is the
+	// ledger entry; the OOS precondition is a CORE concern).
+	if row, replayed, err := repo.InsertReinstatement(ctx, tool.ID, "00000000-0000-0000-0000-0000000000aa", "Ersatzteil eingetroffen", key); err != nil {
+		t.Fatalf("InsertReinstatement(first) err = %v", err)
+	} else {
+		if replayed {
+			t.Errorf("first insert replayed = true, want false (a FRESH insert is never a replay)")
+		}
+		if row == nil || row.Reason != "Ersatzteil eingetroffen" {
+			t.Errorf("first row = %+v, want the fresh reinstatement", row)
+		}
+	}
+	// RETRY_AFTER_COMMIT: same tool + key → the EXISTING row + `replayed=true`
+	// (the signal the core uses to never re-audit an absorbed write), still one
+	// row, no error.
+	if row, replayed, err := repo.InsertReinstatement(ctx, tool.ID, "00000000-0000-0000-0000-0000000000aa", "nochmal", key); err != nil {
+		t.Fatalf("InsertReinstatement(replay) err = %v, want a no-op replay not an error", err)
+	} else {
+		if !replayed {
+			t.Errorf("replayed = false, want true (the duplicate was absorbed by the unique constraint)")
+		}
+		if row == nil || row.Reason != "Ersatzteil eingetroffen" {
+			t.Errorf("replay row = %+v, want the FIRST committed reinstatement", row)
+		}
+	}
+	var count int
+	if err := pool.QueryRow(ctx, "SELECT count(*) FROM reinstatements WHERE tool_id = $1", tool.ID).Scan(&count); err != nil {
+		t.Fatalf("counting reinstatements err = %v", err)
+	}
+	if count != 1 {
+		t.Errorf("reinstatements = %d, want exactly 1 (at-most-once)", count)
+	}
+
+	found, err := repo.FindReinstatementByToolAndKey(ctx, tool.ID, key)
+	if err != nil {
+		t.Fatalf("FindReinstatementByToolAndKey err = %v", err)
+	}
+	if found == nil || found.Reason != "Ersatzteil eingetroffen" {
+		t.Errorf("found = %+v, want the committed reinstatement", found)
+	}
+	missing, err := repo.FindReinstatementByToolAndKey(ctx, tool.ID, "00000000-0000-0000-0000-0000000000c9")
+	if err != nil {
+		t.Fatalf("FindReinstatementByToolAndKey(missing) err = %v", err)
+	}
+	if missing != nil {
+		t.Errorf("missing = %+v, want nil (no replay for an unknown key)", missing)
 	}
 }
 
@@ -315,34 +572,34 @@ func TestPostgresToolHistory(t *testing.T) {
 	// Seed THREE inspections with back-dated submitted_at (the DESC order must
 	// be deterministic): an OLDER pass_fail, a NEWER pass_fail and a NEWEST
 	// checklist WITH its snapshot items.
-	older, err := repo.InsertInspection(ctx, &core.Inspection{
+	older, _, err := repo.InsertInspection(ctx, &core.Inspection{
 		ToolID: tool.ID, InspectorID: "00000000-0000-0000-0000-0000000000ff",
 		Mode: core.InspectionModePassFail, OverallResult: core.InspectionResultPass, Notes: "alt",
-	})
+	}, "00000000-0000-0000-0000-000000000009")
 	if err != nil {
 		t.Fatalf("InsertInspection(older) err = %v", err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE inspections SET submitted_at = '2026-09-01T09:00:00Z' WHERE id = $1`, older.ID); err != nil {
 		t.Fatalf("back-dating older inspection err = %v", err)
 	}
-	newer, err := repo.InsertInspection(ctx, &core.Inspection{
+	newer, _, err := repo.InsertInspection(ctx, &core.Inspection{
 		ToolID: tool.ID, InspectorID: "00000000-0000-0000-0000-0000000000ff",
 		Mode: core.InspectionModePassFail, OverallResult: core.InspectionResultFail,
-	})
+	}, "00000000-0000-0000-0000-000000000010")
 	if err != nil {
 		t.Fatalf("InsertInspection(newer) err = %v", err)
 	}
 	if _, err := pool.Exec(ctx, `UPDATE inspections SET submitted_at = '2026-09-10T09:00:00Z' WHERE id = $1`, newer.ID); err != nil {
 		t.Fatalf("back-dating newer inspection err = %v", err)
 	}
-	newest, err := repo.InsertInspection(ctx, &core.Inspection{
+	newest, _, err := repo.InsertInspection(ctx, &core.Inspection{
 		ToolID: tool.ID, InspectorID: "00000000-0000-0000-0000-0000000000ff",
 		Mode: core.InspectionModeChecklist, OverallResult: core.InspectionResultFail, Notes: "Bohrfutter locker",
 		Items: []core.InspectionItem{
 			{ItemID: "11111111-1111-1111-1111-111111111111", Label: "Kabel", Position: 0, Result: core.InspectionResultPass},
 			{ItemID: "22222222-2222-2222-2222-222222222222", Label: "Bohrfutter", Position: 1, Result: core.InspectionResultFail},
 		},
-	})
+	}, "00000000-0000-0000-0000-000000000011")
 	if err != nil {
 		t.Fatalf("InsertInspection(newest checklist) err = %v", err)
 	}
@@ -393,11 +650,12 @@ func TestPostgresToolHistory(t *testing.T) {
 	}
 
 	// REINSTATEMENTS newest first (created_at DESC): two rows seeded out of
-	// order by created_at.
+	// order by created_at. Each raw seed supplies its own idempotency_key (the
+	// column is NOT NULL — Story 7.5).
 	if _, err := pool.Exec(ctx,
-		`INSERT INTO reinstatements (tool_id, actor_id, reason, created_at) VALUES
-		 ($1, '00000000-0000-0000-0000-0000000000aa', 'frucher', '2026-09-14T08:00:00Z'),
-		 ($1, '00000000-0000-0000-0000-0000000000aa', 'spaeter', '2026-09-16T08:00:00Z')`, tool.ID); err != nil {
+		`INSERT INTO reinstatements (tool_id, actor_id, reason, created_at, idempotency_key) VALUES
+		 ($1, '00000000-0000-0000-0000-0000000000aa', 'frucher', '2026-09-14T08:00:00Z', '00000000-0000-0000-0000-0000000000a2'),
+		 ($1, '00000000-0000-0000-0000-0000000000aa', 'spaeter', '2026-09-16T08:00:00Z', '00000000-0000-0000-0000-0000000000a3')`, tool.ID); err != nil {
 		t.Fatalf("seeding reinstatements err = %v", err)
 	}
 	rein, err := repo.ListReinstatementsByTool(ctx, tool.ID)
@@ -456,17 +714,17 @@ func TestPostgresToolHistoryEqualTimestampTiebreak(t *testing.T) {
 	// TWO inspections with the SAME submitted_at → the id DESC tiebreak decides.
 	// The DB-generated uuidv7 ids are monotonic, so the second insert carries the
 	// lexicographically-greater id — it must come FIRST.
-	inspA, err := repo.InsertInspection(ctx, &core.Inspection{
+	inspA, _, err := repo.InsertInspection(ctx, &core.Inspection{
 		ToolID: tool.ID, InspectorID: "00000000-0000-0000-0000-0000000000ff",
 		Mode: core.InspectionModePassFail, OverallResult: core.InspectionResultPass,
-	})
+	}, "00000000-0000-0000-0000-000000000012")
 	if err != nil {
 		t.Fatalf("InsertInspection(A) err = %v", err)
 	}
-	inspB, err := repo.InsertInspection(ctx, &core.Inspection{
+	inspB, _, err := repo.InsertInspection(ctx, &core.Inspection{
 		ToolID: tool.ID, InspectorID: "00000000-0000-0000-0000-0000000000ff",
 		Mode: core.InspectionModePassFail, OverallResult: core.InspectionResultPass,
-	})
+	}, "00000000-0000-0000-0000-000000000013")
 	if err != nil {
 		t.Fatalf("InsertInspection(B) err = %v", err)
 	}
@@ -496,16 +754,17 @@ func TestPostgresToolHistoryEqualTimestampTiebreak(t *testing.T) {
 	}
 
 	// TWO reinstatements with the SAME created_at → the id DESC tiebreak decides.
+	// Each raw seed supplies its own idempotency_key (NOT NULL — Story 7.5).
 	var reinA, reinB string
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO reinstatements (tool_id, actor_id, reason, created_at)
-		 VALUES ($1, '00000000-0000-0000-0000-0000000000aa', 'A', '2026-01-01T00:00:00Z') RETURNING id`, tool.ID,
+		`INSERT INTO reinstatements (tool_id, actor_id, reason, created_at, idempotency_key)
+		 VALUES ($1, '00000000-0000-0000-0000-0000000000aa', 'A', '2026-01-01T00:00:00Z', '00000000-0000-0000-0000-0000000000a4') RETURNING id`, tool.ID,
 	).Scan(&reinA); err != nil {
 		t.Fatalf("inserting rein-A err = %v", err)
 	}
 	if err := pool.QueryRow(ctx,
-		`INSERT INTO reinstatements (tool_id, actor_id, reason, created_at)
-		 VALUES ($1, '00000000-0000-0000-0000-0000000000aa', 'B', '2026-01-01T00:00:00Z') RETURNING id`, tool.ID,
+		`INSERT INTO reinstatements (tool_id, actor_id, reason, created_at, idempotency_key)
+		 VALUES ($1, '00000000-0000-0000-0000-0000000000aa', 'B', '2026-01-01T00:00:00Z', '00000000-0000-0000-0000-0000000000a5') RETURNING id`, tool.ID,
 	).Scan(&reinB); err != nil {
 		t.Fatalf("inserting rein-B err = %v", err)
 	}
@@ -556,10 +815,10 @@ func TestPostgresGetLatestInspectionByTool(t *testing.T) {
 	}
 
 	// NEWEST: two inspections (any result) — the newer submitted_at must win.
-	older, err := repo.InsertInspection(ctx, &core.Inspection{
+	older, _, err := repo.InsertInspection(ctx, &core.Inspection{
 		ToolID: tool.ID, InspectorID: "00000000-0000-0000-0000-0000000000ff",
 		Mode: core.InspectionModePassFail, OverallResult: core.InspectionResultPass,
-	})
+	}, "00000000-0000-0000-0000-000000000014")
 	if err != nil {
 		t.Fatalf("InsertInspection(older) err = %v", err)
 	}
@@ -569,10 +828,10 @@ func TestPostgresGetLatestInspectionByTool(t *testing.T) {
 		older.SubmittedAt.Add(-24*time.Hour), older.ID); err != nil {
 		t.Fatalf("backdating older inspection err = %v", err)
 	}
-	newer, err := repo.InsertInspection(ctx, &core.Inspection{
+	newer, _, err := repo.InsertInspection(ctx, &core.Inspection{
 		ToolID: tool.ID, InspectorID: "00000000-0000-0000-0000-0000000000ff",
 		Mode: core.InspectionModePassFail, OverallResult: core.InspectionResultFail,
-	})
+	}, "00000000-0000-0000-0000-000000000015")
 	if err != nil {
 		t.Fatalf("InsertInspection(newer) err = %v", err)
 	}

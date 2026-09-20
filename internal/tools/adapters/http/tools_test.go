@@ -39,11 +39,14 @@ type fakeToolService struct {
 	// ReinstateTool fixture (Story 5.6): reinstateErr drives the error rows;
 	// reinstateStatus is the derived status of a success; reinstateNil simulates
 	// a nil-returning service path (a clean 500); lastReason captures the reason.
-	reinstateErr    error
-	reinstateStatus toolscore.ToolStatus
-	reinstateNil    bool
-	lastReinstateID string
-	lastReason      string
+	// lastIdempotencyKey (Story 7.5) captures the client-supplied key forwarded
+	// by the submit/reinstate handlers.
+	reinstateErr       error
+	reinstateStatus    toolscore.ToolStatus
+	reinstateNil       bool
+	lastReinstateID    string
+	lastReason         string
+	lastIdempotencyKey string
 	// ListInspectionHistory fixture (Story 6.3): historyErr drives the error
 	// rows; history is the returned payload (defaults to an empty history);
 	// historyNil simulates a nil-returning service path (a clean 500);
@@ -176,7 +179,7 @@ func (f *fakeToolService) StartInspection(_ context.Context, _, toolID string) (
 	}, nil
 }
 
-func (f *fakeToolService) SubmitInspection(_ context.Context, _, toolID string, input toolscore.InspectionInput) (*toolscore.SubmitInspectionResult, error) {
+func (f *fakeToolService) SubmitInspection(_ context.Context, _, toolID string, input toolscore.InspectionInput, idempotencyKey string) (*toolscore.SubmitInspectionResult, error) {
 	if f.submitErr != nil {
 		return nil, f.submitErr
 	}
@@ -187,6 +190,7 @@ func (f *fakeToolService) SubmitInspection(_ context.Context, _, toolID string, 
 	}
 	f.lastID = toolID
 	f.lastInspection = input
+	f.lastIdempotencyKey = idempotencyKey
 	// Snapshot the FULL submitted items slice (patch 14): the checklist
 	// round-trip asserts every submitted item, never just the first.
 	items := make([]toolscore.InspectionItem, 0, len(input.Items))
@@ -219,7 +223,7 @@ func (f *fakeToolService) SubmitInspection(_ context.Context, _, toolID string, 
 	}, nil
 }
 
-func (f *fakeToolService) ReinstateTool(_ context.Context, _, toolID, reason string) (*toolscore.ReinstateResult, error) {
+func (f *fakeToolService) ReinstateTool(_ context.Context, _, toolID, reason, idempotencyKey string) (*toolscore.ReinstateResult, error) {
 	if f.reinstateErr != nil {
 		return nil, f.reinstateErr
 	}
@@ -228,6 +232,7 @@ func (f *fakeToolService) ReinstateTool(_ context.Context, _, toolID, reason str
 	}
 	f.lastReinstateID = toolID
 	f.lastReason = reason
+	f.lastIdempotencyKey = idempotencyKey
 	return &toolscore.ReinstateResult{Status: f.reinstateStatus}, nil
 }
 
@@ -1438,9 +1443,10 @@ func TestInspectionStartNilUserUnauthorized(t *testing.T) {
 // seam at POST /api/v1/tools/{id}/inspection behind inspection.submit.
 // ============================================================================
 
-// submitPassBody is a pass_fail pass body (SUBMIT_PASSFAIL).
+// submitPassBody is a pass_fail pass body (SUBMIT_PASSFAIL) with the REQUIRED
+// idempotency_key (Story 7.5 — the at-most-once guard).
 func submitPassBody() string {
-	return `{"mode":"pass_fail","result":"pass","notes":"Alles ok","items":[]}`
+	return `{"mode":"pass_fail","result":"pass","notes":"Alles ok","items":[],"idempotency_key":"11111111-1111-1111-1111-111111111111"}`
 }
 
 func TestInspectionSubmitPass(t *testing.T) {
@@ -1473,6 +1479,9 @@ func TestInspectionSubmitPass(t *testing.T) {
 	if svc.lastID != "id-a" || svc.lastInspection.Result != "pass" {
 		t.Errorf("core received id %q / input %+v", svc.lastID, svc.lastInspection)
 	}
+	if svc.lastIdempotencyKey != "11111111-1111-1111-1111-111111111111" {
+		t.Errorf("core received idempotency key %q, want the client-supplied key (Story 7.5)", svc.lastIdempotencyKey)
+	}
 }
 
 func TestInspectionSubmitFailOOS(t *testing.T) {
@@ -1481,7 +1490,7 @@ func TestInspectionSubmitFailOOS(t *testing.T) {
 	svc := &fakeToolService{}
 	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, activeAdmin(), svc)
 	rec := doRequest(surface, http.MethodPost, "/id-a/inspection", "tok",
-		`{"mode":"pass_fail","result":"fail","notes":"","items":[]}`)
+		`{"mode":"pass_fail","result":"fail","notes":"","items":[],"idempotency_key":"11111111-1111-1111-1111-111111111111"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -1532,7 +1541,7 @@ func TestInspectionSubmitChecklist(t *testing.T) {
 	svc := &fakeToolService{}
 	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, activeAdmin(), svc)
 	rec := doRequest(surface, http.MethodPost, "/id-a/inspection", "tok",
-		`{"mode":"checklist","result":"pass","notes":"","items":[{"item_id":"id-i1","result":"pass"},{"item_id":"id-i2","result":"fail"}]}`)
+		`{"mode":"checklist","result":"pass","notes":"","items":[{"item_id":"id-i1","result":"pass"},{"item_id":"id-i2","result":"fail"}],"idempotency_key":"11111111-1111-1111-1111-111111111111"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -1662,7 +1671,7 @@ func TestInspectionSubmitRejectsUnknownFields(t *testing.T) {
 	svc := &fakeToolService{}
 	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, activeAdmin(), svc)
 	rec := doRequest(surface, http.MethodPost, "/id-a/inspection", "tok",
-		`{"mode":"pass_fail","result":"pass","notes":"","items":[],"bogus":1}`)
+		`{"mode":"pass_fail","result":"pass","notes":"","items":[],"bogus":1,"idempotency_key":"11111111-1111-1111-1111-111111111111"}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -1680,7 +1689,7 @@ func TestInspectionSubmitRejectsTrailingContent(t *testing.T) {
 	svc := &fakeToolService{}
 	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, activeAdmin(), svc)
 	rec := doRequest(surface, http.MethodPost, "/id-a/inspection", "tok",
-		`{"mode":"pass_fail","result":"pass","notes":"","items":[]} {"extra":true}`)
+		`{"mode":"pass_fail","result":"pass","notes":"","items":[],"idempotency_key":"11111111-1111-1111-1111-111111111111"} {"extra":true}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -1724,6 +1733,89 @@ func TestInspectionSubmitMalformedJSON(t *testing.T) {
 	}
 	if svc.lastID != "" {
 		t.Errorf("core received id = %q, want none (bad JSON rejected at decode)", svc.lastID)
+	}
+}
+
+func TestInspectionSubmitMissingIdempotencyKey(t *testing.T) {
+	// MISSING_KEY (Story 7.5): a body WITHOUT `idempotency_key` → 400
+	// invalid_request with the German explanation; the core is NEVER reached
+	// (the at-most-once guard must not be silently bypassable).
+	svc := &fakeToolService{}
+	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPost, "/id-a/inspection", "tok",
+		`{"mode":"pass_fail","result":"pass","notes":"","items":[]}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 400 err = %v", err)
+	}
+	if env.Error.Code != "invalid_request" {
+		t.Errorf("code = %q, want invalid_request", env.Error.Code)
+	}
+	if env.Error.Message != toolscore.MsgIdempotencyKeyInvalid {
+		t.Errorf("message = %q, want %q", env.Error.Message, toolscore.MsgIdempotencyKeyInvalid)
+	}
+	if svc.lastID != "" || svc.lastInspection.Mode != "" {
+		t.Errorf("core was reached (id %q / input %+v), want the key rejected at the HTTP layer", svc.lastID, svc.lastInspection)
+	}
+}
+
+func TestInspectionSubmitInvalidIdempotencyKey(t *testing.T) {
+	// INVALID_KEY (Story 7.5): a non-UUID `idempotency_key` (e.g. "abc") → 400
+	// invalid_request with the German explanation; the core is NEVER reached.
+	svc := &fakeToolService{}
+	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPost, "/id-a/inspection", "tok",
+		`{"mode":"pass_fail","result":"pass","notes":"","items":[],"idempotency_key":"abc"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 400 err = %v", err)
+	}
+	if env.Error.Code != "invalid_request" {
+		t.Errorf("code = %q, want invalid_request", env.Error.Code)
+	}
+	if env.Error.Message != toolscore.MsgIdempotencyKeyInvalid {
+		t.Errorf("message = %q, want %q", env.Error.Message, toolscore.MsgIdempotencyKeyInvalid)
+	}
+	if svc.lastID != "" || svc.lastInspection.Mode != "" {
+		t.Errorf("core was reached (id %q / input %+v), want the key rejected at the HTTP layer", svc.lastID, svc.lastInspection)
+	}
+}
+
+func TestNormalizeIdempotencyKey(t *testing.T) {
+	// The lowercase/trim normalization is LOAD-BEARING (Story 7.5): the store
+	// compares the stored key verbatim, so the HTTP layer must produce a stable
+	// canonical form — an uppercase or whitespace-padded client key must
+	// normalize to the EXACT value a retry sends (or the insert and the replay
+	// lookup would compare unequal).
+	cases := []struct {
+		name string
+		in   string
+		want string
+		ok   bool
+	}{
+		{"canonical lowercase", "11111111-1111-1111-1111-111111111111", "11111111-1111-1111-1111-111111111111", true},
+		{"uppercase to lowercase", "11111111-AAAA-BBBB-CCCC-DDDDEEEEFFFF", "11111111-aaaa-bbbb-cccc-ddddeeeeffff", true},
+		{"whitespace-padded trimmed", "  11111111-1111-1111-1111-111111111111  ", "11111111-1111-1111-1111-111111111111", true},
+		{"missing", "", "", false},
+		{"malformed", "abc", "", false},
+		{"wrong shape", "11111111-1111-1111", "", false},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			got, ok := normalizeIdempotencyKey(tc.in)
+			if ok != tc.ok {
+				t.Errorf("ok = %v, want %v", ok, tc.ok)
+			}
+			if got != tc.want {
+				t.Errorf("key = %q, want %q", got, tc.want)
+			}
+		})
 	}
 }
 
@@ -1883,7 +1975,7 @@ func TestReinstateToolOK(t *testing.T) {
 	svc := &fakeToolService{reinstateStatus: toolscore.ToolStatus{Status: toolscore.ToolStatusCodeGreen}}
 	svc.reinstateStatus.NextDue = func() *time.Time { t := time.Now().Add(365 * 24 * time.Hour); return &t }()
 	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.ToolReinstatePermission}, activeAdmin(), svc)
-	rec := doRequest(surface, http.MethodPost, "/id-a/reinstatement", "tok", `{"reason":"Ersatzteil eingetroffen"}`)
+	rec := doRequest(surface, http.MethodPost, "/id-a/reinstatement", "tok", `{"reason":"Ersatzteil eingetroffen","idempotency_key":"11111111-1111-1111-1111-111111111111"}`)
 	if rec.Code != http.StatusOK {
 		t.Fatalf("status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -1904,6 +1996,9 @@ func TestReinstateToolOK(t *testing.T) {
 	if svc.lastReinstateID != "id-a" || svc.lastReason != "Ersatzteil eingetroffen" {
 		t.Errorf("service args = id %q reason %q, want id-a / Ersatzteil eingetroffen", svc.lastReinstateID, svc.lastReason)
 	}
+	if svc.lastIdempotencyKey != "11111111-1111-1111-1111-111111111111" {
+		t.Errorf("service received idempotency key %q, want the client-supplied key (Story 7.5)", svc.lastIdempotencyKey)
+	}
 }
 
 func TestReinstateToolEmptyReason(t *testing.T) {
@@ -1913,7 +2008,7 @@ func TestReinstateToolEmptyReason(t *testing.T) {
 	// 400 mapping of the sentinel the core returns).
 	svc := &fakeToolService{reinstateErr: &toolscore.InvalidInspectionError{Message: toolscore.MsgReinstatementReasonRequired}}
 	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.ToolReinstatePermission}, activeAdmin(), svc)
-	rec := doRequest(surface, http.MethodPost, "/id-a/reinstatement", "tok", `{"reason":"   "}`)
+	rec := doRequest(surface, http.MethodPost, "/id-a/reinstatement", "tok", `{"reason":"   ","idempotency_key":"11111111-1111-1111-1111-111111111111"}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -1929,13 +2024,61 @@ func TestReinstateToolEmptyReason(t *testing.T) {
 	}
 }
 
+func TestReinstateToolMissingIdempotencyKey(t *testing.T) {
+	// MISSING_KEY (Story 7.5): a body WITHOUT `idempotency_key` → 400
+	// invalid_request with the German explanation; the core is NEVER reached.
+	svc := &fakeToolService{}
+	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.ToolReinstatePermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPost, "/id-a/reinstatement", "tok", `{"reason":"Ersatzteil"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 400 err = %v", err)
+	}
+	if env.Error.Code != "invalid_request" {
+		t.Errorf("code = %q, want invalid_request", env.Error.Code)
+	}
+	if env.Error.Message != toolscore.MsgIdempotencyKeyInvalid {
+		t.Errorf("message = %q, want %q", env.Error.Message, toolscore.MsgIdempotencyKeyInvalid)
+	}
+	if svc.lastReinstateID != "" {
+		t.Errorf("core was reached (id %q), want the key rejected at the HTTP layer", svc.lastReinstateID)
+	}
+}
+
+func TestReinstateToolInvalidIdempotencyKey(t *testing.T) {
+	// INVALID_KEY (Story 7.5): a non-UUID `idempotency_key` → 400
+	// invalid_request with the German explanation; the core is NEVER reached.
+	svc := &fakeToolService{}
+	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.ToolReinstatePermission}, activeAdmin(), svc)
+	rec := doRequest(surface, http.MethodPost, "/id-a/reinstatement", "tok", `{"reason":"Ersatzteil","idempotency_key":"not-a-uuid"}`)
+	if rec.Code != http.StatusBadRequest {
+		t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding 400 err = %v", err)
+	}
+	if env.Error.Code != "invalid_request" {
+		t.Errorf("code = %q, want invalid_request", env.Error.Code)
+	}
+	if env.Error.Message != toolscore.MsgIdempotencyKeyInvalid {
+		t.Errorf("message = %q, want %q", env.Error.Message, toolscore.MsgIdempotencyKeyInvalid)
+	}
+	if svc.lastReinstateID != "" {
+		t.Errorf("core was reached (id %q), want the key rejected at the HTTP layer", svc.lastReinstateID)
+	}
+}
+
 func TestReinstateToolTooLongReason(t *testing.T) {
 	// REINSTATE_LONG: a reason over 2000 runes → 400 German (the core's
 	// sentinel; the handler maps the same InvalidInspectionError).
 	svc := &fakeToolService{reinstateErr: &toolscore.InvalidInspectionError{Message: toolscore.MsgReinstatementReasonTooLong}}
 	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.ToolReinstatePermission}, activeAdmin(), svc)
 	long := strings.Repeat("x", toolscore.MaxReinstatementReasonRunes+1)
-	rec := doRequest(surface, http.MethodPost, "/id-a/reinstatement", "tok", `{"reason":"`+long+`"}`)
+	rec := doRequest(surface, http.MethodPost, "/id-a/reinstatement", "tok", `{"reason":"`+long+`","idempotency_key":"11111111-1111-1111-1111-111111111111"}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -1954,7 +2097,7 @@ func TestReinstateToolGated(t *testing.T) {
 	// the tool.reinstate RequirePermission on the reinstatement surface.
 	svc := &fakeToolService{}
 	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.InspectionSubmitPermission}, activeAdmin(), svc)
-	rec := doRequest(surface, http.MethodPost, "/id-a/reinstatement", "tok", `{"reason":"Ersatzteil"}`)
+	rec := doRequest(surface, http.MethodPost, "/id-a/reinstatement", "tok", `{"reason":"Ersatzteil","idempotency_key":"11111111-1111-1111-1111-111111111111"}`)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -1972,7 +2115,7 @@ func TestReinstateToolToolNotFound(t *testing.T) {
 	// uniform envelope.
 	svc := &fakeToolService{reinstateErr: toolscore.ErrToolNotFound}
 	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.ToolReinstatePermission}, activeAdmin(), svc)
-	rec := doRequest(surface, http.MethodPost, "/id-missing/reinstatement", "tok", `{"reason":"Ersatzteil"}`)
+	rec := doRequest(surface, http.MethodPost, "/id-missing/reinstatement", "tok", `{"reason":"Ersatzteil","idempotency_key":"11111111-1111-1111-1111-111111111111"}`)
 	if rec.Code != http.StatusNotFound {
 		t.Fatalf("status = %d, want 404 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -1991,7 +2134,7 @@ func TestReinstateToolToolNotFound(t *testing.T) {
 func TestReinstateToolUnauthenticated(t *testing.T) {
 	// REINSTATE_UNAUTHENTICATED: no session → 401 uniform envelope.
 	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.ToolReinstatePermission}, nil, &fakeToolService{})
-	rec := doRequest(surface, http.MethodPost, "/id-a/reinstatement", "", `{"reason":"Ersatzteil"}`)
+	rec := doRequest(surface, http.MethodPost, "/id-a/reinstatement", "", `{"reason":"Ersatzteil","idempotency_key":"11111111-1111-1111-1111-111111111111"}`)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -2010,14 +2153,14 @@ func TestReinstateToolCompositionMountGate(t *testing.T) {
 	if rec := doRequest(noReinstate, http.MethodPost, "/id-a/inspection/start", "tok", ""); rec.Code != http.StatusOK {
 		t.Fatalf("start status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
-	rec := doRequest(noReinstate, http.MethodPost, "/id-a/reinstatement", "tok", `{"reason":"Ersatzteil"}`)
+	rec := doRequest(noReinstate, http.MethodPost, "/id-a/reinstatement", "tok", `{"reason":"Ersatzteil","idempotency_key":"11111111-1111-1111-1111-111111111111"}`)
 	if rec.Code != http.StatusForbidden {
 		t.Fatalf("reinstate (no tool.reinstate) status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
 	}
 
 	// tool.reinstate holder WITHOUT inspection.submit: reinstate 200, start 403.
 	reinstateOnly := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.ToolReinstatePermission}, activeAdmin(), svc)
-	if rec := doRequest(reinstateOnly, http.MethodPost, "/id-a/reinstatement", "tok", `{"reason":"Ersatzteil"}`); rec.Code != http.StatusOK {
+	if rec := doRequest(reinstateOnly, http.MethodPost, "/id-a/reinstatement", "tok", `{"reason":"Ersatzteil","idempotency_key":"11111111-1111-1111-1111-111111111111"}`); rec.Code != http.StatusOK {
 		t.Fatalf("reinstate (holder) status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
 	}
 	if rec := doRequest(reinstateOnly, http.MethodPost, "/id-a/inspection/start", "tok", ""); rec.Code != http.StatusForbidden {
@@ -2050,7 +2193,7 @@ func TestReinstateToolNilServiceResult(t *testing.T) {
 	// A nil-returning service path (a wiring defect) → clean 500, never panic.
 	svc := &fakeToolService{reinstateNil: true}
 	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.ToolReinstatePermission}, activeAdmin(), svc)
-	rec := doRequest(surface, http.MethodPost, "/id-a/reinstatement", "tok", `{"reason":"Ersatzteil"}`)
+	rec := doRequest(surface, http.MethodPost, "/id-a/reinstatement", "tok", `{"reason":"Ersatzteil","idempotency_key":"11111111-1111-1111-1111-111111111111"}`)
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -2070,7 +2213,7 @@ func TestReinstateToolNilUserUnauthorized(t *testing.T) {
 	// The handler's nil-user 401 guard (unreachable through the gated
 	// composition) — direct callers must never reinstate without a session.
 	surface := nakedReinstatementRouter(&fakeToolService{})
-	rec := doRequest(surface, http.MethodPost, "/", "tok", `{"reason":"Ersatzteil"}`)
+	rec := doRequest(surface, http.MethodPost, "/", "tok", `{"reason":"Ersatzteil","idempotency_key":"11111111-1111-1111-1111-111111111111"}`)
 	if rec.Code != http.StatusUnauthorized {
 		t.Fatalf("status = %d, want 401 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -2089,7 +2232,7 @@ func TestReinstateToolNotOOS(t *testing.T) {
 	// reinstatement is only meaningful as the SOLE exit from OOS).
 	svc := &fakeToolService{reinstateErr: &toolscore.InvalidInspectionError{Message: toolscore.MsgToolNotOutOfService}}
 	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.ToolReinstatePermission}, activeAdmin(), svc)
-	rec := doRequest(surface, http.MethodPost, "/id-a/reinstatement", "tok", `{"reason":"Ersatzteil"}`)
+	rec := doRequest(surface, http.MethodPost, "/id-a/reinstatement", "tok", `{"reason":"Ersatzteil","idempotency_key":"11111111-1111-1111-1111-111111111111"}`)
 	if rec.Code != http.StatusBadRequest {
 		t.Fatalf("status = %d, want 400 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -2111,7 +2254,7 @@ func TestReinstateToolInternalErrorEnvelope(t *testing.T) {
 	// data leak.
 	svc := &fakeToolService{reinstateErr: errors.New("boom")}
 	surface := toolsInspectionGateway([]string{toolscore.DashboardViewPermission, toolscore.ToolReinstatePermission}, activeAdmin(), svc)
-	rec := doRequest(surface, http.MethodPost, "/id-a/reinstatement", "tok", `{"reason":"Ersatzteil"}`)
+	rec := doRequest(surface, http.MethodPost, "/id-a/reinstatement", "tok", `{"reason":"Ersatzteil","idempotency_key":"11111111-1111-1111-1111-111111111111"}`)
 	if rec.Code != http.StatusInternalServerError {
 		t.Fatalf("status = %d, want 500 (body %s)", rec.Code, rec.Body.String())
 	}
@@ -2137,7 +2280,7 @@ func TestReinstateToolClientAbort(t *testing.T) {
 	rec := httptest.NewRecorder()
 	ctx, cancel := context.WithCancel(context.Background())
 	cancel()
-	req := httptest.NewRequest(http.MethodPost, "/id-a/reinstatement", strings.NewReader(`{"reason":"Ersatzteil"}`))
+	req := httptest.NewRequest(http.MethodPost, "/id-a/reinstatement", strings.NewReader(`{"reason":"Ersatzteil","idempotency_key":"11111111-1111-1111-1111-111111111111"}`))
 	req = req.WithContext(auth.WithUser(ctx, activeAdmin().User))
 	h.ReinstateTool(rec, req)
 	if rec.Code != http.StatusOK {

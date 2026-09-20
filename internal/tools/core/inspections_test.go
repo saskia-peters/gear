@@ -10,6 +10,11 @@ import (
 	admcore "github.com/saskia-peters/gear/internal/admin/core"
 )
 
+// testIdempotencyKey is the fixed client-supplied key the inspection/
+// reinstatement tests reuse (Story 7.5): a stable per-intent UUID value so
+// a retried submit/reinstate (same key) replays instead of inserting.
+const testIdempotencyKey = "11111111-1111-1111-1111-111111111111"
+
 // inspectionStore seeds the Story 5.1/5.3 I/O matrix: one ACTIVE tool whose
 // type REQUIRES qualification id-q1 (checklist mode) with the type's ordered
 // checklist items and the AD-5 schedule-resolution inputs (ScheduleID empty →
@@ -316,7 +321,7 @@ func TestSubmitInspectionPassFailPass(t *testing.T) {
 
 	result, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", InspectionInput{
 		Mode: InspectionModePassFail, Result: InspectionResultPass, Notes: "Alles ok",
-	})
+	}, testIdempotencyKey)
 	if err != nil {
 		t.Fatalf("SubmitInspection(pass) err = %v", err)
 	}
@@ -351,7 +356,7 @@ func TestSubmitInspectionPassFailFail(t *testing.T) {
 
 	result, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", InspectionInput{
 		Mode: InspectionModePassFail, Result: InspectionResultFail,
-	})
+	}, testIdempotencyKey)
 	if err != nil {
 		t.Fatalf("SubmitInspection(fail) err = %v", err)
 	}
@@ -374,7 +379,7 @@ func TestSubmitInspectionResolvesAppSettingsOnce(t *testing.T) {
 	port := &fakeAppSettingsPort{settings: adoptedSettings()}
 	svc.appSettings = port
 
-	if _, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", checklistSubmitInput()); err != nil {
+	if _, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", checklistSubmitInput(), testIdempotencyKey); err != nil {
 		t.Fatalf("SubmitInspection err = %v", err)
 	}
 	if port.calls != 1 {
@@ -393,7 +398,7 @@ func TestReinstateToolResolvesAppSettingsOnce(t *testing.T) {
 	now := time.Now()
 	store.status = &ToolInspectionStatus{LatestFailAt: &now}
 
-	if _, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "wiederhergestellt"); err != nil {
+	if _, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "wiederhergestellt", testIdempotencyKey); err != nil {
 		t.Fatalf("ReinstateTool err = %v", err)
 	}
 	if port.calls != 1 {
@@ -415,7 +420,7 @@ func TestSubmitInspectionChecklistWithFailures(t *testing.T) {
 			{ItemID: "item-1", Result: InspectionResultPass},
 			{ItemID: "item-2", Result: InspectionResultFail},
 		},
-	})
+	}, testIdempotencyKey)
 	if err != nil {
 		t.Fatalf("SubmitInspection(checklist) err = %v", err)
 	}
@@ -447,7 +452,7 @@ func TestSubmitInspectionGated(t *testing.T) {
 	// persisted (defense-in-depth, AD-6).
 	svc, store, _ := submitInspectionService()
 	svc.perms = &fakePerms{perms: []string{"dashboard.view"}}
-	if _, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", checklistSubmitInput()); !errors.Is(err, ErrForbidden) {
+	if _, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", checklistSubmitInput(), testIdempotencyKey); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("err = %v, want ErrForbidden", err)
 	}
 	if len(store.inspections) != 0 {
@@ -458,7 +463,7 @@ func TestSubmitInspectionGated(t *testing.T) {
 	// tool's required qualification → ErrToolQualificationMissing, no record.
 	svc.perms = &fakePerms{perms: []string{InspectionSubmitPermission}}
 	svc.qualifications = holdsPort(actorID)
-	if _, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", checklistSubmitInput()); !errors.Is(err, ErrToolQualificationMissing) {
+	if _, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", checklistSubmitInput(), testIdempotencyKey); !errors.Is(err, ErrToolQualificationMissing) {
 		t.Fatalf("err = %v, want ErrToolQualificationMissing", err)
 	}
 	if len(store.inspections) != 0 {
@@ -470,14 +475,14 @@ func TestSubmitInspectionToolNotFound(t *testing.T) {
 	// SUBMIT_ARCHIVED / SUBMIT_UNKNOWN: archived or unknown tool → the 404
 	// sentinel, no record.
 	svc, store, _ := submitInspectionService()
-	if _, err := svc.SubmitInspection(context.Background(), actorID, "id-missing", checklistSubmitInput()); !errors.Is(err, ErrToolNotFound) {
+	if _, err := svc.SubmitInspection(context.Background(), actorID, "id-missing", checklistSubmitInput(), testIdempotencyKey); !errors.Is(err, ErrToolNotFound) {
 		t.Fatalf("unknown id err = %v, want ErrToolNotFound", err)
 	}
 	archived := *inspectionStore()
 	now := time.Now()
 	archived.tools[0].ArchivedAt = &now
 	svc.store = &archived
-	if _, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", checklistSubmitInput()); !errors.Is(err, ErrToolNotFound) {
+	if _, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", checklistSubmitInput(), testIdempotencyKey); !errors.Is(err, ErrToolNotFound) {
 		t.Fatalf("archived id err = %v, want ErrToolNotFound", err)
 	}
 	if len(store.inspections) != 0 {
@@ -528,7 +533,7 @@ func TestSubmitInspectionInvalid(t *testing.T) {
 			input := checklistSubmitInput()
 			input.Mode = tc.mode
 			tc.mutate(&input)
-			_, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", input)
+			_, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", input, testIdempotencyKey)
 			var inv *InvalidInspectionError
 			if !errors.As(err, &inv) {
 				t.Fatalf("err = %v, want *InvalidInspectionError", err)
@@ -556,7 +561,7 @@ func TestSubmitInspectionRoundTripStatus(t *testing.T) {
 
 	result, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", InspectionInput{
 		Mode: InspectionModePassFail, Result: InspectionResultPass,
-	})
+	}, testIdempotencyKey)
 	if err != nil {
 		t.Fatalf("SubmitInspection err = %v", err)
 	}
@@ -586,7 +591,7 @@ func TestSubmitInspectionScheduleOverride(t *testing.T) {
 
 	result, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", InspectionInput{
 		Mode: InspectionModePassFail, Result: InspectionResultPass,
-	})
+	}, testIdempotencyKey)
 	if err != nil {
 		t.Fatalf("SubmitInspection(override) err = %v", err)
 	}
@@ -609,7 +614,7 @@ func TestSubmitInspectionTrimBeforeValidate(t *testing.T) {
 
 	result, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", InspectionInput{
 		Mode: InspectionModePassFail, Result: "  pass  ", Notes: "  alles ok  ",
-	})
+	}, testIdempotencyKey)
 	if err != nil {
 		t.Fatalf("SubmitInspection(trimmed) err = %v", err)
 	}
@@ -637,7 +642,7 @@ func TestSubmitInspectionStatusReadFailsAfterCommit(t *testing.T) {
 
 	result, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", InspectionInput{
 		Mode: InspectionModePassFail, Result: InspectionResultPass,
-	})
+	}, testIdempotencyKey)
 	if err != nil {
 		t.Fatalf("SubmitInspection(status read fail) err = %v, want a best-effort success", err)
 	}
@@ -667,7 +672,7 @@ func TestSubmitInspectionScheduleLoudFailures(t *testing.T) {
 		svc.schedules = nil
 		if _, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", InspectionInput{
 			Mode: InspectionModePassFail, Result: InspectionResultPass,
-		}); err == nil {
+		}, testIdempotencyKey); err == nil {
 			t.Fatal("nil port err = nil, want a loud internal error")
 		}
 		if len(store.inspections) != 0 {
@@ -680,7 +685,7 @@ func TestSubmitInspectionScheduleLoudFailures(t *testing.T) {
 		svc.schedules = &fakeSchedulesPort{err: errors.New("boom")}
 		if _, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", InspectionInput{
 			Mode: InspectionModePassFail, Result: InspectionResultPass,
-		}); err == nil {
+		}, testIdempotencyKey); err == nil {
 			t.Fatal("port error err = nil, want a loud internal error")
 		}
 		if len(store.inspections) != 0 {
@@ -695,7 +700,7 @@ func TestSubmitInspectionScheduleLoudFailures(t *testing.T) {
 		}}}
 		if _, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", InspectionInput{
 			Mode: InspectionModePassFail, Result: InspectionResultPass,
-		}); err == nil {
+		}, testIdempotencyKey); err == nil {
 			t.Fatal("absent effective schedule err = nil, want a loud internal error")
 		}
 		if len(store.inspections) != 0 {
@@ -710,7 +715,7 @@ func TestSubmitInspectionScheduleLoudFailures(t *testing.T) {
 		}}}
 		if _, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", InspectionInput{
 			Mode: InspectionModePassFail, Result: InspectionResultPass,
-		}); err == nil {
+		}, testIdempotencyKey); err == nil {
 			t.Fatal("invalid-interval err = nil, want a loud internal error")
 		}
 		if len(store.inspections) != 0 {
@@ -774,7 +779,7 @@ func TestSubmitInspectionOOSBlocked(t *testing.T) {
 	failAt := time.Now()
 	store.status = &ToolInspectionStatus{LatestFailAt: &failAt}
 
-	_, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", checklistSubmitInput())
+	_, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", checklistSubmitInput(), testIdempotencyKey)
 	if !errors.Is(err, ErrToolOutOfService) {
 		t.Fatalf("err = %v, want ErrToolOutOfService", err)
 	}
@@ -817,7 +822,7 @@ func TestReinstateToolOK(t *testing.T) {
 	failAt := time.Now().Add(-48 * time.Hour)
 	store.status = &ToolInspectionStatus{LatestFailAt: &failAt}
 
-	result, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "  Ersatzteil eingetroffen  ")
+	result, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "  Ersatzteil eingetroffen  ", testIdempotencyKey)
 	if err != nil {
 		t.Fatalf("ReinstateTool err = %v", err)
 	}
@@ -851,7 +856,7 @@ func TestReinstateToolNotOOS(t *testing.T) {
 	svc, store, _ := reinstateService()
 
 	// Never failed → serviceable.
-	if _, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "Ersatzteil"); !errors.Is(err, ErrInspectionInvalid) {
+	if _, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "Ersatzteil", testIdempotencyKey); !errors.Is(err, ErrInspectionInvalid) {
 		t.Fatalf("never-failed err = %v, want ErrInspectionInvalid", err)
 	} else {
 		var inv *InvalidInspectionError
@@ -867,19 +872,23 @@ func TestReinstateToolNotOOS(t *testing.T) {
 func TestReinstateToolDuplicateRejected(t *testing.T) {
 	// REINSTATE_DUPLICATE: after a successful reinstatement the tool is
 	// serviceable again (the persisted row flipped the derivation) — a SECOND
-	// reinstatement answers the not-OOS 400 with NOTHING more written.
+	// reinstate with a FRESH key (a genuinely new submit intent, Story 7.5)
+	// answers the not-OOS 400 with NOTHING more written. (A second reinstate
+	// with the SAME key is a REPLAY and returns 200 — pinned by
+	// TestReinstateToolReplayAfterCommit.)
 	svc, store, _ := reinstateService()
 	failAt := time.Now().Add(-48 * time.Hour)
 	store.status = &ToolInspectionStatus{LatestFailAt: &failAt}
 
-	if _, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "Erstes Ersatzteil"); err != nil {
+	if _, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "Erstes Ersatzteil", testIdempotencyKey); err != nil {
 		t.Fatalf("first reinstatement err = %v", err)
 	}
 	if len(store.reinstatements) != 1 {
 		t.Fatalf("persisted after first = %d, want 1", len(store.reinstatements))
 	}
 
-	if _, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "Doppelt"); !errors.Is(err, ErrInspectionInvalid) {
+	// A fresh key = a new intent on a now-serviceable tool → the not-OOS 400.
+	if _, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "Doppelt", "22222222-2222-2222-2222-222222222222"); !errors.Is(err, ErrInspectionInvalid) {
 		t.Fatalf("duplicate reinstatement err = %v, want ErrInspectionInvalid (not-OOS)", err)
 	} else {
 		var inv *InvalidInspectionError
@@ -903,7 +912,7 @@ func TestReinstateToolPostCommitScheduleFailure(t *testing.T) {
 	store.status = &ToolInspectionStatus{LatestFailAt: &failAt}
 	svc.schedules = &fakeSchedulesPort{err: errors.New("boom")}
 
-	result, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "Ersatzteil")
+	result, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "Ersatzteil", testIdempotencyKey)
 	if err != nil {
 		t.Fatalf("ReinstateTool(schedule fail) err = %v, want a best-effort success", err)
 	}
@@ -933,7 +942,7 @@ func TestReinstateToolPostCommitReadFailure(t *testing.T) {
 	store.statusErr = errors.New("boom")
 	store.statusErrFromRead = 2
 
-	result, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "Ersatzteil")
+	result, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "Ersatzteil", testIdempotencyKey)
 	if err != nil {
 		t.Fatalf("ReinstateTool(read fail) err = %v, want a best-effort success", err)
 	}
@@ -954,14 +963,14 @@ func TestReinstateToolValidation(t *testing.T) {
 	failAt := time.Now().Add(-48 * time.Hour)
 	store.status = &ToolInspectionStatus{LatestFailAt: &failAt}
 
-	if _, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "   "); !errors.Is(err, ErrInspectionInvalid) {
+	if _, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "   ", testIdempotencyKey); !errors.Is(err, ErrInspectionInvalid) {
 		t.Fatalf("empty reason err = %v, want ErrInspectionInvalid", err)
 	}
 	if MsgReinstatementReasonRequired != "Bitte gib einen Grund für die Wiederherstellung an." {
 		t.Errorf("MsgReinstatementReasonRequired = %q, want the spec German text", MsgReinstatementReasonRequired)
 	}
 	long := strings.Repeat("ä", MaxReinstatementReasonRunes+1)
-	_, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", long)
+	_, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", long, testIdempotencyKey)
 	var inv *InvalidInspectionError
 	if !errors.As(err, &inv) {
 		t.Fatalf("long reason err = %v, want *InvalidInspectionError", err)
@@ -979,10 +988,10 @@ func TestReinstateToolGated(t *testing.T) {
 	// (AD-6). An empty actor id never passes.
 	svc, store, _ := reinstateService()
 	svc.perms = &fakePerms{perms: []string{InspectionSubmitPermission}}
-	if _, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "Ersatzteil"); !errors.Is(err, ErrForbidden) {
+	if _, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "Ersatzteil", testIdempotencyKey); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("err = %v, want ErrForbidden", err)
 	}
-	if _, err := svc.ReinstateTool(context.Background(), "", "id-tool", "Ersatzteil"); !errors.Is(err, ErrForbidden) {
+	if _, err := svc.ReinstateTool(context.Background(), "", "id-tool", "Ersatzteil", testIdempotencyKey); !errors.Is(err, ErrForbidden) {
 		t.Fatalf("empty actor err = %v, want ErrForbidden", err)
 	}
 	if len(store.reinstatements) != 0 {
@@ -994,14 +1003,14 @@ func TestReinstateToolToolNotFound(t *testing.T) {
 	// REINSTATE_ARCHIVED / REINSTATE_UNKNOWN: an unknown or archived tool → the
 	// 404 sentinel, no write.
 	svc, store, _ := reinstateService()
-	if _, err := svc.ReinstateTool(context.Background(), actorID, "id-missing", "Ersatzteil"); !errors.Is(err, ErrToolNotFound) {
+	if _, err := svc.ReinstateTool(context.Background(), actorID, "id-missing", "Ersatzteil", testIdempotencyKey); !errors.Is(err, ErrToolNotFound) {
 		t.Fatalf("unknown id err = %v, want ErrToolNotFound", err)
 	}
 	archived := *inspectionStore()
 	now := time.Now()
 	archived.tools[0].ArchivedAt = &now
 	svc.store = &archived
-	if _, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "Ersatzteil"); !errors.Is(err, ErrToolNotFound) {
+	if _, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "Ersatzteil", testIdempotencyKey); !errors.Is(err, ErrToolNotFound) {
 		t.Fatalf("archived id err = %v, want ErrToolNotFound", err)
 	}
 	if len(store.reinstatements) != 0 {
@@ -1273,5 +1282,236 @@ func TestListInspectionHistoryResolverErrorPropagates(t *testing.T) {
 	names.err = errors.New("boom")
 	if _, err := svc.ListInspectionHistory(context.Background(), actorID, "id-tool"); err == nil {
 		t.Fatal("ListInspectionHistory(resolver error) err = nil, want internal error")
+	}
+}
+
+// ============================================================================
+// Story 7.5 — idempotency replay (NFR-R1/FR-12/FR-15): a retried submit /
+// reinstate with the SAME tool + client-supplied key replays the committed
+// result instead of erroring or inserting a second row. The replay check runs
+// BEFORE the OOS gate, so a retried FAIL submit on a now-OOS tool replays 200.
+// ============================================================================
+
+func TestSubmitInspectionReplayAfterCommit(t *testing.T) {
+	// RETRY_AFTER_COMMIT: a second submit with the same tool + key (the first
+	// committed) returns the EXISTING record + derived status, does NOT insert a
+	// second row and does NOT re-audit.
+	svc, store, audit := submitInspectionService()
+	store.types[0].InspectionMode = InspectionModePassFail
+
+	first, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", InspectionInput{
+		Mode: InspectionModePassFail, Result: InspectionResultPass,
+	}, testIdempotencyKey)
+	if err != nil {
+		t.Fatalf("first submit err = %v", err)
+	}
+	if len(store.inspections) != 1 {
+		t.Fatalf("persisted after first = %d, want 1", len(store.inspections))
+	}
+	auditEventsAfterFirst := len(audit.events)
+
+	replay, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", InspectionInput{
+		Mode: InspectionModePassFail, Result: InspectionResultPass,
+	}, testIdempotencyKey)
+	if err != nil {
+		t.Fatalf("replayed submit err = %v, want 200-style success", err)
+	}
+	if replay.Inspection.ID != first.Inspection.ID {
+		t.Errorf("replayed record id = %q, want the FIRST record %q (no second row)", replay.Inspection.ID, first.Inspection.ID)
+	}
+	if replay.Inspection.OverallResult != InspectionResultPass {
+		t.Errorf("replayed record = %+v, want the committed pass", replay.Inspection)
+	}
+	if len(store.inspections) != 1 {
+		t.Errorf("persisted after replay = %d, want still 1 (no second row)", len(store.inspections))
+	}
+	// Replay NEVER re-audits.
+	if len(audit.events) != auditEventsAfterFirst {
+		t.Errorf("audit events = %d, want still %d (a replay never re-audits)", len(audit.events), auditEventsAfterFirst)
+	}
+}
+
+func TestSubmitInspectionReplayScheduleFailureFallsBack(t *testing.T) {
+	// REPLAY_SCHEDULE_FAIL (Story 7.5): the replay path must NEVER surface an
+	// error when the schedule port fails (e.g. the schedule was archived
+	// between commit and retry) — it logs and derives a conservative status from
+	// the record alone (interval 0), so a retried submit always answers 200
+	// with a derived status. No test reaches that fallback with a healthy port.
+	svc, store, _ := submitInspectionService()
+	store.types[0].InspectionMode = InspectionModePassFail
+
+	if _, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", InspectionInput{
+		Mode: InspectionModePassFail, Result: InspectionResultPass,
+	}, testIdempotencyKey); err != nil {
+		t.Fatalf("first submit err = %v", err)
+	}
+
+	// The schedule catalog now fails — the replay of the committed record must
+	// still answer a derived status, never an error.
+	svc.schedules = &fakeSchedulesPort{err: errors.New("boom")}
+
+	replay, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", InspectionInput{
+		Mode: InspectionModePassFail, Result: InspectionResultPass,
+	}, testIdempotencyKey)
+	if err != nil {
+		t.Fatalf("replayed submit (schedule port down) err = %v, want a derived status, never an error", err)
+	}
+	if replay == nil || replay.Inspection == nil || replay.Status.Status == "" {
+		t.Fatalf("replay = %+v, want a record + a derived status", replay)
+	}
+	if len(store.inspections) != 1 {
+		t.Errorf("persisted = %d, want still 1 (no second row)", len(store.inspections))
+	}
+}
+
+func TestSubmitInspectionReplayBeforeOOSGate(t *testing.T) {
+	// RETRY_FAIL_TURNS_OOS: the FIRST submit was a FAIL → the tool is now OOS; a
+	// retried submit with the SAME key must REPLAY 200 (the replay check runs
+	// BEFORE the OOS gate), NOT hit the OOS 403.
+	svc, store, _ := submitInspectionService()
+	store.types[0].InspectionMode = InspectionModePassFail
+
+	first, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", InspectionInput{
+		Mode: InspectionModePassFail, Result: InspectionResultFail,
+	}, testIdempotencyKey)
+	if err != nil {
+		t.Fatalf("first FAIL submit err = %v", err)
+	}
+	if first.Status.Status != ToolStatusCodeOOS {
+		t.Fatalf("first status = %q, want oos after the committed fail", first.Status.Status)
+	}
+
+	replay, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", InspectionInput{
+		Mode: InspectionModePassFail, Result: InspectionResultFail,
+	}, testIdempotencyKey)
+	if err != nil {
+		t.Fatalf("retried FAIL submit err = %v, want a 200 replay (NOT the OOS 403)", err)
+	}
+	if replay.Inspection.ID != first.Inspection.ID {
+		t.Errorf("replayed record id = %q, want the FIRST record %q", replay.Inspection.ID, first.Inspection.ID)
+	}
+	if replay.Status.Status != ToolStatusCodeOOS {
+		t.Errorf("replayed status = %q, want oos (the committed fail derives OOS)", replay.Status.Status)
+	}
+	if len(store.inspections) != 1 {
+		t.Errorf("persisted after replay = %d, want still 1 (no second row)", len(store.inspections))
+	}
+}
+
+func TestSubmitInspectionReplayArchivedTool(t *testing.T) {
+	// REPLAY_ARCHIVED (Story 7.5): a tool ARCHIVED between the commit and the
+	// retry must NOT block the replay — the replay check runs BEFORE the tool
+	// load, so the committed record is returned (200), never the 404.
+	svc, store, _ := submitInspectionService()
+	store.types[0].InspectionMode = InspectionModePassFail
+
+	if _, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", InspectionInput{
+		Mode: InspectionModePassFail, Result: InspectionResultPass,
+	}, testIdempotencyKey); err != nil {
+		t.Fatalf("first submit err = %v", err)
+	}
+
+	// Archive the tool between the commit and the retry.
+	now := time.Now()
+	store.tools[0].ArchivedAt = &now
+
+	replay, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", InspectionInput{
+		Mode: InspectionModePassFail, Result: InspectionResultPass,
+	}, testIdempotencyKey)
+	if err != nil {
+		t.Fatalf("replayed submit on an ARCHIVED tool err = %v, want a 200 replay, never the 404", err)
+	}
+	if replay == nil || replay.Inspection == nil || replay.Inspection.OverallResult != InspectionResultPass {
+		t.Fatalf("replay = %+v, want the committed pass record", replay)
+	}
+	if len(store.inspections) != 1 {
+		t.Errorf("persisted = %d, want still 1 (no second row)", len(store.inspections))
+	}
+}
+
+func TestSubmitInspectionKeyReusedOtherTool(t *testing.T) {
+	// KEY_REUSED_OTHER_TOOL: the key is scoped per tool (the UNIQUE is
+	// (tool_id, idempotency_key)) — the SAME key on a DIFFERENT tool is a fresh
+	// submit for that tool and inserts its own row.
+	svc, store, _ := submitInspectionService()
+	store.types[0].InspectionMode = InspectionModePassFail
+	store.tools = append(store.tools, &Tool{
+		ID: "id-tool-2", Name: "Schleifmaschine-01", ToolTypeID: "id-t1", ToolTypeName: "Bohrmaschine",
+	})
+
+	if _, err := svc.SubmitInspection(context.Background(), actorID, "id-tool", InspectionInput{
+		Mode: InspectionModePassFail, Result: InspectionResultPass,
+	}, testIdempotencyKey); err != nil {
+		t.Fatalf("tool-1 submit err = %v", err)
+	}
+	if _, err := svc.SubmitInspection(context.Background(), actorID, "id-tool-2", InspectionInput{
+		Mode: InspectionModePassFail, Result: InspectionResultPass,
+	}, testIdempotencyKey); err != nil {
+		t.Fatalf("tool-2 submit (same key) err = %v, want success (scope is per tool)", err)
+	}
+	if len(store.inspections) != 2 {
+		t.Errorf("persisted = %d, want 2 (the same key is legal across two tools)", len(store.inspections))
+	}
+}
+
+func TestReinstateToolReplayAfterCommit(t *testing.T) {
+	// REINSTATE_REPLAY: a second reinstate with the same tool + key (the first
+	// committed — the tool is now serviceable) replays 200 with the same
+	// not-OOS status, does NOT insert a second row and does NOT re-audit — the
+	// NOT-OOS 400 would otherwise reject the retry.
+	svc, store, audit := reinstateService()
+	failAt := time.Now().Add(-48 * time.Hour)
+	store.status = &ToolInspectionStatus{LatestFailAt: &failAt}
+
+	first, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "Ersatzteil eingetroffen", testIdempotencyKey)
+	if err != nil {
+		t.Fatalf("first reinstatement err = %v", err)
+	}
+	if len(store.reinstatements) != 1 {
+		t.Fatalf("persisted after first = %d, want 1", len(store.reinstatements))
+	}
+	auditEventsAfterFirst := len(audit.events)
+
+	replay, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "Ersatzteil eingetroffen", testIdempotencyKey)
+	if err != nil {
+		t.Fatalf("replayed reinstatement err = %v, want 200-style success (NOT the not-OOS 400)", err)
+	}
+	if replay.Status.Status != first.Status.Status {
+		t.Errorf("replayed status = %q, want the first %q", replay.Status.Status, first.Status.Status)
+	}
+	if len(store.reinstatements) != 1 {
+		t.Errorf("persisted after replay = %d, want still 1 (no second row)", len(store.reinstatements))
+	}
+	// Replay NEVER re-audits.
+	if len(audit.events) != auditEventsAfterFirst {
+		t.Errorf("audit events = %d, want still %d (a replay never re-audits)", len(audit.events), auditEventsAfterFirst)
+	}
+}
+
+func TestReinstateToolReplayArchivedTool(t *testing.T) {
+	// REPLAY_ARCHIVED (Story 7.5): a tool ARCHIVED between the commit and the
+	// retry must NOT block the reinstatement replay — the replay check runs
+	// BEFORE the tool load, so the committed row replays 200, never the 404.
+	svc, store, _ := reinstateService()
+	failAt := time.Now().Add(-48 * time.Hour)
+	store.status = &ToolInspectionStatus{LatestFailAt: &failAt}
+
+	if _, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "Ersatzteil eingetroffen", testIdempotencyKey); err != nil {
+		t.Fatalf("first reinstatement err = %v", err)
+	}
+
+	// Archive the tool between the commit and the retry.
+	now := time.Now()
+	store.tools[0].ArchivedAt = &now
+
+	replay, err := svc.ReinstateTool(context.Background(), actorID, "id-tool", "Ersatzteil eingetroffen", testIdempotencyKey)
+	if err != nil {
+		t.Fatalf("replayed reinstatement on an ARCHIVED tool err = %v, want a 200 replay, never the 404", err)
+	}
+	if replay == nil || replay.Status.Status == "" {
+		t.Fatalf("replay = %+v, want a derived status", replay)
+	}
+	if len(store.reinstatements) != 1 {
+		t.Errorf("persisted = %d, want still 1 (no second row)", len(store.reinstatements))
 	}
 }

@@ -5,6 +5,8 @@ import (
 	"errors"
 	"io"
 	"net/http"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/go-chi/chi/v5"
@@ -67,10 +69,25 @@ type inspectionSubmitResponseDTO struct {
 }
 
 // reinstatementRequestDTO is the POST /api/v1/tools/{id}/reinstatement body
-// (Story 5.6, FR-15/AD-9): the MANDATORY reason. The decoder rejects unknown
+// (Story 5.6, FR-15/AD-9): the MANDATORY reason PLUS the REQUIRED
+// client-supplied `idempotency_key` (Story 7.5, NFR-R1 — the at-most-once
+// guard; a missing or non-UUID key is a 400). The decoder rejects unknown
 // fields + trailing JSON like the submit handler.
 type reinstatementRequestDTO struct {
-	Reason string `json:"reason"`
+	Reason         string `json:"reason"`
+	IdempotencyKey string `json:"idempotency_key"`
+}
+
+// inspectionSubmitRequestDTO is the POST /api/v1/tools/{id}/inspection request
+// body (Story 5.3 + Story 7.5 idempotency hardening): the inspection submit
+// input fields (embedded toolscore.InspectionInput: mode/result/notes/items)
+// PLUS the REQUIRED client-supplied `idempotency_key` — a UUID the SPA
+// generates per submit intent and reuses across retries, making the write
+// at-most-once. A missing or non-UUID key is a 400 (the guard must never be
+// silently bypassable).
+type inspectionSubmitRequestDTO struct {
+	toolscore.InspectionInput
+	IdempotencyKey string `json:"idempotency_key"`
 }
 
 // reinstatementResponseDTO is the POST /api/v1/tools/{id}/reinstatement
@@ -79,6 +96,27 @@ type reinstatementRequestDTO struct {
 type reinstatementResponseDTO struct {
 	Status  statusDTO `json:"status"`
 	Message string    `json:"message"`
+}
+
+// idempotencyKeyPattern is the canonical UUID form (8-4-4-4-12 hex) the
+// client-supplied idempotency key must match (Story 7.5, NFR-R1). The SPA
+// generates it via crypto.randomUUID(); the store parses the same string via
+// pgtype.UUID.Scan (tools_repo.go parseOptionalUUID). A missing or malformed
+// key is a 400 invalid_request — the at-most-once guard must not be silently
+// bypassable.
+var idempotencyKeyPattern = regexp.MustCompile(`(?i)^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$`)
+
+// normalizeIdempotencyKey validates a client-supplied idempotency key is a
+// parseable UUID and returns its canonical lowercase form (the store compares
+// it verbatim, so a stable form keeps the insert and the replay lookup
+// equal). ok=false for a MISSING or malformed key → the handler answers the
+// uniform 400 invalid_request (German).
+func normalizeIdempotencyKey(raw string) (key string, ok bool) {
+	key = strings.ToLower(strings.TrimSpace(raw))
+	if !idempotencyKeyPattern.MatchString(key) {
+		return "", false
+	}
+	return key, true
 }
 
 // InspectionRoutes returns the inspection router (Story 5.1 + 5.3, FR-11/AD-7):
@@ -174,7 +212,8 @@ func (h *Handler) StartInspection(w http.ResponseWriter, r *http.Request) {
 //   - 404 not_found for an unknown / archived tool id
 //   - 400 invalid_request with a German message for a validation failure
 //     (bad mode/result, over-long notes, checklist mismatch, items on a
-//     pass_fail mode)
+//     pass_fail mode) AND for a MISSING or non-UUID `idempotency_key` (Story
+//     7.5 — the at-most-once guard is REQUIRED)
 //   - 500 internal_error on an unexpected failure
 func (h *Handler) SubmitInspection(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFrom(r.Context())
@@ -184,7 +223,7 @@ func (h *Handler) SubmitInspection(w http.ResponseWriter, r *http.Request) {
 	}
 
 	id := chi.URLParam(r, "id")
-	var input toolscore.InspectionInput
+	var input inspectionSubmitRequestDTO
 	// Buffered decoder (same pattern as the admin settings handlers): reject
 	// UNKNOWN fields (DisallowUnknownFields) and trailing content after the
 	// JSON object — both answer the uniform 400, never a partial parse.
@@ -198,8 +237,16 @@ func (h *Handler) SubmitInspection(w http.ResponseWriter, r *http.Request) {
 		httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", "Ungültiges JSON-Format.")
 		return
 	}
+	// The idempotency key is REQUIRED and must be a parseable UUID (Story 7.5,
+	// NFR-R1): a missing/invalid key fails fast — the at-most-once guard must
+	// never be silently bypassable.
+	idempotencyKey, ok := normalizeIdempotencyKey(input.IdempotencyKey)
+	if !ok {
+		httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", toolscore.MsgIdempotencyKeyInvalid)
+		return
+	}
 
-	result, err := h.service.SubmitInspection(r.Context(), user.ID, id, input)
+	result, err := h.service.SubmitInspection(r.Context(), user.ID, id, input.InspectionInput, idempotencyKey)
 	if err != nil {
 		h.mapInspectionError(w, r, err, user)
 		return
@@ -228,6 +275,8 @@ func (h *Handler) SubmitInspection(w http.ResponseWriter, r *http.Request) {
 //   - 403 forbidden when the caller lacks tool.reinstate (no tool data exposed)
 //   - 404 not_found for an unknown / archived tool id
 //   - 400 invalid_request with a German message for an empty / over-long reason
+//     AND for a MISSING or non-UUID `idempotency_key` (Story 7.5 — the
+//     at-most-once guard is REQUIRED)
 //   - 500 internal_error on an unexpected failure
 func (h *Handler) ReinstateTool(w http.ResponseWriter, r *http.Request) {
 	user := auth.UserFrom(r.Context())
@@ -251,8 +300,16 @@ func (h *Handler) ReinstateTool(w http.ResponseWriter, r *http.Request) {
 		httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", "Ungültiges JSON-Format.")
 		return
 	}
+	// The idempotency key is REQUIRED and must be a parseable UUID (Story 7.5,
+	// NFR-R1): a missing/invalid key fails fast — the at-most-once guard must
+	// never be silently bypassable.
+	idempotencyKey, ok := normalizeIdempotencyKey(input.IdempotencyKey)
+	if !ok {
+		httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", toolscore.MsgIdempotencyKeyInvalid)
+		return
+	}
 
-	result, err := h.service.ReinstateTool(r.Context(), user.ID, id, input.Reason)
+	result, err := h.service.ReinstateTool(r.Context(), user.ID, id, input.Reason, idempotencyKey)
 	if err != nil {
 		h.mapReinstatementError(w, r, err, user)
 		return

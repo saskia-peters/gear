@@ -149,7 +149,29 @@ export function InspectionPage() {
   // confirmation — the controls stay enabled for a retry.
   const [submitError, setSubmitError] = useState('')
   const submitPendingRef = useRef(false)
+  // idempotencyRef holds the CLIENT-SUPPLIED idempotency key of the CURRENT
+  // submit intent (Story 7.5, NFR-R1), bound to the exact payload signature it
+  // was generated for: generated lazily on the first submit attempt and REUSED
+  // across retries of the SAME logical write (a retry after an inline error
+  // must carry the SAME key so a server-side commit replays instead of
+  // duplicating). The key is regenerated when the intent identity CHANGES — a
+  // different toolId or an edited payload (result/notes/checklist) is a NEW
+  // logical write that must never be silently replayed against the OLD
+  // committed record while the user's new input is discarded.
+  const idempotencyRef = useRef<{ key: string; signature: string } | null>(null)
   const [reduceMotion] = useState(() => prefersReducedMotion())
+
+  // currentIdempotencyKey returns the idempotency key for a submit intent,
+  // generating a fresh one when the intent identity (tool + resolved payload)
+  // differs from the key it was created for — an unchanged retry reuses the
+  // key so the server replays, a changed payload is a new logical write.
+  function currentIdempotencyKey(toolId: string, input: InspectionSubmitInput): string {
+    const signature = JSON.stringify([toolId, input.mode, input.result, input.notes, input.items])
+    if (idempotencyRef.current === null || idempotencyRef.current.signature !== signature) {
+      idempotencyRef.current = { key: crypto.randomUUID(), signature }
+    }
+    return idempotencyRef.current.key
+  }
 
   useEffect(() => {
     if (!toolId) return
@@ -338,7 +360,7 @@ export function InspectionPage() {
               items: checklistItems.map((item) => ({ item_id: item.id, result: itemResults[item.id] })),
             }
           : { mode: 'pass_fail', result: result!, notes: comment, items: [] }
-      const serverResult = await submitInspection(toolId, input)
+      const serverResult = await submitInspection(toolId, input, currentIdempotencyKey(toolId, input))
       // Response-shape guard: a 200 whose body lacks the record/status — OR
       // the fields the confirmation consumes (overall_result / status.status) —
       // must NOT confirm a success; surface the inline error instead. Object
@@ -354,6 +376,9 @@ export function InspectionPage() {
         setSubmitError('Ungültige Serverantwort.')
         return
       }
+      // The submit intent is complete (the server committed / replayed the
+      // record): a fresh intent starts with a fresh key.
+      idempotencyRef.current = null
       setServerStatus(serverResult.status)
       setServerOutcome(serverResult.inspection.overall_result)
       // The checklist confirmation names the failure COUNT from the
