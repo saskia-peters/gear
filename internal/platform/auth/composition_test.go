@@ -7,12 +7,12 @@ import (
 	"log/slog"
 	"net/http"
 	"net/http/httptest"
-	"os"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/saskia-peters/gear/internal/platform/dbtest"
 	"github.com/saskia-peters/gear/internal/platform/router"
 	userpostgres "github.com/saskia-peters/gear/internal/user/adapters/postgres"
 	usercore "github.com/saskia-peters/gear/internal/user/core"
@@ -31,23 +31,10 @@ func discardLogger() *slog.Logger {
 func newCompositionRouter(t *testing.T) (http.Handler, *userpostgres.Repository, *usercore.SessionManager, *pgxpool.Pool) {
 	t.Helper()
 
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
-
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	t.Cleanup(pool.Close)
-
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	// Per-package schema isolation (Story 7.4): this composition suite runs in
+	// its own schema so parallel `go test ./...` never shares users/sessions
+	// with the user/postgres package.
+	pool := dbtest.Open(t, "gear_test_authcomp")
 
 	repo := userpostgres.NewRepository(userpostgres.New(pool))
 	sm := usercore.NewSessionManager(repo, time.Hour)

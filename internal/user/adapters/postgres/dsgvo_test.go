@@ -3,11 +3,8 @@ package postgres
 import (
 	"context"
 	"errors"
-	"os"
 	"testing"
 	"time"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/saskia-peters/gear/internal/platform/crypto"
 	"github.com/saskia-peters/gear/internal/user/core"
@@ -19,26 +16,10 @@ import (
 // core strips them before assembly, REPORT_SECRETS) and ListSessionsByUser
 // returns the user's sessions newest-first WITHOUT any token material.
 func TestPostgresDsgvoExportReads(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	// Close via t.Cleanup (NOT `defer pool.Close()`) and use
-	// context.Background() in the DELETE cleanups: `defer pool.Close()` +
-	// `defer cancel()` both run BEFORE the t.Cleanup callbacks, so a cleanup
-	// Exec on the canceled/closed pool was a silent no-op that leaked the test
-	// users on every run (the observed `dsgvo.test.*`/`dsgvo.empty.*` litter).
-	t.Cleanup(func() { pool.Close() })
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	pool := userTestPool(t)
 
 	queries := New(pool)
 	repo := NewRepository(queries)
@@ -137,25 +118,10 @@ func TestPostgresDsgvoExportReads(t *testing.T) {
 // ListDeletedAccounts returns it newest-first; PurgeDeletedAccount hard-deletes
 // the archive row AND the users tombstone (the ONLY hard delete).
 func TestPostgresSoftDeleteAndArchivePurge(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	// Register the close as a t.Cleanup (NOT a defer): t.Cleanup callbacks run
-	// in LIFO order, so the DELETE cleanups registered below execute BEFORE the
-	// pool closes — a `defer pool.Close()` would close it first and make every
-	// later cleanup a silent no-op (the pre-existing 3.3-test leak pattern).
-	t.Cleanup(func() { pool.Close() })
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	pool := userTestPool(t)
 
 	queries := New(pool)
 	repo := NewRepository(queries)

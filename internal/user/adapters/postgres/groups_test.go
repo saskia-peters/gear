@@ -3,12 +3,9 @@ package postgres
 import (
 	"context"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/saskia-peters/gear/internal/user/core"
 )
@@ -20,21 +17,10 @@ import (
 // (delete-then-insert, base roles editable, own-name rename legal, unknown id →
 // 404) — against the REAL postgres repository.
 func TestPostgresRoleGroups(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	defer pool.Close()
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	pool := userTestPool(t)
 
 	repo := NewRepository(New(pool))
 	stamp := time.Now().Format("20060102150405.000000")
@@ -44,11 +30,7 @@ func TestPostgresRoleGroups(t *testing.T) {
 	// AFTER the test function's deferred pool.Close(), so the shared pool is
 	// already closed by then (shared-suite pattern). Registered first so it
 	// closes LAST (t.Cleanup is LIFO).
-	cleanupPool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Fatalf("creating cleanup pool failed: %v", err)
-	}
-	t.Cleanup(func() { cleanupPool.Close() })
+	cleanupPool := userCleanupPool(t)
 	cleanupGroup := func(name string) {
 		t.Helper()
 		t.Cleanup(func() {
@@ -246,21 +228,10 @@ func TestPostgresRoleGroups(t *testing.T) {
 // seeds a code without a matching in-code entry (or vice versa), this test
 // fails loudly instead of letting the two sources silently drift.
 func TestPostgresPermissionCatalogMatchesBaseCodes(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	defer pool.Close()
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	pool := userTestPool(t)
 
 	repo := NewRepository(New(pool))
 	entries, err := repo.ListAllPermissions(ctx)
@@ -290,21 +261,10 @@ func TestPostgresPermissionCatalogMatchesBaseCodes(t *testing.T) {
 // cache. The helfende role is restored afterwards so the shared base matrix is
 // left untouched for the other integration tests.
 func TestPostgresRoleUpdateImmediateEffect(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	defer pool.Close()
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	pool := userTestPool(t)
 
 	repo := NewRepository(New(pool))
 	stamp := time.Now().Format("20060102150405.000000")

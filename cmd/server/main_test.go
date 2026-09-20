@@ -27,6 +27,7 @@ import (
 	dsgvocore "github.com/saskia-peters/gear/internal/dsgvo/core"
 	"github.com/saskia-peters/gear/internal/platform/auth"
 	"github.com/saskia-peters/gear/internal/platform/crypto"
+	"github.com/saskia-peters/gear/internal/platform/dbtest"
 	"github.com/saskia-peters/gear/internal/platform/httpapi"
 	"github.com/saskia-peters/gear/internal/platform/router"
 	"github.com/saskia-peters/gear/internal/platform/spa"
@@ -1514,20 +1515,11 @@ const composedArgon2DummyHash = "$argon2id$v=19$m=65536,t=3,p=4$c2FsdHNhbHRzYWx0
 // nil schedules/qualifications ports (not hit for an empty-override create).
 func newComposedRealToolRouter(t *testing.T, log *slog.Logger) (http.Handler, *userpostgres.Repository, *usercore.SessionManager, *pgxpool.Pool) {
 	t.Helper()
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	t.Cleanup(pool.Close)
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	// Per-package schema isolation (Story 7.4): this composed suite runs in its
+	// own schema so parallel `go test ./...` never shares tools/sequences with
+	// the tools/postgres package (the collision-retry test reads exact seq
+	// values, which per-schema sequences make deterministic).
+	pool := dbtest.Open(t, "gear_test_server")
 
 	userRepo := userpostgres.NewRepository(userpostgres.New(pool))
 	sm := usercore.NewSessionManager(userRepo, time.Hour)

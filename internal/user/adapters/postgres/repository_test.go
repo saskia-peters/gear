@@ -6,7 +6,6 @@ import (
 	"fmt"
 	"io"
 	"log/slog"
-	"os"
 	"strings"
 	"testing"
 	"time"
@@ -22,23 +21,10 @@ func discardLogger() *slog.Logger {
 }
 
 func TestPostgresLoginAttemptsRepository(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	defer pool.Close()
-
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	pool := userTestPool(t)
 
 	queries := New(pool)
 	repo := NewRepository(queries)
@@ -127,23 +113,10 @@ func TestPostgresLoginAttemptsRepository(t *testing.T) {
 }
 
 func TestPostgresRepository(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	defer pool.Close()
-
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	pool := userTestPool(t)
 
 	queries := New(pool)
 	repo := NewRepository(queries)
@@ -191,23 +164,10 @@ func TestPostgresRepository(t *testing.T) {
 }
 
 func TestPostgresSessionAndPermissionRepository(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	defer pool.Close()
-
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	pool := userTestPool(t)
 
 	queries := New(pool)
 	repo := NewRepository(queries)
@@ -294,23 +254,10 @@ func TestPostgresSessionAndPermissionRepository(t *testing.T) {
 }
 
 func TestPostgresTotpRepository(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	defer pool.Close()
-
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	pool := userTestPool(t)
 
 	queries := New(pool)
 	repo := NewRepository(queries)
@@ -427,23 +374,10 @@ func TestPostgresTotpRepository(t *testing.T) {
 }
 
 func TestPostgresSessionRevocationRepository(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	defer pool.Close()
-
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	pool := userTestPool(t)
 
 	queries := New(pool)
 	repo := NewRepository(queries)
@@ -489,23 +423,10 @@ func TestPostgresSessionRevocationRepository(t *testing.T) {
 }
 
 func TestPostgresChangePasswordRepository(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	defer pool.Close()
-
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	pool := userTestPool(t)
 
 	queries := New(pool)
 	repo := NewRepository(queries)
@@ -612,23 +533,10 @@ func TestPostgresChangePasswordRepository(t *testing.T) {
 }
 
 func TestPostgresProfileRepository(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	defer pool.Close()
-
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	pool := userTestPool(t)
 
 	queries := New(pool)
 	repo := NewRepository(queries)
@@ -749,23 +657,10 @@ func TestPostgresProfileRepository(t *testing.T) {
 }
 
 func TestPostgresProfileAttributesRepository(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	defer pool.Close()
-
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	pool := userTestPool(t)
 
 	queries := New(pool)
 	repo := NewRepository(queries)
@@ -874,23 +769,10 @@ func TestPostgresMalformedStoredAttributes(t *testing.T) {
 	// on write), but out-of-band writes can store a valid NON-OBJECT shape such
 	// as an array or scalar. Reading such a value must surface a clear error —
 	// never a crash and never a silent data-loss read that serves `{}`.
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	defer pool.Close()
-
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	pool := userTestPool(t)
 
 	queries := New(pool)
 	repo := NewRepository(queries)
@@ -933,23 +815,10 @@ func TestPostgresMalformedStoredAttributes(t *testing.T) {
 }
 
 func TestPostgresPasswordResetRepository(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	defer pool.Close()
-
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	pool := userTestPool(t)
 
 	queries := New(pool)
 	repo := NewRepository(queries)
@@ -1061,23 +930,10 @@ func TestPostgresPasswordResetRepository(t *testing.T) {
 }
 
 func TestPostgresConsumePasswordResetTokenAtomic(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	defer pool.Close()
-
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	pool := userTestPool(t)
 
 	queries := New(pool)
 	repo := NewRepository(queries)
@@ -1141,23 +997,10 @@ func TestPostgresConsumePasswordResetTokenAtomic(t *testing.T) {
 }
 
 func TestPostgresExpiredTokenPurgeAndAnonymousAudit(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	defer pool.Close()
-
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	pool := userTestPool(t)
 
 	queries := New(pool)
 	repo := NewRepository(queries)
@@ -1210,21 +1053,10 @@ func TestPostgresExpiredTokenPurgeAndAnonymousAudit(t *testing.T) {
 }
 
 func TestPostgresAdminRecoveryRepository(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	defer pool.Close()
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	pool := userTestPool(t)
 
 	queries := New(pool)
 	repo := NewRepository(queries)
@@ -1425,23 +1257,10 @@ func containsPermission(got []string, code string) bool {
 // cache). Test users are deleted via t.Cleanup (CASCADE removes memberships
 // and direct grants).
 func TestPostgresBasePermissionSeedResolution(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	defer pool.Close()
-
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	pool := userTestPool(t)
 
 	queries := New(pool)
 	repo := NewRepository(queries)
@@ -1450,11 +1269,7 @@ func TestPostgresBasePermissionSeedResolution(t *testing.T) {
 	// down (deferred cancel/close) BEFORE cleanup callbacks run, so the user
 	// deletions must use independent resources. Registered first so it closes
 	// LAST (t.Cleanup is LIFO).
-	cleanupPool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Fatalf("creating cleanup pool failed: %v", err)
-	}
-	t.Cleanup(func() { cleanupPool.Close() })
+	cleanupPool := userCleanupPool(t)
 
 	// 1. All 24 base codes are present in the permissions table. A set
 	// comparison (subset check), so a DB that already holds unrelated
@@ -1597,23 +1412,10 @@ func TestPostgresBasePermissionSeedResolution(t *testing.T) {
 // (user.approve / user.reject) and login-after-approve — against the REAL
 // postgres repository.
 func TestPostgresUserApprovalRepository(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	defer pool.Close()
-
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	pool := userTestPool(t)
 
 	repo := NewRepository(New(pool))
 	stamp := time.Now().Format("20060102150405.000000")
@@ -1845,23 +1647,10 @@ func TestPostgresUserApprovalRepository(t *testing.T) {
 // detects and turns into a rollback). Renames are safe because this suite runs
 // without t.Parallel and no other test asserts on the helfende membership count.
 func TestPostgresApproveUserRoleSeedRollback(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	defer pool.Close()
-
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	pool := userTestPool(t)
 
 	repo := NewRepository(New(pool))
 	stamp := time.Now().Format("20060102150405.000000")
@@ -1956,23 +1745,10 @@ func groupMembershipCount(t *testing.T, pool *pgxpool.Pool, userID, group string
 // Tool core maps the missing key to the literal "Deleted User"); an empty input
 // answers an empty map (no query).
 func TestPostgresResolveDisplayNames(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
-
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	defer pool.Close()
-
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	pool := userTestPool(t)
 
 	repo := NewRepository(New(pool))
 	suffix := time.Now().Format("20060102150405.000000")

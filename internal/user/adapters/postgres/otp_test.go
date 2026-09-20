@@ -3,12 +3,9 @@ package postgres
 import (
 	"context"
 	"errors"
-	"os"
 	"sync"
 	"testing"
 	"time"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/saskia-peters/gear/internal/user/core"
 )
@@ -18,21 +15,10 @@ import (
 // the set/clear compare-and-swap (single-use under concurrency) and the
 // GetUserByEmail shape carrying the OTP fields.
 func TestPostgresOneTimePasswordContract(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	defer pool.Close()
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	pool := userTestPool(t)
 
 	repo := NewRepository(New(pool))
 	stamp := time.Now().Format("20060102150405.000000")
@@ -40,11 +26,7 @@ func TestPostgresOneTimePasswordContract(t *testing.T) {
 
 	// Cleanup with an INDEPENDENT pool (t.Cleanup runs AFTER the test's deferred
 	// pool.Close(); registered first so it closes LAST — LIFO).
-	cleanupPool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Fatalf("creating cleanup pool failed: %v", err)
-	}
-	t.Cleanup(func() { cleanupPool.Close() })
+	cleanupPool := userCleanupPool(t)
 	t.Cleanup(func() {
 		if _, err := cleanupPool.Exec(context.Background(), "DELETE FROM users WHERE email = $1", email); err != nil {
 			t.Errorf("cleaning up user %q failed: %v", email, err)

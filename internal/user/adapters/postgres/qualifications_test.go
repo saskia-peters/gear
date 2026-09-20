@@ -3,12 +3,9 @@ package postgres
 import (
 	"context"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 	"time"
-
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/saskia-peters/gear/internal/platform/crypto"
 	"github.com/saskia-peters/gear/internal/user/core"
@@ -22,32 +19,17 @@ import (
 // indicators through the REAL core service — against the REAL postgres
 // repository.
 func TestPostgresQualificationManagement(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	defer pool.Close()
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	pool := userTestPool(t)
 
 	repo := NewRepository(New(pool))
 	stamp := time.Now().Format("20060102150405.000000")
 	qualName := "qual." + stamp
 	volunteerEmail := "qualvol." + stamp + "@gear.local"
 
-	cleanupPool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Fatalf("creating cleanup pool failed: %v", err)
-	}
-	t.Cleanup(func() { cleanupPool.Close() })
+	cleanupPool := userCleanupPool(t)
 	t.Cleanup(func() {
 		if _, err := cleanupPool.Exec(context.Background(), "DELETE FROM users WHERE email = $1", volunteerEmail); err != nil {
 			t.Errorf("cleaning up user %q failed: %v", volunteerEmail, err)
@@ -241,21 +223,10 @@ func TestPostgresQualificationManagement(t *testing.T) {
 // assignment past its expires_at counts as NOT held, an unlimited one is always
 // held.
 func TestPostgresUserQualificationEligibility(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	defer pool.Close()
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	pool := userTestPool(t)
 
 	repo := NewRepository(New(pool))
 	stamp := time.Now().Format("20060102150405.000000")
@@ -263,11 +234,7 @@ func TestPostgresUserQualificationEligibility(t *testing.T) {
 	fixedName := "elig.fixed." + stamp
 	unlimitedName := "elig.unlimited." + stamp
 
-	cleanupPool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Fatalf("creating cleanup pool failed: %v", err)
-	}
-	t.Cleanup(func() { cleanupPool.Close() })
+	cleanupPool := userCleanupPool(t)
 	t.Cleanup(func() {
 		if _, err := cleanupPool.Exec(context.Background(), "DELETE FROM users WHERE email = $1", volunteerEmail); err != nil {
 			t.Errorf("cleaning up user %q failed: %v", volunteerEmail, err)

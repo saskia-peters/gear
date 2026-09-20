@@ -3,13 +3,11 @@ package postgres
 import (
 	"context"
 	"errors"
-	"os"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/jackc/pgx/v5/pgtype"
-	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/saskia-peters/gear/internal/user/core"
 )
@@ -20,21 +18,10 @@ import (
 // edit (atomic delete-then-insert replacement), deactivate (+ session
 // revocation), and organisational user-group CRUD + member assignment.
 func TestPostgresUserGroupAdministration(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	defer pool.Close()
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	pool := userTestPool(t)
 
 	repo := NewRepository(New(pool))
 	stamp := time.Now().Format("20060102150405.000000")
@@ -43,11 +30,7 @@ func TestPostgresUserGroupAdministration(t *testing.T) {
 
 	// Cleanup with an INDEPENDENT pool (t.Cleanup runs AFTER the test's deferred
 	// pool.Close(); registered first so it closes LAST — LIFO).
-	cleanupPool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Fatalf("creating cleanup pool failed: %v", err)
-	}
-	t.Cleanup(func() { cleanupPool.Close() })
+	cleanupPool := userCleanupPool(t)
 	t.Cleanup(func() {
 		if _, err := cleanupPool.Exec(context.Background(), "DELETE FROM users WHERE email = $1", email); err != nil {
 			t.Errorf("cleaning up user %q failed: %v", email, err)
@@ -290,32 +273,17 @@ func TestPostgresUserGroupAdministration(t *testing.T) {
 // permission set on the very next resolution — no re-login, no cache. The
 // admin group is never touched (a fresh custom role is created and cleaned up).
 func TestPostgresAdminUserLiveResolution(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	defer pool.Close()
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	pool := userTestPool(t)
 
 	repo := NewRepository(New(pool))
 	stamp := time.Now().Format("20060102150405.000000")
 	email := "live." + stamp + "@gear.local"
 	roleName := "livetest." + stamp
 
-	cleanupPool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Fatalf("creating cleanup pool failed: %v", err)
-	}
-	t.Cleanup(func() { cleanupPool.Close() })
+	cleanupPool := userCleanupPool(t)
 	t.Cleanup(func() {
 		if _, err := cleanupPool.Exec(context.Background(), "DELETE FROM users WHERE email = $1", email); err != nil {
 			t.Errorf("cleaning up user %q failed: %v", email, err)
@@ -370,32 +338,17 @@ func TestPostgresAdminUserLiveResolution(t *testing.T) {
 // and behave: Story 2.7 edits assignments; Story 2.6 only displays. This keeps
 // the shared store honest until 2.7 wires the surface.
 func TestPostgresAdminUserQualificationSeam(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	defer pool.Close()
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	pool := userTestPool(t)
 
 	repo := NewRepository(New(pool))
 	stamp := time.Now().Format("20060102150405.000000")
 	email := "qual." + stamp + "@gear.local"
 	qualName := "qual." + stamp
 
-	cleanupPool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Fatalf("creating cleanup pool failed: %v", err)
-	}
-	t.Cleanup(func() { cleanupPool.Close() })
+	cleanupPool := userCleanupPool(t)
 	t.Cleanup(func() {
 		if _, err := cleanupPool.Exec(context.Background(), "DELETE FROM users WHERE email = $1", email); err != nil {
 			t.Errorf("cleaning up user %q failed: %v", email, err)
@@ -457,21 +410,10 @@ func mustUUID(t *testing.T, s string) pgtype.UUID {
 // "→ Sofort kein Login" holds even for an already-issued session token. If the
 // DeleteSessionsByUser call were removed, this test would fail.
 func TestPostgresDeactivateRevokesSessions(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	defer pool.Close()
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	pool := userTestPool(t)
 
 	repo := NewRepository(New(pool))
 	stamp := time.Now().Format("20060102150405.000000")
@@ -510,32 +452,17 @@ func TestPostgresDeactivateRevokesSessions(t *testing.T) {
 // removes a team (and its memberships) atomically, and both map an unknown id
 // to the uniform 404.
 func TestPostgresUserGroupDeleteAndMembers(t *testing.T) {
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
 	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
 	defer cancel()
 
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	defer pool.Close()
-	if err := pool.Ping(ctx); err != nil {
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
+	pool := userTestPool(t)
 
 	repo := NewRepository(New(pool))
 	stamp := time.Now().Format("20060102150405.000000")
 	groupName := "Gruppe West." + stamp
 	memberEmail := "memberdel." + stamp + "@gear.local"
 
-	cleanupPool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Fatalf("creating cleanup pool failed: %v", err)
-	}
-	t.Cleanup(func() { cleanupPool.Close() })
+	cleanupPool := userCleanupPool(t)
 	t.Cleanup(func() {
 		if _, err := cleanupPool.Exec(context.Background(), "DELETE FROM users WHERE email = $1", memberEmail); err != nil {
 			t.Errorf("cleaning up member %q failed: %v", memberEmail, err)

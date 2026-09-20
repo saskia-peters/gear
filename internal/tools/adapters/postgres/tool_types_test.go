@@ -4,13 +4,12 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
-	"os"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
+	"github.com/saskia-peters/gear/internal/platform/dbtest"
 	"github.com/saskia-peters/gear/internal/tools/core"
 )
 
@@ -32,22 +31,10 @@ func activeTestToolTypes(types []*core.ToolType) []*core.ToolType {
 // repository integration tests.
 func toolTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
-	return pool
+	// Per-package schema isolation (Story 7.4): each test package runs in its
+	// own PostgreSQL schema with its own tables, rows and sequences, so the
+	// default parallel `go test ./...` never cross-contaminates suites.
+	return dbtest.Open(t, "gear_test_tools")
 }
 
 // seedToolTypeRefs inserts one Test- schedule (into the Admin-owned catalog,

@@ -97,14 +97,11 @@ jobs:
       - name: Go vet
         run: just vet
 
-      - name: Go test (DB-backed)
-        # -p 1 serializes the Go suites. The DB-backed suites share the one
-        # service container's schema, and parallel packages can contend on the
-        # shared test rows/sequences (deferred-work: cross-package flake).
-        # Story 7.4 (parallel-DB isolation) will make the parallel default
-        # safe; until then CI stays deterministic with -p 1.
+      - name: Go test (DB-backed, parallel)
+        # Default parallel mode: each DB-backed package runs in its own schema
+        # (Story 7.4), so cross-package rows/sequences can no longer contend.
         # -v so the skip guard below can detect a silently-skipped suite.
-        run: go test -p 1 -v ./cmd/... ./internal/... 2>&1 | tee /tmp/go-test.log
+        run: go test -v ./cmd/... ./internal/... 2>&1 | tee /tmp/go-test.log
 
       - name: Fail on silent DB-suite skips
         # The DB-backed suites t.Skipf when the pool cannot connect. In CI that

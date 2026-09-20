@@ -2,36 +2,20 @@ package postgres
 
 import (
 	"context"
-	"os"
 	"testing"
-	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 
 	"github.com/saskia-peters/gear/internal/admin/core"
+	"github.com/saskia-peters/gear/internal/platform/dbtest"
 )
 
-// adminTestPool connects to the local dev database (migration 000017 applied)
-// or skips when no database is reachable, mirroring the user-module repository
-// integration tests.
+// adminTestPool connects to a per-package schema with the full migration set
+// (Story 7.4: parallel `go test ./...` isolation) or skips when no database
+// is reachable, mirroring the user-module repository integration tests.
 func adminTestPool(t *testing.T) *pgxpool.Pool {
 	t.Helper()
-	dbURL := os.Getenv("DATABASE_URL")
-	if dbURL == "" {
-		dbURL = "postgres://gear:gear@localhost:5432/gear?sslmode=disable"
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-
-	pool, err := pgxpool.New(ctx, dbURL)
-	if err != nil {
-		t.Skipf("skipping db integration test: %v", err)
-	}
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		t.Skipf("skipping db integration test (db ping failed): %v", err)
-	}
-	return pool
+	return dbtest.Open(t, "gear_test_admin")
 }
 
 func TestPostgresSmtpSettingsStore(t *testing.T) {
