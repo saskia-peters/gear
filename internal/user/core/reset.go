@@ -286,7 +286,7 @@ func (s *Service) RequestPasswordReset(ctx context.Context, email string) (*Rese
 		// leak account existence (review findings 1.8-3 / 1.8-10): write an
 		// anonymous audit row (no actor) so enumeration attempts leave a trail
 		// (NFR-O1). Best-effort.
-		if err := s.repo.InsertAuditEventAnonymous(ctx, AuditOperationPasswordResetRequestUnknown); err != nil {
+		if err := s.repo.InsertAuditEventAnonymous(ctx, AuditOperationPasswordResetRequestUnknown, "", AuditSeverityNormal); err != nil {
 			s.log().Warn("password reset request (unknown) audit write failed", "error", err)
 		}
 	}

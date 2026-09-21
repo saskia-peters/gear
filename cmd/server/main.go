@@ -9,6 +9,7 @@ import (
 	"errors"
 	"flag"
 	"fmt"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -27,6 +28,7 @@ import (
 	admcore "github.com/saskia-peters/gear/internal/admin/core"
 	dsgvocore "github.com/saskia-peters/gear/internal/dsgvo/core"
 	"github.com/saskia-peters/gear/internal/platform/auth"
+	"github.com/saskia-peters/gear/internal/platform/backupjob"
 	"github.com/saskia-peters/gear/internal/platform/config"
 	"github.com/saskia-peters/gear/internal/platform/crypto"
 	"github.com/saskia-peters/gear/internal/platform/httpapi"
@@ -51,6 +53,27 @@ import (
 // is the correct readiness semantics for a DB-backed service. It must run as a
 // short-lived probe, never as the long-running server.
 var healthcheckFlag = flag.Bool("healthcheck", false, "run the container HEALTHCHECK probe and exit")
+
+// backupStartupDelay is the wait before the backup job's first (startup) run
+// (Story 7.7): a fresh deploy gets its first backup without waiting a full
+// interval, but only after migrations/settings are warm.
+const backupStartupDelay = 5 * time.Second
+
+// startBackupJob wires the Story 7.7 backup job (NFR-R3) from the
+// composition-root seams and starts its goroutine on ctx (canceled on
+// shutdown). The ticker interval comes from the `backup_interval` app setting.
+// Kept as a seam so the composition test can drive it with fakes.
+func startBackupJob(ctx context.Context, log *slog.Logger, settings backupjob.SettingsPort, dests backupjob.DestinationsPort, cipher backupjob.CipherPort, audit backupjob.AuditPort, dumper backupjob.Dumper, startupDelay time.Duration) {
+	job := backupjob.New(backupjob.Deps{
+		Logger:       log,
+		Settings:     settings,
+		Destinations: dests,
+		Cipher:       cipher,
+		Audit:        audit,
+		Dumper:       dumper,
+	}, backupjob.WithStartupDelay(startupDelay))
+	go job.Start(ctx)
+}
 
 // runHealthcheck opens a short-lived HTTP request to the local /healthz and
 // returns 0 on 2xx, 1 otherwise. It dials the configured GEAR_HTTP_ADDR (or
@@ -134,6 +157,15 @@ func main() {
 	adminRepo := adminpostgres.NewRepository(adminStore)
 	adminSettingsService := admcore.NewService(adminRepo, adminRepo, adminRepo, adminRepo, secretCipher, userRepo, userRepo, admsmtp.Client{Log: log}, admbck.NewTester(), log)
 	adminSettingsHandler := adminhttp.NewHandler(adminSettingsService, log)
+
+	// Story 7.7 — the in-process backup job (NFR-R3): started at the
+	// composition root right after the Admin settings service and the pool so
+	// the settings/destinations ports it consumes are already wired. It runs
+	// once a few seconds after boot (migrations/settings warm) and then on the
+	// `backup_interval` app-setting ticker; it stops on ctx cancel (clean
+	// shutdown). pg_dump comes from the runtime image (Dockerfile), not a new
+	// module.
+	startBackupJob(ctx, log, adminSettingsService, adminSettingsService, secretCipher, userRepo, backupjob.PgDumper{DSN: cfg.DatabaseURL}, backupStartupDelay)
 
 	// Password reset email delivery (FR-26/AD-14): Story 3.1 wires the REAL
 	// SMTP sender (built below from the Admin settings port), replacing the

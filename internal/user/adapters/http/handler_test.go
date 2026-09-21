@@ -1841,7 +1841,7 @@ func (r *changePasswordRepo) DeleteExpiredPasswordResetTokens(_ context.Context,
 	return nil
 }
 
-func (r *changePasswordRepo) InsertAuditEventAnonymous(_ context.Context, _ string) error { return nil }
+func (r *changePasswordRepo) InsertAuditEventAnonymous(_ context.Context, _ string, _ string, _ string) error { return nil }
 
 func (r *changePasswordRepo) DeletePasswordResetToken(_ context.Context, _ string) error { return nil }
 

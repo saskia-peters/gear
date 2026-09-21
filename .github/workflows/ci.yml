@@ -83,6 +83,29 @@ jobs:
         # Pin comes from the justfile (single source) — MIGRATE_VERSION.
         run: go run -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@$(just --evaluate MIGRATE_VERSION) -path ./migrations --database "$DATABASE_URL" up
 
+      # Backup/restore proof (Story 7.7, NFR-R3): run the SAME restore-proof
+      # body as `just backup-restore-proof` against the postgres:18 service
+      # container, WITHOUT podman. The runner's postgres client is not
+      # guaranteed, so the pg tools run INSIDE the service container (docker
+      # exec) and the REAL deploy/restore.sh is copied in and executed there.
+      # This makes NFR-R3's "tested from initial deployment" evidence part of
+      # the checked CI path, not only the manual local recipe.
+      - name: Backup/restore proof (NFR-R3)
+        run: |
+          set -euo pipefail
+          docker exec postgres pg_dump -Fc --no-owner --no-acl -U gear -d gear -f /tmp/gear.dump
+          docker exec postgres psql -U gear -d gear -v ON_ERROR_STOP=1 \
+            -c "DROP DATABASE IF EXISTS gear_restore_proof WITH (FORCE)" \
+            -c "CREATE DATABASE gear_restore_proof"
+          docker cp deploy/restore.sh postgres:/tmp/restore.sh
+          docker exec postgres bash /tmp/restore.sh /tmp/gear.dump \
+            'postgres://gear:gear@localhost:5432/gear_restore_proof?sslmode=disable'
+          n=$(docker exec postgres psql -U gear -d gear_restore_proof -tAc \
+            "SELECT count(*) FROM users WHERE email IN ('admin.1@gear.local','admin.2@gear.local')")
+          [ "$n" = "2" ] || { echo "::error::restore proof failed: seeded admins = $n, want 2"; exit 1; }
+          docker exec postgres psql -U gear -d gear -v ON_ERROR_STOP=1 \
+            -c "DROP DATABASE IF EXISTS gear_restore_proof WITH (FORCE)"
+
       - name: Install web dependencies
         working-directory: web
         run: npm ci

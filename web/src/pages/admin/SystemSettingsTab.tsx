@@ -6,7 +6,7 @@ import styles from './AdminEinstellungenPage.module.css'
 import type { Feedback, TabProps } from './settingsTabTypes.ts'
 // ---------------------------------------------------------------------------
 // System tab (Story 5-2b): the configurable system settings table. Each of the
-// 21 atomic settings renders as one row: German name, formatted current value,
+// 22 atomic settings renders as one row: German name, formatted current value,
 // a value-typed editable input (duration → whole seconds, integer → number,
 // text → string) and a "?" InfoPopup explaining the setting. Saving is per-row
 // with inline German feedback — the server is authoritative, so its 400s (and
@@ -20,7 +20,7 @@ interface SystemSettingMeta {
   help: string
 }
 
-// SYSTEM_SETTING_META is the SPA-side catalog of the 21 seeded settings: German
+// SYSTEM_SETTING_META is the SPA-side catalog of the 22 seeded settings: German
 // label + read-only help text for the "?" popup (UX-DR8). Keys mirror the
 // server's seeded keys; the server remains authoritative for the value and the
 // value type.
@@ -40,6 +40,10 @@ const SYSTEM_SETTING_META: Record<string, SystemSettingMeta> = {
   backup_protocol_timeout: {
     label: 'Backup-Protokoll-Timeout',
     help: 'Zeit in Sekunden für die FTP-/SFTP-/S3-Unterhaltung mit einem Backup-Ziel während des Verbindungstests.',
+  },
+  backup_interval: {
+    label: 'Backup-Intervall',
+    help: 'Abstand in Sekunden zwischen zwei automatischen Backups des Backup-Jobs (Standard 86400 = 1 Tag). Der Job sichert außerdem kurz nach dem Serverstart.',
   },
   password_reset_ttl: {
     label: 'Gültigkeit Passwort-Reset-Link',
@@ -112,7 +116,7 @@ const SYSTEM_SETTING_META: Record<string, SystemSettingMeta> = {
 }
 
 // SYSTEM_SETTING_GROUPS is the display grouping of the System settings (user
-// decision 2026-09-18): the 21 atomic settings are rendered under 8 German
+// decision 2026-09-18): the 22 atomic settings are rendered under 8 German
 // category headings instead of one flat table. Keys within a group keep the
 // server's seed order (groups list them in that order). Every seeded key must
 // appear in EXACTLY one group; the render falls back to an "Weitere" group for
@@ -129,7 +133,7 @@ const SYSTEM_SETTING_GROUPS: readonly SystemSettingGroup[] = [
   },
   {
     label: 'Backup',
-    keys: ['backup_dial_timeout', 'backup_protocol_timeout'],
+    keys: ['backup_dial_timeout', 'backup_protocol_timeout', 'backup_interval'],
   },
   {
     label: 'Passwort & Kontowiederherstellung',
@@ -229,7 +233,7 @@ function formatCurrentValue(setting: SystemSetting): string {
   return `${String(setting.value)}${unit !== '' ? ` ${unit}` : ''}`
 }
 
-// SystemSettingsTab is the System surface (Story 5-2b): a table of the 21
+// SystemSettingsTab is the System surface (Story 5-2b): a table of the 22
 // seeded settings — German name, formatted current value, a value-typed input
 // (duration in whole seconds, integer, text) and a "?" InfoPopup per row.
 // Saving is per-row with inline German feedback; the server is authoritative

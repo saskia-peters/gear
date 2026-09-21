@@ -250,8 +250,12 @@ VALUES ($1, $2, $3, $4);
 -- anti-enumeration paths that have no authenticated user, e.g. a forgot-password
 -- request for an unknown email (review findings 1.8-3 / 1.8-10): enumeration
 -- attempts leave a trail (NFR-O1) and the path performs comparable-cost work.
-INSERT INTO audit_log (operation)
-VALUES ($1);
+-- Also used by the Story 7.7 backup job, which has no user session: its
+-- per-run/per-destination outcomes (backup.run) carry detail + severity here,
+-- mirroring the actor path. A blank detail is stored NULL; a blank severity
+-- falls back to 'normal' in the repository.
+INSERT INTO audit_log (operation, operation_detail, severity)
+VALUES ($1, $2, $3);
 
 -- name: CreatePasswordResetToken :exec
 -- Issue a fresh single-use reset token (FR-26/AD-13): the data-modifying CTE

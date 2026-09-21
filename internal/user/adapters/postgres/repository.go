@@ -429,9 +429,18 @@ func (r *Repository) InsertAuditEvent(ctx context.Context, userID, operation, de
 // stays NULL). Used for anti-enumeration paths with no authenticated user, e.g.
 // a forgot-password request for an unknown email (review findings 1.8-3/1.8-10):
 // enumeration attempts leave a trail (NFR-O1) and the path performs
-// comparable-cost work.
-func (r *Repository) InsertAuditEventAnonymous(ctx context.Context, operation string) error {
-	return r.queries.InsertAuditEventAnonymous(ctx, operation)
+// comparable-cost work. The Story 7.7 backup job also audits through here (it
+// has no user session) with a detail + severity, mirroring the actor path.
+func (r *Repository) InsertAuditEventAnonymous(ctx context.Context, operation, detail, severity string) error {
+	sev := severity
+	if sev == "" {
+		sev = "normal"
+	}
+	return r.queries.InsertAuditEventAnonymous(ctx, InsertAuditEventAnonymousParams{
+		Operation:       operation,
+		OperationDetail: pgtype.Text{String: detail, Valid: detail != ""},
+		Severity:        sev,
+	})
 }
 
 // CreatePasswordResetToken stores the SHA-256 hash of a fresh single-use reset

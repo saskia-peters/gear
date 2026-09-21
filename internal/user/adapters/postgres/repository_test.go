@@ -1036,9 +1036,11 @@ func TestPostgresExpiredTokenPurgeAndAnonymousAudit(t *testing.T) {
 
 	// 2. InsertAuditEventAnonymous writes a row with a NULL actor (review
 	// findings 1.8-3 / 1.8-10): unknown-email enumeration attempts leave a
-	// trail (NFR-O1).
+	// trail (NFR-O1). The Story 7.7 backup job audits through the same path with
+	// a non-empty detail + severity — pin that the columns actually persist
+	// (a sqlc regression would ship the backup.run outcome trail green).
 	op := core.AuditOperationPasswordResetRequestUnknown
-	if err := repo.InsertAuditEventAnonymous(ctx, op); err != nil {
+	if err := repo.InsertAuditEventAnonymous(ctx, op, "destination=dest-a result=ok", "normal"); err != nil {
 		t.Fatalf("InsertAuditEventAnonymous failed: %v", err)
 	}
 	var actorIsNull bool
@@ -1049,6 +1051,19 @@ func TestPostgresExpiredTokenPurgeAndAnonymousAudit(t *testing.T) {
 	}
 	if !actorIsNull {
 		t.Error("anonymous audit row must have a NULL actor")
+	}
+	var anonDetail string
+	var anonSeverity string
+	if err := pool.QueryRow(ctx,
+		`SELECT COALESCE(operation_detail,''), severity FROM audit_log WHERE operation = $1 ORDER BY created_at DESC LIMIT 1`,
+		op).Scan(&anonDetail, &anonSeverity); err != nil {
+		t.Fatalf("reading anonymous audit detail failed: %v", err)
+	}
+	if anonDetail != "destination=dest-a result=ok" {
+		t.Errorf("anonymous audit detail = %q, want the persisted outcome detail", anonDetail)
+	}
+	if anonSeverity != "normal" {
+		t.Errorf("anonymous audit severity = %q, want normal", anonSeverity)
 	}
 }
 

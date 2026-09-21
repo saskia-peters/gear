@@ -334,7 +334,7 @@ func (m *mockRepo) InsertAuditEvent(_ context.Context, userID, operation, detail
 // InsertAuditEventAnonymous appends an audit row without an actor (review
 // findings 1.8-3 / 1.8-10): the row is keyed under the empty-string pseudo
 // actor so tests can assert unknown-email enumeration attempts leave a trail.
-func (m *mockRepo) InsertAuditEventAnonymous(_ context.Context, operation string) error {
+func (m *mockRepo) InsertAuditEventAnonymous(_ context.Context, operation, _detail, _severity string) error {
 	if m.auditErr != nil {
 		return m.auditErr
 	}

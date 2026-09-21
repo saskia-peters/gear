@@ -774,7 +774,7 @@ describe('AdminEinstellungenPage System tab', () => {
     cleanup()
   })
 
-  // The 21 seeded atomic settings exactly as the server GET answers them
+  // The 22 seeded atomic settings exactly as the server GET answers them
   // (durations as whole seconds; integer/text rows carry the display unit).
   function systemSettingsFixture() {
     return [
@@ -782,6 +782,7 @@ describe('AdminEinstellungenPage System tab', () => {
       { key: 'smtp_protocol_timeout', value_type: 'duration', value: 30 },
       { key: 'backup_dial_timeout', value_type: 'duration', value: 10 },
       { key: 'backup_protocol_timeout', value_type: 'duration', value: 10 },
+      { key: 'backup_interval', value_type: 'duration', value: 86400 },
       { key: 'password_reset_ttl', value_type: 'duration', value: 1800 },
       { key: 'admin_recovery_ttl', value_type: 'duration', value: 1800 },
       { key: 'forgot_throttle_interval', value_type: 'duration', value: 60 },
@@ -821,7 +822,7 @@ describe('AdminEinstellungenPage System tab', () => {
     expect(screen.queryByRole('tab', { name: 'Zeitpläne' })).not.toBeInTheDocument()
   })
 
-  it('SPA_CATEGORIES: the 21 settings are grouped under the 8 German category headings', async () => {
+  it('SPA_CATEGORIES: the 22 settings are grouped under the 8 German category headings', async () => {
     stubFetchRoutes([stubSystemList(systemSettingsFixture())])
     renderPage()
 
@@ -839,8 +840,8 @@ describe('AdminEinstellungenPage System tab', () => {
     for (const heading of headings) {
       expect(screen.getByRole('heading', { name: heading })).toBeInTheDocument()
     }
-    // Every one of the 21 settings still renders (one save button each).
-    expect(screen.getAllByRole('button', { name: 'Speichern' })).toHaveLength(21)
+    // Every one of the 22 settings still renders (one save button each).
+    expect(screen.getAllByRole('button', { name: 'Speichern' })).toHaveLength(22)
   })
 
   it('SPA_TABLE: every setting row renders German name, formatted value, typed input and a "?" button', async () => {
@@ -861,11 +862,11 @@ describe('AdminEinstellungenPage System tab', () => {
     expect(screen.getByText('25 Prozent')).toBeInTheDocument()
     expect(screen.getByText('10 Zeichen')).toBeInTheDocument()
     expect(screen.getByText('9 Ziffern')).toBeInTheDocument()
-    // 21 rows: one input + one save + one "?" per row.
-    expect(screen.getAllByRole('spinbutton')).toHaveLength(20)
+    // 22 rows: one input + one save + one "?" per row.
+    expect(screen.getAllByRole('spinbutton')).toHaveLength(21)
     expect(screen.getAllByRole('textbox')).toHaveLength(1)
-    expect(screen.getAllByRole('button', { name: 'Speichern' })).toHaveLength(21)
-    expect(screen.getAllByRole('button', { name: /Erklärung zu/ })).toHaveLength(21)
+    expect(screen.getAllByRole('button', { name: 'Speichern' })).toHaveLength(22)
+    expect(screen.getAllByRole('button', { name: /Erklärung zu/ })).toHaveLength(22)
   })
 
   it('SPA_POPUP: clicking the "?" opens a labelled help popup; Escape closes it', async () => {

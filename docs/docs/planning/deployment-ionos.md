@@ -184,6 +184,48 @@ When we release a new version, we simply:
 
 The database stays untouched; only the app is replaced.
 
+### Backup & Restore runbook (Story 7.7, NFR-R3)
+
+G.E.A.R. backs itself up. The app container ships the postgres client
+(`pg_dump`), and an in-process **backup job** runs automatically:
+
+- **Schedule:** once a few seconds after boot, then every `backup_interval`
+  seconds. The interval is admin-configurable under Einstellungen → System
+  (seeded `86400` = daily).
+- **What it produces:** a compressed, restorable dump of the whole database
+  (`pg_dump -Fc`, custom format), shipped as a **dated artifact**
+  `gear-<YYYYMMDDHHMMSS>.dump` to **every configured backup destination**
+  (Einstellungen → Backup) whose mechanism supports real transfer in V1:
+  - **local** → a dated file in the configured path,
+  - **s3** → a dated object via SigV4 PUT,
+  - **ftp / sftp** → reachability-tested only (handshake) in V1; the job logs
+    them as "configured but not shippable in V1" — never silent, not a failure.
+- **Failures are never silent (NFR-R3):** every run and every destination's
+  outcome is logged structured and written to the audit trail (`backup.run`).
+  One failing destination never stops the others.
+- **Restore:** `deploy/restore.sh` restores a dump into a target database with
+  `pg_restore --clean --if-exists` (idempotent). The local proof — dump the dev
+  DB, restore into a throwaway scratch database, verify the two seeded admins,
+  drop the scratch — is one command:
+
+```bash
+just backup-restore-proof
+```
+
+Manual restore after a disaster (run on a machine with the postgres client
+tools, e.g. an operator laptop or the postgres container itself):
+
+```bash
+# stop the app so no live session writes during the restore
+docker compose -f deploy/compose.prod.yaml stop app
+bash deploy/restore.sh /path/to/gear-20260921120000.dump \
+  'postgres://gear:...@db:5432/gear?sslmode=disable'
+docker compose -f deploy/compose.prod.yaml start app
+```
+
+The two seeded admin accounts are part of the dump and are restored as-is
+(AD-13). Retention/rotation of old dumps is explicitly out of scope for V1.
+
 ---
 
 ## 6. Putting it on the internet: bunny.net or Cloudflare (with sassisuperdomain.de)

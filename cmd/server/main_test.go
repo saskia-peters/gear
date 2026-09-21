@@ -14,6 +14,7 @@ import (
 	"path/filepath"
 	"regexp"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -187,6 +188,7 @@ func (s *compSettingsService) GetAppSettings(_ context.Context, _ string) (*admc
 		SmtpProtocolTimeout:             30 * time.Second,
 		BackupDialTimeout:               10 * time.Second,
 		BackupProtocolTimeout:           10 * time.Second,
+		BackupInterval:                  86400 * time.Second,
 		PasswordResetTTL:                1800 * time.Second,
 		AdminRecoveryTTL:                1800 * time.Second,
 		ForgotThrottleInterval:          60 * time.Second,
@@ -595,7 +597,7 @@ func TestCompositionSystemMountGating(t *testing.T) {
 	}
 
 	// 200: a caller holding ONLY admin.settings.system reaches the system
-	// surface (the 21-row typed list from the in-memory service) — proves the
+	// surface (the 22-row typed list from the in-memory service) — proves the
 	// system sub-mount is chosen over the outer admin-module mount (mount
 	// ordering correct).
 	systemRouter := newCompositionSystemRouter([]string{admcore.AppSettingsPermission}, activeUser("u-sys", "sys@gear.local"))
@@ -607,8 +609,8 @@ func TestCompositionSystemMountGating(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decoding system response err = %v", err)
 	}
-	if len(body) != 21 {
-		t.Errorf("system response rows = %d, want 21", len(body))
+	if len(body) != 22 {
+		t.Errorf("system response rows = %d, want 22", len(body))
 	}
 	var hasOtp bool
 	for _, row := range body {
@@ -618,6 +620,15 @@ func TestCompositionSystemMountGating(t *testing.T) {
 	}
 	if !hasOtp {
 		t.Errorf("system response = %s, want the typed otp_length row", rec.Body.String())
+	}
+	var hasBackupInterval bool
+	for _, row := range body {
+		if row["key"] == "backup_interval" && row["value"] == float64(86400) {
+			hasBackupInterval = true
+		}
+	}
+	if !hasBackupInterval {
+		t.Errorf("system response = %s, want the seeded backup_interval row", rec.Body.String())
 	}
 
 	// REVERSE: the system-only holder must NOT reach the SMTP surface (the
@@ -2114,4 +2125,122 @@ func TestRunHealthcheck(t *testing.T) {
 			t.Fatalf("runHealthcheck = %d, want 1 for an unreachable listener", got)
 		}
 	})
+}
+
+// ============================================================================
+// Story 7.7 — the backup job starts with the backup_interval app setting
+// (composition-root seam, NFR-R3). Fakes drive the SAME startBackupJob wiring
+// main() uses; a real local destination receives a dated dump artifact and the
+// job's per-run backup.run audit rows prove the ticker interval was applied.
+// ============================================================================
+
+// compBackupSettings is a backupjob.SettingsPort fake returning a fixed
+// backup_interval.
+type compBackupSettings struct {
+	interval time.Duration
+}
+
+func (s *compBackupSettings) CurrentAppSettings(context.Context) (*admcore.AppSettings, error) {
+	return &admcore.AppSettings{BackupInterval: s.interval}, nil
+}
+
+// compBackupDestinations is a backupjob.DestinationsPort fake returning one
+// local destination (no credential needed).
+type compBackupDestinations struct {
+	dir string
+}
+
+func (d *compBackupDestinations) CurrentBackupDestinations(context.Context) ([]*admcore.BackupDestination, error) {
+	return []*admcore.BackupDestination{
+		{ID: "dest-comp", Name: "comp-local", Mechanism: admcore.BackupMechanismLocal, BucketOrPath: d.dir},
+	}, nil
+}
+
+// compBackupCipher is a backupjob.CipherPort fake (never called for a
+// credential-less local destination).
+type compBackupCipher struct{}
+
+func (compBackupCipher) Decrypt(string) (string, error) { return "", nil }
+
+// compBackupAudit is a backupjob.AuditPort fake recording anonymous rows.
+type compBackupAudit struct {
+	mu     sync.Mutex
+	events []struct {
+		operation string
+		detail    string
+	}
+}
+
+func (a *compBackupAudit) InsertAuditEventAnonymous(_ context.Context, operation, detail, _ string) error {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	a.events = append(a.events, struct {
+		operation string
+		detail    string
+	}{operation: operation, detail: detail})
+	return nil
+}
+
+func (a *compBackupAudit) backupRunCount() int {
+	a.mu.Lock()
+	defer a.mu.Unlock()
+	n := 0
+	for _, e := range a.events {
+		if e.operation == admcore.AuditOperationBackupRun {
+			n++
+		}
+	}
+	return n
+}
+
+// compBackupDumper is a backupjob.Dumper fake writing fixed bytes.
+type compBackupDumper struct{}
+
+func (compBackupDumper) Dump(_ context.Context, w io.Writer) error {
+	_, err := w.Write([]byte("GEAR custom-format dump"))
+	return err
+}
+
+// TestBackupJobStartsWithIntervalSetting pins the Story 7.7 composition-root
+// wiring: startBackupJob reads the backup_interval app setting and runs the
+// job on that timer. With StartupDelay 0 and a 20ms interval, the startup run
+// + at least one tick produce >=2 backup.run rows within 100ms (the 24h
+// default would produce exactly 1), and at least one dated dump artifact lands
+// on the local destination. The file assertion is deliberately >=1 (NOT exactly
+// 1): a 100ms window with a 20ms ticker can span a UTC-second boundary and
+// produce two differently-named files (each run gets its own runSeq), and the
+// assertions run only after the goroutine has settled on cancel.
+func TestBackupJobStartsWithIntervalSetting(t *testing.T) {
+	dir := t.TempDir()
+	audit := &compBackupAudit{}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+
+	startBackupJob(ctx, discardLogger(),
+		&compBackupSettings{interval: 20 * time.Millisecond},
+		&compBackupDestinations{dir: dir},
+		compBackupCipher{},
+		audit,
+		compBackupDumper{},
+		0,
+	)
+
+	time.Sleep(100 * time.Millisecond)
+	cancel()
+	// Settle: let the goroutine observe ctx.Done and any in-flight run finish
+	// before the assertions read the audit rows / filesystem.
+	time.Sleep(100 * time.Millisecond)
+
+	if n := audit.backupRunCount(); n < 2 {
+		t.Errorf("backup.run rows = %d, want >= 2 (startup run + a tick on the 20ms interval)", n)
+	}
+	entries, err := os.ReadDir(dir)
+	if err != nil || len(entries) < 1 {
+		t.Fatalf("dated dump artifact on the local destination: entries=%v err=%v, want at least one", entries, err)
+	}
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), "gear-") || !strings.HasSuffix(e.Name(), ".dump") {
+			t.Errorf("artifact name = %q, want gear-<date>-<seq>.dump", e.Name())
+		}
+	}
 }

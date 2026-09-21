@@ -16,6 +16,14 @@ const (
 	BackupMechanismLocal = "local"
 )
 
+// AuditOperationBackupRun is the audit-operation tag for the Story 7.7 backup
+// job's outcomes (NFR-O1/NFR-O2): one row per run (dump failure, skipped,
+// zero-destination) and one row per destination (ok / failed / not shippable).
+// The job has no user session, so it writes these WITHOUT an actor via the
+// User repository's anonymous audit path; the detail carries the destination +
+// result.
+const AuditOperationBackupRun = "backup.run"
+
 // BackupDestination is the domain representation of one backup-destination row
 // (FR-29/AD-15). PasswordEncrypted is the AES-256-GCM ciphertext stored at
 // rest (NFR-S4) — it is carried only inside the module; the HTTP surface
@@ -74,12 +82,17 @@ type BackupTestResult struct {
 
 // BackupTestParams is the live, already-decrypted input for one test
 // connection (in-memory only — the plaintext credential never leaves it).
+// Timeout is the optional protocol timeout for the underlying exchange: the
+// Story 7.7 backup job threads the `backup_protocol_timeout` app setting into
+// the s3 store step here; the tester (Story 3.2) leaves it zero and uses its
+// own constant.
 type BackupTestParams struct {
 	Mechanism    string
 	Endpoint     string
 	BucketOrPath string
 	Username     string
 	Password     string
+	Timeout      time.Duration
 }
 
 // BackupDestinationsStore is the outbound persistence port over the

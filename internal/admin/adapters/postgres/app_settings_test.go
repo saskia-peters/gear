@@ -143,6 +143,44 @@ func TestPostgresAppSettingsMigration031(t *testing.T) {
 	}
 }
 
+// TestPostgresAppSettingsMigration033 pins the Story 7.7 migration contract
+// (000033) against the SHARED dev DB: the backup_interval row is seeded to
+// 86400 seconds (daily) — the EXACT value the backup job falls back to, so a
+// wrong-but-positive seed (or a missing row) would otherwise pass every "> 0"
+// store assertion. Re-applying the idempotent INSERT (ON CONFLICT DO NOTHING)
+// never clobbers. Snapshot-and-restored like the other app_settings tests.
+func TestPostgresAppSettingsMigration033(t *testing.T) {
+	pool := adminTestPool(t)
+	t.Cleanup(pool.Close)
+	ctx := context.Background()
+
+	snap := snapshotAppSettings(t, ctx, pool)
+	t.Cleanup(func() { restoreAppSettings(t, ctx, pool, snap) })
+
+	// Apply the 000033 up statement twice — idempotent.
+	for i := 0; i < 2; i++ {
+		if _, err := pool.Exec(ctx, `INSERT INTO app_settings (key, value_type, duration_value, int_value, text_value)
+			VALUES ('backup_interval', 'duration', 86400, NULL, NULL) ON CONFLICT (key) DO NOTHING`); err != nil {
+			t.Fatalf("apply 000033 insert err = %v", err)
+		}
+	}
+
+	var interval int64
+	if err := pool.QueryRow(ctx, `SELECT duration_value FROM app_settings WHERE key = 'backup_interval'`).Scan(&interval); err != nil {
+		t.Fatalf("backup_interval row missing: %v", err)
+	}
+	if interval != 86400 {
+		t.Errorf("backup_interval = %d, want 86400 (the seeded daily interval the job falls back to)", interval)
+	}
+	var count int
+	if err := pool.QueryRow(ctx, `SELECT count(*) FROM app_settings WHERE key = 'backup_interval'`).Scan(&count); err != nil {
+		t.Fatalf("counting backup_interval rows err = %v", err)
+	}
+	if count != 1 {
+		t.Errorf("backup_interval rows = %d, want exactly 1 (ON CONFLICT DO NOTHING is idempotent)", count)
+	}
+}
+
 // TestPostgresAppSettingsStore verifies the Story 5-2b app_settings store
 // (migration 000026 applied) against the SHARED dev DB. Because the table holds
 // real admin-edited data, the test snapshots-and-restores the whole table in

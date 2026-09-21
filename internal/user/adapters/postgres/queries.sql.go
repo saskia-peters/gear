@@ -1423,16 +1423,26 @@ func (q *Queries) InsertAuditEvent(ctx context.Context, arg InsertAuditEventPara
 }
 
 const insertAuditEventAnonymous = `-- name: InsertAuditEventAnonymous :exec
-INSERT INTO audit_log (operation)
-VALUES ($1)
+INSERT INTO audit_log (operation, operation_detail, severity)
+VALUES ($1, $2, $3)
 `
+
+type InsertAuditEventAnonymousParams struct {
+	Operation       string      `json:"operation"`
+	OperationDetail pgtype.Text `json:"operation_detail"`
+	Severity        string      `json:"severity"`
+}
 
 // Append an audit row WITHOUT an actor (actor_user_id stays NULL). Used for
 // anti-enumeration paths that have no authenticated user, e.g. a forgot-password
 // request for an unknown email (review findings 1.8-3 / 1.8-10): enumeration
 // attempts leave a trail (NFR-O1) and the path performs comparable-cost work.
-func (q *Queries) InsertAuditEventAnonymous(ctx context.Context, operation string) error {
-	_, err := q.db.Exec(ctx, insertAuditEventAnonymous, operation)
+// Also used by the Story 7.7 backup job, which has no user session: its
+// per-run/per-destination outcomes (backup.run) carry detail + severity here,
+// mirroring the actor path. A blank detail is stored NULL; a blank severity
+// falls back to 'normal' in the repository.
+func (q *Queries) InsertAuditEventAnonymous(ctx context.Context, arg InsertAuditEventAnonymousParams) error {
+	_, err := q.db.Exec(ctx, insertAuditEventAnonymous, arg.Operation, arg.OperationDetail, arg.Severity)
 	return err
 }
 

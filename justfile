@@ -215,6 +215,8 @@ deploy-local-proof: podman-check container-build
     podman pull --tls-verify=false localhost:5000/gear:local && \
     podman compose -f deploy/compose.prod.yaml up -d && \
     i=0; until curl -fsS http://localhost:8081/healthz >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 60 ] && { echo "app not healthy after 60s" >&2; exit 1; }; sleep 1; done; \
+    echo "==> pg_dump present in the app container (Story 7.7 NFR-R3)"; \
+    podman exec gear-prod-app /usr/bin/pg_dump --version; \
     echo "==> proof OK: /healthz 200 on http://localhost:8081"
 
 # Tear down the local-proof stack + registry (keeps nothing behind)
@@ -222,6 +224,38 @@ deploy-local-proof-down:
     @podman compose -f deploy/compose.prod.yaml down >/dev/null 2>&1 || true
     @podman rm -f gear-registry >/dev/null 2>&1 || true
     @rm -f .env.prod
+
+# Prove the NFR-R3 restore procedure (Story 7.7) locally: dump the dev DB
+# (pg_dump -Fc), restore it into a throwaway scratch database
+# `gear_restore_proof` via the REAL deploy/restore.sh (pg_restore --clean
+# --if-exists), assert the two seeded admin accounts are present, then drop the
+# scratch. This is the "tested from initial deployment" evidence (NFR-R3). The
+# scratch is a throwaway DATABASE because pg_restore cannot remap the dump's
+# objects into a differently-named schema — a fresh DB is the clean target that
+# exercises the same restore.sh path without touching the dev DB's public
+# schema. The EXIT trap drops the scratch too, so a mid-proof failure never
+# leaks scratch state; and the URL rewrite is asserted to have actually changed
+# the database component (a fall-through would run restore.sh against the dev
+# DB itself). Fails red if pg_dump, the restore, or the admin assertion fails.
+backup-restore-proof: db-up
+    set -euo pipefail; \
+    dump=$(mktemp /tmp/gear-backup-XXXXXX.dump); \
+    trap 'rm -f "$dump"; psql "{{DATABASE_URL}}" -c "DROP DATABASE IF EXISTS gear_restore_proof WITH (FORCE)" >/dev/null 2>&1 || true' EXIT; \
+    scratch_url=$(echo "{{DATABASE_URL}}" | sed -E 's#/([^/?]+)(\?.*)?$#/gear_restore_proof\2#'); \
+    [ "$scratch_url" != "{{DATABASE_URL}}" ] || { echo "backup-restore-proof: could not derive the scratch database URL from DATABASE_URL" >&2; exit 1; }; \
+    echo "==> 1. dumping the dev DB (pg_dump -Fc)"; \
+    pg_dump -Fc --no-owner --no-acl "{{DATABASE_URL}}" -f "$dump"; \
+    echo "==> 2. creating a fresh scratch database gear_restore_proof"; \
+    psql "{{DATABASE_URL}}" -c "DROP DATABASE IF EXISTS gear_restore_proof WITH (FORCE)" >/dev/null; \
+    psql "{{DATABASE_URL}}" -c "CREATE DATABASE gear_restore_proof" >/dev/null; \
+    echo "==> 3. restoring via deploy/restore.sh"; \
+    bash deploy/restore.sh "$dump" "$scratch_url"; \
+    echo "==> 4. asserting the two seeded admins are present"; \
+    n=$(psql "$scratch_url" -tAc "SELECT count(*) FROM users WHERE email IN ('admin.1@gear.local','admin.2@gear.local')"); \
+    [ "$n" = "2" ] || { echo "backup-restore-proof FAILED: seeded admins found = $n, want 2" >&2; exit 1; }; \
+    echo "==> 5. dropping the scratch"; \
+    psql "{{DATABASE_URL}}" -c "DROP DATABASE IF EXISTS gear_restore_proof WITH (FORCE)" >/dev/null; \
+    echo "==> backup-restore-proof OK (dump -> restore -> admins verified -> scratch dropped)"
 
 # Validate the OpenTofu IaC (local state; no provisioning)
 infra-validate:

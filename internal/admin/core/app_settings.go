@@ -104,6 +104,7 @@ type AppSettings struct {
 	SmtpProtocolTimeout             time.Duration
 	BackupDialTimeout               time.Duration
 	BackupProtocolTimeout           time.Duration
+	BackupInterval                  time.Duration
 	PasswordResetTTL                time.Duration
 	AdminRecoveryTTL                time.Duration
 	ForgotThrottleInterval          time.Duration
@@ -222,7 +223,8 @@ type appSettingDef struct {
 	get       func(*AppSettings) any
 }
 
-// appSettingsCatalog is the 21 atomic rows of the 14 proposal defaults.
+// appSettingsCatalog is the 22 atomic rows of the 14 proposal defaults (+ the
+// Story 7.7 backup_interval).
 var appSettingsCatalog = []appSettingDef{
 	// A1/A2 SMTP timeouts.
 	{key: "smtp_dial_timeout", valueType: ValueTypeDuration, unit: "Sekunden", min: 1,
@@ -238,6 +240,12 @@ var appSettingsCatalog = []appSettingDef{
 	{key: "backup_protocol_timeout", valueType: ValueTypeDuration, unit: "Sekunden", min: 1,
 		set: func(s *AppSettings, r *AppSetting) { s.BackupProtocolTimeout = r.Duration() },
 		get: func(s *AppSettings) any { return s.BackupProtocolTimeout }},
+	// A3.1 Backup job ticker interval (Story 7.7, NFR-R3): how often the
+	// in-process job runs pg_dump and ships to every destination. Seeded 86400
+	// (daily); the job falls back to that default when the row is missing/drifted.
+	{key: "backup_interval", valueType: ValueTypeDuration, unit: "Sekunden", min: 1,
+		set: func(s *AppSettings, r *AppSetting) { s.BackupInterval = r.Duration() },
+		get: func(s *AppSettings) any { return s.BackupInterval }},
 	// A4/A5/A6 Reset/recovery TTLs and the forgot-password throttle.
 	{key: "password_reset_ttl", valueType: ValueTypeDuration, unit: "Sekunden", min: 1,
 		set: func(s *AppSettings, r *AppSetting) { s.PasswordResetTTL = r.Duration() },

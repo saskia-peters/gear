@@ -85,8 +85,50 @@ up -d`, and waits for `/healthz`.
   `gear_prod_pgdata` volume keeps the old one — wipe the volume
   (`docker compose -f deploy/compose.prod.yaml down -v`) when regenerating.
 - **Backups (NFR-R3):** see Story 7.7; destinations are already admin-configurable
-  (FR-29/AD-15).
+  (FR-29/AD-15). The app container ships `pg_dump` (the in-process backup job
+  shells out to it on the `backup_interval` setting). See the **Backup & Restore
+  runbook** below.
 - **TLS (NFR-S1):** terminate TLS at the edge/CDN layer (Cloudflare or bunny.net,
   spine candidate) in front of the app port; the VM firewall + compose are ready
   for it. Plain-language setup for both providers (with our `sassisuperdomain.de`
   domain) is documented in `docs/docs/planning/deployment-ionos.md` §6.
+
+## Backup & Restore runbook (Story 7.7, NFR-R3)
+
+Backups are **automated by the app itself**: the backup job runs in the app
+container, dumps the database (`pg_dump -Fc`, custom format) and ships the dated
+artifact `gear-<YYYYMMDDHHMMSS>.dump` to **every configured destination** whose
+mechanism supports real transfer in V1 — **local** (a dated file in the
+configured path) and **s3** (a dated object via SigV4 PUT). FTP/SFTP stay
+**handshake-only** in V1: the job logs them as "configured but not shippable in
+V1" (never silent, never a failure). The job runs once a few seconds after boot
+and then every `backup_interval` seconds (Einstellungen → System, seeded
+86400 = daily). Every per-run and per-destination outcome is logged structured
+and audited as `backup.run`; a failing destination never aborts the run.
+
+**Configure the destinations** via the Admin UI (Einstellungen → Backup), then
+watch the app log for the per-run `backup.run` lines.
+
+**Tested restore procedure** — `just backup-restore-proof` (dev, needs the dev
+DB up) dumps the dev DB, restores it into a throwaway scratch database
+`gear_restore_proof` through the **real** `deploy/restore.sh`, asserts the two
+seeded admins are present and drops the scratch:
+
+```bash
+just backup-restore-proof
+```
+
+**Restoring a backup manually** (e.g. after a disaster): run `deploy/restore.sh`
+on a machine with the postgres client tools. It is idempotent
+(`pg_restore --clean --if-exists`) and restores the custom-format dump into the
+target database:
+
+```bash
+bash deploy/restore.sh /path/to/gear-20260921120000.dump 'postgres://gear:...@db:5432/gear?sslmode=disable'
+```
+
+> Restoring into the **running** app's database while the app is up is
+> deliberate: stop the app first (`docker compose stop app`), restore, then
+> start it — the backup job uses `pg_dump`, which needs a live connection, so
+> `--clean` on an idle target is the safe path. Retention/rotation of old dumps
+> is out of scope for V1 (a later story adds it).

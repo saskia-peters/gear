@@ -29,7 +29,7 @@
 # - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
 # - Retrospective appends its action items to action_items; the status view surfaces open ones
 generated: 09-04-2026 19:40
-last_updated: 2026-09-20
+last_updated: 2026-09-21
 project: gear
 project_key: NOKEY
 tracking_system: file-system
@@ -109,7 +109,7 @@ development_status:
   7-4-parallel-db-test-isolation: review
   7-5-idempotency-hardening: review
   7-6-deployment-staging-prod: review
-  7-7-backup-restore-procedure: backlog
+  7-7-backup-restore-procedure: review
   7-8-performance-testing: backlog
 action_items:
   - id: "epic-1-retro-item-1-extract-a-shared-authheaders-helper-into"

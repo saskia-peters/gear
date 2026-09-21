@@ -52,7 +52,7 @@ type Repository interface {
 	DeletePasswordResetToken(ctx context.Context, tokenHash string) error
 	SetUserMustChangePassword(ctx context.Context, userID string) error
 	ClearUserMustChangePassword(ctx context.Context, userID string) error
-	InsertAuditEventAnonymous(ctx context.Context, operation string) error
+	InsertAuditEventAnonymous(ctx context.Context, operation, detail, severity string) error
 	// One-time-password persistence (Spec 2.8): SetUserOneTimePassword upserts
 	// the Argon2id hash + expiry of an admin-issued OTP and flags
 	// must_change_password, reporting whether a row was affected (false = the

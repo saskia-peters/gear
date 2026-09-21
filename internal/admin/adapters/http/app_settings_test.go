@@ -27,13 +27,14 @@ func systemGateway(perms []string, session *usercore.Session, svc ports.Service)
 	)(h.SystemRoutes())
 }
 
-// fullAppSettings is the 21-row typed projection for the GET/PUT fixtures.
+// fullAppSettings is the 22-row typed projection for the GET/PUT fixtures.
 func fullAppSettings() *core.AppSettings {
 	return &core.AppSettings{
 		SmtpDialTimeout:                 10 * time.Second,
 		SmtpProtocolTimeout:             30 * time.Second,
 		BackupDialTimeout:               10 * time.Second,
 		BackupProtocolTimeout:           10 * time.Second,
+		BackupInterval:                  86400 * time.Second,
 		PasswordResetTTL:                1800 * time.Second,
 		AdminRecoveryTTL:                1800 * time.Second,
 		ForgotThrottleInterval:          60 * time.Second,
@@ -67,12 +68,15 @@ func TestSystemSettingsGetAll(t *testing.T) {
 	if err := json.Unmarshal(rec.Body.Bytes(), &body); err != nil {
 		t.Fatalf("decoding err = %v", err)
 	}
-	if len(body) != 21 {
-		t.Fatalf("rows = %d, want 21", len(body))
+	if len(body) != 22 {
+		t.Fatalf("rows = %d, want 22", len(body))
 	}
 	byKey := make(map[string]map[string]any, len(body))
 	for _, row := range body {
 		byKey[row["key"].(string)] = row
+	}
+	if v, ok := byKey["backup_interval"]; !ok || v["value_type"] != "duration" || v["value"] != float64(86400) {
+		t.Errorf("backup_interval row = %v, want duration 86400", v)
 	}
 	if v, ok := byKey["smtp_dial_timeout"]; !ok || v["value_type"] != "duration" || v["value"] != float64(10) {
 		t.Errorf("smtp_dial_timeout row = %v, want duration 10", v)
