@@ -10,6 +10,7 @@ import (
 	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/saskia-peters/gear/internal/platform/pguuid"
 	"github.com/saskia-peters/gear/internal/tools/core"
 )
 
@@ -417,13 +418,11 @@ func marshalUpdateAttributes(attrs map[string]any) ([]byte, error) {
 // SQL NULL), treating a malformed id as core.ErrToolNotFound. It is the
 // generic sibling of parseToolTypeID — used for the tool surface's non-type FKs
 // (the tool's own id and the optional schedule override) so the tool-type-named
-// helper is only used where the FK is genuinely a tool type.
+// helper is only used where the FK is genuinely a tool type. The shared parse
+// contract lives in platform/pguuid (Epic 4 retro item D1).
 func parseOptionalUUID(id string) (pgtype.UUID, error) {
-	if strings.TrimSpace(id) == "" {
-		return pgtype.UUID{}, nil
-	}
-	var uid pgtype.UUID
-	if err := uid.Scan(id); err != nil {
+	uid, err := pguuid.ParseOptional(id)
+	if err != nil {
 		return pgtype.UUID{}, core.ErrToolNotFound
 	}
 	return uid, nil

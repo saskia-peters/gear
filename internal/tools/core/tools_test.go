@@ -945,6 +945,70 @@ func TestUpdateToolNotFound(t *testing.T) {
 	}
 }
 
+func TestUpdateToolLiveToolArchivedType(t *testing.T) {
+	// UPDATE_AFTER_TYPE_ARCHIVED (Epic 4 retro item B1): updating a LIVE tool
+	// whose TOOL TYPE was archived must 400 MsgToolInvalidType — the type FK is
+	// re-validated active-only on update, so an archived type is not editable
+	// through the tool surface (the type must be reactivated first). This pins
+	// the documented behavior: the tool's own row is fine (active), but its
+	// type reference is now invalid.
+	svc, store, audit := newToolService()
+	store.tools = []*Tool{toolFixture("id-a", "Bohrmaschine-01")}
+
+	archived := &ToolType{ID: "id-t1", Name: "Bohrmaschine"}
+	now := time.Now()
+	archived.ArchivedAt = &now
+	store.types = []*ToolType{archived}
+
+	_, err := svc.UpdateTool(context.Background(), actorID, "id-a", toolInput())
+	var inv *InvalidToolError
+	if !errors.As(err, &inv) {
+		t.Fatalf("err = %v, want *InvalidToolError", err)
+	}
+	if inv.Message != MsgToolInvalidType {
+		t.Errorf("message = %q, want %q", inv.Message, MsgToolInvalidType)
+	}
+	if len(store.updated) != 0 {
+		t.Error("tool must not be updated with an archived type FK")
+	}
+	if len(audit.events) != 0 {
+		t.Errorf("audit events = %+v, want none for a rejected update", audit.events)
+	}
+}
+
+func TestUpdateToolLiveToolArchivedSchedule(t *testing.T) {
+	// UPDATE_AFTER_SCHEDULE_ARCHIVED (Epic 4 retro item B2): updating a LIVE
+	// tool that carries an override whose schedule was archived must 400
+	// MsgToolInvalidSchedule — the override FK is re-validated against the
+	// ACTIVE schedule catalog on update (SchedulesPort lists active only), so
+	// an archived schedule is not re-selectable; the write must fail rather
+	// than silently persist a dangling override.
+	svc, store, audit := newToolService()
+	store.tools = []*Tool{toolFixture("id-a", "Bohrmaschine-01")}
+
+	input := toolInput()
+	input.ScheduleID = "id-s1"
+
+	// The tool carries an override whose schedule has left the ACTIVE catalog:
+	// the port now lists only id-s2, so id-s1 is archived/unknown.
+	svc.schedules = &fakeSchedulesPort{schedules: []*admcore.Schedule{{ID: "id-s2", Name: "2 Wochen"}}}
+
+	_, err := svc.UpdateTool(context.Background(), actorID, "id-a", input)
+	var inv *InvalidToolError
+	if !errors.As(err, &inv) {
+		t.Fatalf("err = %v, want *InvalidToolError", err)
+	}
+	if inv.Message != MsgToolInvalidSchedule {
+		t.Errorf("message = %q, want %q", inv.Message, MsgToolInvalidSchedule)
+	}
+	if len(store.updated) != 0 {
+		t.Error("tool must not be updated with an archived schedule override")
+	}
+	if len(audit.events) != 0 {
+		t.Errorf("audit events = %+v, want none for a rejected update", audit.events)
+	}
+}
+
 func TestUpdateToolKeepsItsName(t *testing.T) {
 	// The dominant edit flow keeps the tool's name: the exceptID exclusion in
 	// the duplicate-name guard must let a tool keep its OWN name (a regression

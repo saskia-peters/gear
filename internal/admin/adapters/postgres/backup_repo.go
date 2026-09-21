@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5/pgtype"
 
 	"github.com/saskia-peters/gear/internal/admin/core"
+	"github.com/saskia-peters/gear/internal/platform/pguuid"
 )
 
 // BackupDestination store implementation (Story 3.2, FR-29/AD-15): CRUD over
@@ -133,10 +134,13 @@ func backupDestinationFromRow(row BackupDestination) *core.BackupDestination {
 }
 
 // parseBackupDestinationID parses a URL-path uuidv7 into pgtype.UUID. A
-// malformed id is treated as not-found (no existence hint to a caller).
+// malformed id is treated as not-found (no existence hint to a caller). The
+// shared parse contract lives in platform/pguuid (Epic 4 retro item D1); an
+// empty id maps to a NULL that matches no row, so the not-found sentinel is
+// unchanged.
 func parseBackupDestinationID(id string) (pgtype.UUID, error) {
-	var uid pgtype.UUID
-	if err := uid.Scan(id); err != nil {
+	uid, err := pguuid.ParseOptional(id)
+	if err != nil {
 		return pgtype.UUID{}, core.ErrBackupDestinationNotFound
 	}
 	return uid, nil

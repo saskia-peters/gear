@@ -8,6 +8,7 @@ import (
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 
+	"github.com/saskia-peters/gear/internal/platform/pguuid"
 	"github.com/saskia-peters/gear/internal/tools/core"
 )
 
@@ -461,10 +462,11 @@ func inspectionNotesValue(notes string) pgtype.Text {
 // parseIdempotencyKey parses the CLIENT-SUPPLIED idempotency key (Story 7.5,
 // NFR-R1): the HTTP layer already validated the canonical UUID form, so a
 // malformed key reaching the store is a defense-in-depth failure — surfaced as
-// an internal error, NEVER the 404 sentinel (a key is not a tool id).
+// an internal error, NEVER the 404 sentinel (a key is not a tool id). The
+// shared parse contract lives in platform/pguuid (Epic 4 retro item D1).
 func parseIdempotencyKey(key string) (pgtype.UUID, error) {
-	var uid pgtype.UUID
-	if err := uid.Scan(key); err != nil {
+	uid, err := pguuid.ParseOptional(key)
+	if err != nil {
 		return pgtype.UUID{}, fmt.Errorf("tools postgres: malformed idempotency key: %w", err)
 	}
 	return uid, nil

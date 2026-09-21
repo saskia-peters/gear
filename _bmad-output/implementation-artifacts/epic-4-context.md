@@ -11,6 +11,8 @@ Let the Schirrmeister/Admin administer the equipment universe: define tool types
 - Story 4.1: Schedule Catalog Management (DONE — named schedules, `schedules.manage`, migration 000019/000020)
 - Story 4.2: Tool Type Management
 - Story 4.3: Tool Management
+- Story 4.3b: GEAR-module tool list / dashboard view (DONE — the dashboard `dashboard.view` read over the Tool module, shipped with the inventory-number story; tracked in sprint-status.yaml as `4-3b-gear-module-tool-list-dashboard-view`)
+- Story 4.3b: Inventory number + `tool.edit` (DONE — tracked as `4-3b-inventory-number-tool-edit`)
 - Story 4.4: Flexible Attributes on Tools & Tool Types
 - Story 4.5: Bulk CSV Import
 
