@@ -52,6 +52,21 @@ function readSprintStatus() {
   return status;
 }
 
+// Resolve a story's tracked status. The generator derives keys from the epic
+// story TITLES (`7-6-deployment-staging-…`), while sprint-status.yaml keys
+// follow the spec-filename convention (`7-6-deployment-staging-prod`). When the
+// exact key misses, fall back to the story's `{epic}-{story}` numeric prefix
+// (unique within an epic) so a title rewrite never orphans its status.
+function statusFor(status, key) {
+  if (status[key]) return status[key];
+  const prefix = key.match(/^(\d+-\d+[a-z]*)-/);
+  if (prefix) {
+    const hit = Object.keys(status).find((k) => k.startsWith(prefix[1] + '-'));
+    if (hit) return status[hit];
+  }
+  return 'backlog';
+}
+
 // ---- epics -----------------------------------------------------------------
 function slugify(s) {
   return s
@@ -195,7 +210,7 @@ vorhandenen Aufnahmen der Anwendung.
 function writeEpicPage(epic, status) {
   const cards = epic.stories
     .map((s) => {
-      const st = status[s.key] || 'backlog';
+      const st = statusFor(status, s.key);
       const intentLines = s.intent
         ? s.intent.split('\n').map((l) => l.trim()).filter(Boolean).join(' ')
         : s.intent;
@@ -256,13 +271,13 @@ function progressBar(pct) {
 function writeStatusPage(epics, status) {
   const total = epics.reduce((n, e) => n + e.stories.length, 0);
   const done = epics.reduce(
-    (n, e) => n + e.stories.filter((s) => status[s.key] === 'done').length,
+    (n, e) => n + e.stories.filter((s) => statusFor(status, s.key) === 'done').length,
     0,
   );
   const pct = total ? Math.round((done / total) * 100) : 0;
   const epicRows = epics
     .map((e) => {
-      const d = e.stories.filter((s) => status[s.key] === 'done').length;
+      const d = e.stories.filter((s) => statusFor(status, s.key) === 'done').length;
       const epct = e.stories.length ? Math.round((d / e.stories.length) * 100) : 0;
       return `| [Epic ${e.num}](/docs/epics/epic-${e.num}) | ${e.title} | ${d}/${e.stories.length} | ${progressBar(epct)} |`;
     })
