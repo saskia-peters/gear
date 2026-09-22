@@ -1,4 +1,4 @@
-# Epic 7: Hardening & Deploy
+## Epic 7: Hardening & Deploy
 
 G.E.A.R. ships its features; this epic makes them **releasable and dependable**. The functional surface (account + auth, permissions, config/compliance, catalogue, inspection, dashboard/reporting) is complete — this epic closes the operational gaps the earlier stories deliberately deferred: a real CI gate, a production serving path for the SPA, automated seed/integration verification, test isolation so the full suite runs in parallel, at-most-once hardening for the two append-only write paths, and the actual deployment (staging on Cloud Run, production self-hosted, with TLS, secrets, and backup/restore). It is the **deploy epic/site** the architecture spine and PRD defer to (NFR-R1–R4, NFR-S1/S4, NFR-M2/M3).
 

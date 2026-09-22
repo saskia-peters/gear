@@ -38,7 +38,31 @@
   device: desktop
 - screenshot-2-admin-mobile.png: Admin-Modul (Mobil)
   device: mobile
+- screenshot-2-admin-users-desktop.png: Admin — Benutzerverzeichnis (Desktop)
+  device: desktop
+- screenshot-2-roles-desktop.png: Admin — Rollen & Berechtigungen (Desktop)
+  device: desktop
+- screenshot-2-qualifications-desktop.png: Admin — Qualifikationen (Desktop)
+  device: desktop
 - screenshot-2-recovery-desktop.png: Dual-Admin-Wiederherstellung (Desktop)
   device: desktop
 - screenshot-2-recovery-mobile.png: Dual-Admin-Wiederherstellung (Mobil)
   device: mobile
+
+# Epic 3 — System Configuration & Compliance
+- screenshot-3-settings-desktop.png: Admin — Systemeinstellungen (Desktop)
+  device: desktop
+- screenshot-3-backup-desktop.png: Admin — Backup-Ziele (Desktop)
+  device: desktop
+
+# Epic 4 — Equipment Catalogue & Scheduling
+- screenshot-4-3-tools-desktop.png: Werkzeug-Katalog (Desktop)
+  device: desktop
+
+# Epic 5 — Inspection Execution & Serviceability
+- screenshot-5-4-inspection-desktop.png: Prüfung durchführen (Desktop)
+  device: desktop
+
+# Epic 6 — Dashboard, Reporting & History
+- screenshot-6-3-history-desktop.png: Prüfverlauf pro Werkzeug (Desktop)
+  device: desktop

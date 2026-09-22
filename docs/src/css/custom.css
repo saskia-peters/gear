@@ -321,3 +321,70 @@ html[data-theme='dark'] .table-of-contents__link:hover {
   font-weight: 600;
   min-width: 2.6rem;
 }
+
+/* ---------------------------------------------------------------------------
+   User stories — animated elements (Overview / user-stories).
+--------------------------------------------------------------------------- */
+
+/* Animated traffic-light pulse: draws the eye to the current status. */
+@keyframes gear-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(46, 158, 79, 0.5); }
+  70%  { box-shadow: 0 0 0 12px rgba(46, 158, 79, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(46, 158, 79, 0); }
+}
+
+@keyframes gear-pulse-red {
+  0%   { box-shadow: 0 0 0 0 rgba(198, 40, 40, 0.5); }
+  70%  { box-shadow: 0 0 0 12px rgba(198, 40, 40, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(198, 40, 40, 0); }
+}
+
+@keyframes gear-pulse-orange {
+  0%   { box-shadow: 0 0 0 0 rgba(245, 130, 31, 0.5); }
+  70%  { box-shadow: 0 0 0 12px rgba(245, 130, 31, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(245, 130, 31, 0); }
+}
+
+.gear-status-dot {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  margin-right: 0.4rem;
+  vertical-align: middle;
+}
+.gear-status-dot.gear-green { background: #2e9e4f; animation: gear-pulse 2s infinite; }
+.gear-status-dot.gear-orange { background: #f5821f; animation: gear-pulse-orange 2s infinite; }
+.gear-status-dot.gear-red { background: #c62828; animation: gear-pulse-red 2s infinite; }
+.gear-status-dot.gear-oos { background: #1c1c1c; }
+
+/* Step flow: a horizontal "journey" strip whose steps light up one after the
+   other, showing the order of a user story. */
+@keyframes gear-step-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.gear-story-step {
+  animation: gear-step-in 0.5s ease both;
+}
+
+/* A soft "breathing" highlight for the screenshot captions of a story. */
+@keyframes gear-breathe {
+  0%, 100% { border-color: var(--ifm-color-emphasis-200); }
+  50%      { border-color: var(--gear-blue); }
+}
+.gear-story-shot .gear-shot {
+  animation: gear-breathe 6s ease-in-out infinite;
+}
+
+/* Progress "track" that fills in a screenshot's journey (e.g. 1/3 → 3/3). */
+@keyframes gear-fill {
+  from { width: 0; }
+}
+.gear-fill-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--gear-blue), #2e9e4f);
+  animation: gear-fill 1.2s ease-out both;
+}

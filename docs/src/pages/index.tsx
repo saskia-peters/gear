@@ -37,38 +37,61 @@ export default function Home(): ReactNode {
   return (
     <Layout
       title={`${siteConfig.title}`}
-      description="G.E.A.R. documentation — planning, architecture, epics, status, and screenshots.">
+      description="G.E.A.R. documentation — what it is, how to use it, and how it is built.">
       <HomepageHeader />
       <main>
         <div className="container">
           <h2>Worum geht es?</h2>
           <p>
             Die <b>G.E.A.R.</b> (Geräte-Einsatz-Assistenz &amp; Readiness)
-            modernisiert die Geräteverwaltung des Ortsverbands Singen. Diese
-            Doku bündelt Planung, Architektur, Epics, den Implementierungsstatus
-            und Screenshots der laufenden Anwendung.
+            modernisiert die Geräteverwaltung des Ortsverbands Singen: jedes
+            Gerät hat einen klaren Ampelfarben-Status, jede Prüfung wird von
+            einer <b>qualifizierten</b> Person durchgeführt, und alles ist
+            nachvollziehbar dokumentiert.
           </p>
 
-          <h2>Dokumente</h2>
+          <h2>Nach Zielgruppe</h2>
           <CardGrid>
             <Card
-              to="/docs/intro"
-              icon="🏠"
-              title="Einführung"
-              description="Dokumentation &amp; Technologie-Überblick"
-            />
-            <Card
-              to="/docs/management-overview"
+              to="/docs/overview/what-is-gear"
               icon="🧭"
-              title="Management-Überblick"
-              description="Verständlich für Entscheider und neue Mitglieder"
+              title="Überblick"
+              description="Was ist G.E.A.R.? — verständlich für alle"
             />
             <Card
-              to="/docs/epics/"
-              icon="🗂️"
-              title="Epics &amp; Stories"
-              description="Klickbare Übersicht aller Epics und Geschichten"
+              to="/docs/end-users"
+              icon="🧑‍🔧"
+              title="Für Endnutzer"
+              description="Dashboard, Prüfungen, Verlauf, Konto"
             />
+            <Card
+              to="/docs/administrators"
+              icon="🛠️"
+              title="Für Administratoren"
+              description="Benutzer, Rollen, Katalog, Einstellungen, Backups, DSGVO"
+            />
+            <Card
+              to="/docs/developers"
+              icon="💻"
+              title="Für Entwickler"
+              description="Module, API, Flows, Status, Epics"
+            />
+            <Card
+              to="/docs/architects"
+              icon="🏗️"
+              title="Für Architekten"
+              description="PRD, Architektur-Spine, Addendum, Roadmap, Deployment"
+            />
+            <Card
+              to="/docs/overview/user-stories"
+              icon="🎬"
+              title="User Stories"
+              description="G.E.A.R. in Aktion — mit echten Screenshots"
+            />
+          </CardGrid>
+
+          <h2>Status &amp; API</h2>
+          <CardGrid>
             <Card
               to="/docs/status"
               icon="📊"
@@ -76,44 +99,16 @@ export default function Home(): ReactNode {
               description="Automatisch berechneter Fortschritt"
             />
             <Card
-              to="/docs/screenshots"
-              icon="📷"
-              title="Screenshots"
-              description="Vorhandene und fehlende Aufnahmen (Desktop &amp; Mobil)"
-            />
-          </CardGrid>
-
-          <h2>Planungsdokumente</h2>
-          <CardGrid>
-            <Card
-              to="/docs/planning/prd"
-              icon="📋"
-              title="PRD"
-              description="Funktionale Anforderungen, Epics, NFRs"
+              to="/docs/api/g-e-a-r-api"
+              icon="🔌"
+              title="API-Referenz"
+              description="Interaktive OpenAPI-Dokumentation"
             />
             <Card
-              to="/docs/planning/product-brief"
-              icon="📄"
-              title="Product Brief"
-              description="Umfang, Ziele und Rahmen"
-            />
-            <Card
-              to="/docs/planning/architecture-spine"
-              icon="🏗️"
-              title="Architektur-Spine"
-              description="Technische Invarianten, ADs, Datenmodell"
-            />
-            <Card
-              to="/docs/planning/addendum"
-              icon="➕"
-              title="Addendum"
-              description="Technologie-Entscheidungen &amp; Deferrals"
-            />
-            <Card
-              to="/docs/planning/ux-design"
-              icon="🎨"
-              title="UX-Design"
-              description="Wireframes und UX-Konzept"
+              to="/docs/epics"
+              icon="🗂️"
+              title="Epics &amp; Stories"
+              description="Klickbare Übersicht aller Epics und Geschichten"
             />
           </CardGrid>
         </div>

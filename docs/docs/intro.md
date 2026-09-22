@@ -4,31 +4,36 @@ sidebar_position: 1
 
 # G.E.A.R. — Documentation
 
-**G.E.A.R.** (Geräte-Einsatz-Assistenz & Readiness) modernizes and centralizes the operational equipment management of the Ortsverband Singen: a modularized web application for mobile and desktop devices.
+**G.E.A.R.** (Geräte-Einsatz-Assistenz & Readiness) modernizes and centralizes
+the operational equipment management of the Ortsverband Singen: a modularized
+web application for mobile and desktop devices.
 
-This documentation site is generated from the BMad planning artifacts (PRD, product brief, architecture spine) and will grow with the project: API contracts and module integration points are published here per NFR-M4.
+This documentation is organized **by audience** — pick the section that matches
+your role.
 
-## [Management Overview](/docs/management-overview)
+## For everyone
 
-A plain-language overview of the app for decision-makers and new team members.
+- [What is G.E.A.R.?](/docs/overview/what-is-gear) — a few sentences on what it
+  is and what it is good for (non-technical)
+- [Management Overview](/docs/management-overview) — the plain-language
+  deep-dive for decision-makers
+- [User Stories](/docs/overview/user-stories) — see it in action with real
+  screenshots and diagrams
 
-## Planning documents
+## By role
 
-- [PRD — G.E.A.R.](/docs/planning/prd) — functional requirements, epics, and non-functional guidelines
-- [Product Brief](/docs/planning/product-brief) — scope, objectives, and high-level requirements
-- [Architecture Spine](/docs/planning/architecture-spine) — technical invariants, ADs, database artifacts, diagrams
-- [Architecture Addendum](/docs/planning/addendum) — technology stack decisions and deferred options
-- [Module Roadmap](/docs/planning/module-roadmap) — the modular ecosystem: Module 1 (tool inspection) and the planned modules
+| Section | For | What you find |
+|---|---|---|
+| [For End Users](/docs/end-users) | Helfende, Schirrmeister, Führende | Dashboard, inspections, history, your account |
+| [For Administrators](/docs/administrators) | Admin | Users & roles, catalogue, settings, backups, DSGVO |
+| [For Developers](/docs/developers) | Engineers | Modules, API, flows, status, epics |
+| [For Architects](/docs/architects) | Designers & reviewers | PRD, architecture spine, addendum, roadmap, deployment |
 
-## Implementation (auto-generated from code)
+## API reference
 
-These pages are regenerated on every docs build from the Go source — no manual
-maintenance:
-
-- [Hexagon Modules](/docs/implementation/modules) — module inventory with mermaid diagrams (🪪 user, 🛠️ admin, 🧰 tools, 🧱 platform)
-- [API Endpoints](/docs/implementation/api) — the route catalog as a mermaid map + table
-- [Flows](/docs/implementation/flows) — sequence diagrams (registration, login, OTP, qualifications)
-- [API Reference](/docs/api/g-e-a-r-api) — interactive OpenAPI/Swagger reference from the generated spec
+The interactive **OpenAPI reference** is available at
+[API Reference](/docs/api/g-e-a-r-api) (generated from the Go route
+registrations + the spec).
 
 ## Stack
 

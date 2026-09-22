@@ -126,16 +126,24 @@ const config: Config = {
           title: 'Docs',
           items: [
             {
-              label: 'Intro',
-              to: '/docs/intro',
+              label: 'What is G.E.A.R.?',
+              to: '/docs/overview/what-is-gear',
             },
             {
-              label: 'PRD',
-              to: '/docs/planning/prd',
+              label: 'For End Users',
+              to: '/docs/end-users',
             },
             {
-              label: 'Architecture Spine',
-              to: '/docs/planning/architecture-spine',
+              label: 'For Administrators',
+              to: '/docs/administrators',
+            },
+            {
+              label: 'For Developers',
+              to: '/docs/developers',
+            },
+            {
+              label: 'For Architects',
+              to: '/docs/architects',
             },
           ],
         },
