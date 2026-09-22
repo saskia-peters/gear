@@ -103,13 +103,13 @@ development_status:
   epic-6-retrospective: done
 
   epic-7: in-progress
-  7-1-ci-pipeline: review
+  7-1-ci-pipeline: done
   7-2-production-serving: backlog
-  7-3-integration-seed-assertions: review
-  7-4-parallel-db-test-isolation: review
-  7-5-idempotency-hardening: review
-  7-6-deployment-staging-prod: review
-  7-7-backup-restore-procedure: review
+  7-3-integration-seed-assertions: done
+  7-4-parallel-db-test-isolation: done
+  7-5-idempotency-hardening: done
+  7-6-deployment-staging-prod: done
+  7-7-backup-restore-procedure: done
   7-8-performance-testing: backlog
 action_items:
   - id: "epic-1-retro-item-1-extract-a-shared-authheaders-helper-into"
