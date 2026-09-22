@@ -54,6 +54,8 @@
   device: desktop
 - screenshot-3-backup-desktop.png: Admin — Backup-Ziele (Desktop)
   device: desktop
+- screenshot-3-4-dsgvo-desktop.png: DSGVO (Desktop)
+  device: desktop
 
 # Epic 4 — Equipment Catalogue & Scheduling
 - screenshot-4-3-tools-desktop.png: Werkzeug-Katalog (Desktop)
@@ -61,6 +63,8 @@
 
 # Epic 5 — Inspection Execution & Serviceability
 - screenshot-5-4-inspection-desktop.png: Prüfung durchführen (Desktop)
+  device: desktop
+- screenshot-5-6-reinstatement-desktop.png: Wiederherstellung (Desktop)
   device: desktop
 
 # Epic 6 — Dashboard, Reporting & History

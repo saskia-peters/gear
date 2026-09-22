@@ -37,6 +37,16 @@ async function shot(page, name, opts = {}) {
   // --- Dashboard / Übersicht (traffic-light list) ---
   await shot(page, 'screenshot-1-dashboard-desktop.png');
 
+  // --- Mobile dashboard (Story 1 mobile frame) ---
+  const mobile = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  await mobile.goto(`${APP}/login`);
+  await mobile.fill('input[name="email"], input[type="email"], input[placeholder*="E-Mail"]', ADMIN_EMAIL);
+  await mobile.fill('input[name="password"], input[type="password"]', ADMIN_PASSWORD);
+  await mobile.click('button[type="submit"], button:has-text("Anmelden"), button:has-text("Einloggen")');
+  await mobile.waitForURL('**/dashboard', { timeout: 8000 }).catch(() => {});
+  await mobile.waitForTimeout(800);
+  await shot(mobile, 'screenshot-1-dashboard-mobile.png');
+
   // --- Tool details / history ---
   await page.goto(`${APP}/tools/01a08062-6cf2-79b1-9e71-ae6140791d0c`).catch(() => {});
   // navigate to the first tool via the dashboard list
@@ -49,15 +59,30 @@ async function shot(page, name, opts = {}) {
     await shot(page, 'screenshot-6-3-history-desktop.png', { wait: 400 });
   }
 
-  // --- Inspection page (pass/fail) ---
+  // --- Inspection page (pass/fail) — direct route to the first seeded tool ---
+  await page.goto(`${APP}/inspection/01a09234-f33d-7817-8b36-e6773482cb1e`);
+  await page.waitForTimeout(900);
+  await shot(page, 'screenshot-5-4-inspection-desktop.png');
+
+  // --- Reinstatement dialog (first out-of-service tool on the dashboard) ---
   await page.goto(`${APP}/`);
-  await page.waitForTimeout(600);
-  const inspectLink = page.locator('a[href^="/inspection/"]').first();
-  if (await inspectLink.count()) {
-    await inspectLink.click().catch(() => {});
-    await page.waitForTimeout(800);
-    await shot(page, 'screenshot-5-4-inspection-desktop.png');
+  await page.waitForTimeout(800);
+  const reinstate = page.locator('button', { hasText: 'Wiederherstellen' }).first();
+  if (await reinstate.count()) {
+    await reinstate.click().catch(() => {});
+    await page.waitForTimeout(900);
+    await shot(page, 'screenshot-5-6-reinstatement-desktop.png');
   }
+
+  // --- Admin: DSGVO ---
+  await page.goto(`${APP}/admin/dsgvo`);
+  await page.waitForTimeout(900);
+  await shot(page, 'screenshot-3-4-dsgvo-desktop.png');
+
+  // --- Admin: dual-admin recovery ---
+  await page.goto(`${APP}/admin/recovery`);
+  await page.waitForTimeout(900);
+  await shot(page, 'screenshot-2-recovery-desktop.png');
 
   // --- Admin: users & roles ---
   await page.goto(`${APP}/admin/benutzer`);

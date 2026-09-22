@@ -36,6 +36,16 @@ flowchart LR
   <figcaption>The dashboard — every tool with its live status. 🟢 🟠 🔴 ⬛</figcaption>
 </figure>
 
+<figure className="gear-shot gear-story-shot gear-shot-frame-mobile">
+  <img src="/gear/screenshots/screenshot-1-dashboard-mobile.png" alt="The dashboard on a phone — the same traffic-light list" loading="lazy" />
+  <figcaption>On mobile — the same live status list.</figcaption>
+</figure>
+
+<figure className="gear-shot gear-story-shot gear-shot-frame-desktop">
+  <img src="/gear/screenshots/screenshot-5-4-inspection-desktop.png" alt="Performing an inspection with a pass/fail result" loading="lazy" />
+  <figcaption>Performing the inspection — the qualification was checked, now record the result.</figcaption>
+</figure>
+
 ---
 
 ## 🟠 Story 2 — A caretaker keeps the catalogue ready
@@ -96,6 +106,11 @@ stateDiagram-v2
   Red --> OutOfService: inspection fails
   OutOfService --> Green: reinstated (clock resets)
 ```
+
+<figure className="gear-shot gear-story-shot gear-shot-frame-desktop">
+  <img src="/gear/screenshots/screenshot-5-6-reinstatement-desktop.png" alt="Reinstating an out-of-service tool with a mandatory reason" loading="lazy" />
+  <figcaption>The reinstatement dialog — a Führende or Admin brings the tool back with a reason.</figcaption>
+</figure>
 
 ---
 
@@ -306,6 +321,11 @@ flowchart LR
 ```
 </div>
 
+<figure className="gear-shot gear-story-shot gear-shot-frame-desktop">
+  <img src="/gear/screenshots/screenshot-3-4-dsgvo-desktop.png" alt="The DSGVO admin surface — access report and deletion" loading="lazy" />
+  <figcaption>Admin — the DSGVO surface: Auskunft (access report) and Löschen (deletion).</figcaption>
+</figure>
+
 ---
 
 ## 🤝 Story 13 — Dual-admin recovery
@@ -324,6 +344,11 @@ flowchart LR
   D --> F["✅ System stays protected"]
 ```
 </div>
+
+<figure className="gear-shot gear-story-shot gear-shot-frame-desktop">
+  <img src="/gear/screenshots/screenshot-2-recovery-desktop.png" alt="The dual-admin recovery screen" loading="lazy" />
+  <figcaption>Admin — the dual-admin recovery workflow.</figcaption>
+</figure>
 
 ---
 
