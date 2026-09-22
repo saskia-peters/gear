@@ -25,7 +25,7 @@ and bounded. Every setting is saved per-row with inline German feedback.
 - **Schedule catalog** — named schedules (Zeitpläne) drive inspection due dates.
 
 <figure className="gear-shot gear-shot-frame-desktop">
-  <img src="/gear/img/screenshots/screenshot-3-settings-desktop.png" alt="The system settings" loading="lazy" />
+  <img src="/gear/screenshots/screenshot-3-settings-desktop.png" alt="The system settings" loading="lazy" />
   <figcaption>Admin — configurable system settings.</figcaption>
 </figure>
 

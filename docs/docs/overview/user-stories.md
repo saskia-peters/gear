@@ -32,7 +32,7 @@ flowchart LR
 </div>
 
 <figure className="gear-shot gear-story-shot gear-shot-frame-desktop">
-  <img src="/gear/img/screenshots/screenshot-1-dashboard-desktop.png" alt="The G.E.A.R. dashboard shows the tool traffic-light list" loading="lazy" />
+  <img src="/gear/screenshots/screenshot-1-dashboard-desktop.png" alt="The G.E.A.R. dashboard shows the tool traffic-light list" loading="lazy" />
   <figcaption>The dashboard — every tool with its live status. 🟢 🟠 🔴 ⬛</figcaption>
 </figure>
 
@@ -52,7 +52,7 @@ flowchart LR
 ```
 
 <figure className="gear-shot gear-story-shot gear-shot-frame-desktop">
-  <img src="/gear/img/screenshots/screenshot-4-3-tools-desktop.png" alt="The admin tool catalogue" loading="lazy" />
+  <img src="/gear/screenshots/screenshot-4-3-tools-desktop.png" alt="The admin tool catalogue" loading="lazy" />
   <figcaption>The admin tool catalogue (Werkzeuge).</figcaption>
 </figure>
 
@@ -73,7 +73,7 @@ flowchart LR
 ```
 
 <figure className="gear-shot gear-story-shot gear-shot-frame-desktop">
-  <img src="/gear/img/screenshots/screenshot-6-3-history-desktop.png" alt="The per-tool inspection history" loading="lazy" />
+  <img src="/gear/screenshots/screenshot-6-3-history-desktop.png" alt="The per-tool inspection history" loading="lazy" />
   <figcaption>The per-tool history — every inspection and reinstatement.</figcaption>
 </figure>
 
@@ -114,22 +114,22 @@ flowchart LR
 
 <div style={{display:'flex', gap:'1rem', flexWrap:'wrap'}}>
   <figure className="gear-shot gear-story-shot gear-shot-frame-desktop" style={{maxWidth:'560px', flex:'1 1 45%'}}>
-    <img src="/gear/img/screenshots/screenshot-2-admin-users-desktop.png" alt="The admin users list" loading="lazy" />
+    <img src="/gear/screenshots/screenshot-2-admin-users-desktop.png" alt="The admin users list" loading="lazy" />
     <figcaption>Admin — user directory with roles.</figcaption>
   </figure>
   <figure className="gear-shot gear-story-shot gear-shot-frame-desktop" style={{maxWidth:'560px', flex:'1 1 45%'}}>
-    <img src="/gear/img/screenshots/screenshot-2-roles-desktop.png" alt="The roles and permissions editor" loading="lazy" />
+    <img src="/gear/screenshots/screenshot-2-roles-desktop.png" alt="The roles and permissions editor" loading="lazy" />
     <figcaption>Admin — roles and permissions.</figcaption>
   </figure>
 </div>
 
 <div style={{display:'flex', gap:'1rem', flexWrap:'wrap'}}>
   <figure className="gear-shot gear-story-shot gear-shot-frame-desktop" style={{maxWidth:'560px', flex:'1 1 45%'}}>
-    <img src="/gear/img/screenshots/screenshot-2-qualifications-desktop.png" alt="The qualifications list" loading="lazy" />
+    <img src="/gear/screenshots/screenshot-2-qualifications-desktop.png" alt="The qualifications list" loading="lazy" />
     <figcaption>Admin — qualifications.</figcaption>
   </figure>
   <figure className="gear-shot gear-story-shot gear-shot-frame-desktop" style={{maxWidth:'560px', flex:'1 1 45%'}}>
-    <img src="/gear/img/screenshots/screenshot-3-settings-desktop.png" alt="The system settings" loading="lazy" />
+    <img src="/gear/screenshots/screenshot-3-settings-desktop.png" alt="The system settings" loading="lazy" />
     <figcaption>Admin — configurable system settings.</figcaption>
   </figure>
 </div>
@@ -154,7 +154,7 @@ flowchart LR
 </div>
 
 <figure className="gear-shot gear-story-shot gear-shot-frame-desktop">
-  <img src="/gear/img/screenshots/screenshot-1-login-desktop.png" alt="The login screen — the entry point after approval" loading="lazy" />
+  <img src="/gear/screenshots/screenshot-1-login-desktop.png" alt="The login screen — the entry point after approval" loading="lazy" />
   <figcaption>After approval, Tim logs in with his email and password.</figcaption>
 </figure>
 
@@ -180,7 +180,7 @@ flowchart LR
 </div>
 
 <figure className="gear-shot gear-story-shot gear-shot-frame-desktop">
-  <img src="/gear/img/screenshots/screenshot-1-login-desktop.png" alt="The login screen — password first, then the OTP code" loading="lazy" />
+  <img src="/gear/screenshots/screenshot-1-login-desktop.png" alt="The login screen — password first, then the OTP code" loading="lazy" />
   <figcaption>Login: password first, then the current OTP code.</figcaption>
 </figure>
 
@@ -205,7 +205,7 @@ flowchart LR
 </div>
 
 <figure className="gear-shot gear-story-shot gear-shot-frame-desktop">
-  <img src="/gear/img/screenshots/screenshot-1-login-desktop.png" alt="The login screen with the forgot-password path" loading="lazy" />
+  <img src="/gear/screenshots/screenshot-1-login-desktop.png" alt="The login screen with the forgot-password path" loading="lazy" />
   <figcaption>Forgot password — the recovery entry on the login screen.</figcaption>
 </figure>
 
@@ -229,7 +229,7 @@ flowchart LR
 </div>
 
 <figure className="gear-shot gear-story-shot gear-shot-frame-desktop">
-  <img src="/gear/img/screenshots/screenshot-2-admin-users-desktop.png" alt="The admin user directory — where OTPs are issued" loading="lazy" />
+  <img src="/gear/screenshots/screenshot-2-admin-users-desktop.png" alt="The admin user directory — where OTPs are issued" loading="lazy" />
   <figcaption>Admin — the user directory where a one-time password is issued.</figcaption>
 </figure>
 
@@ -256,7 +256,7 @@ flowchart LR
 </div>
 
 <figure className="gear-shot gear-story-shot gear-shot-frame-desktop">
-  <img src="/gear/img/screenshots/screenshot-3-backup-desktop.png" alt="The backup destination settings" loading="lazy" />
+  <img src="/gear/screenshots/screenshot-3-backup-desktop.png" alt="The backup destination settings" loading="lazy" />
   <figcaption>Admin — backup destinations with the connection test.</figcaption>
 </figure>
 
@@ -281,7 +281,7 @@ flowchart LR
 </div>
 
 <figure className="gear-shot gear-story-shot gear-shot-frame-desktop">
-  <img src="/gear/img/screenshots/screenshot-4-3-tools-desktop.png" alt="The tool catalogue — the result of a bulk import" loading="lazy" />
+  <img src="/gear/screenshots/screenshot-4-3-tools-desktop.png" alt="The tool catalogue — the result of a bulk import" loading="lazy" />
   <figcaption>The catalogue after onboarding — tools with inventory numbers.</figcaption>
 </figure>
 

@@ -31,7 +31,7 @@ go stale or disagree between users.
 - **Filter and export** the report as a PDF (Führende/Admin).
 
 <figure className="gear-shot gear-shot-frame-desktop">
-  <img src="/gear/img/screenshots/screenshot-1-dashboard-desktop.png" alt="The G.E.A.R. dashboard with the tool traffic-light list" loading="lazy" />
+  <img src="/gear/screenshots/screenshot-1-dashboard-desktop.png" alt="The G.E.A.R. dashboard with the tool traffic-light list" loading="lazy" />
   <figcaption>The dashboard — every tool with its status.</figcaption>
 </figure>
 

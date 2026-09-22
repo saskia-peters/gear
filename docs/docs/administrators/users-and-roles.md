@@ -13,7 +13,7 @@ sidebar_position: 2
 - **Benutzergruppen** — organize users into groups.
 
 <figure className="gear-shot gear-shot-frame-desktop">
-  <img src="/gear/img/screenshots/screenshot-2-admin-users-desktop.png" alt="The admin user directory" loading="lazy" />
+  <img src="/gear/screenshots/screenshot-2-admin-users-desktop.png" alt="The admin user directory" loading="lazy" />
   <figcaption>Admin — the user directory.</figcaption>
 </figure>
 
@@ -27,7 +27,7 @@ sidebar_position: 2
   (AD-6) and re-checks on every operation.
 
 <figure className="gear-shot gear-shot-frame-desktop">
-  <img src="/gear/img/screenshots/screenshot-2-roles-desktop.png" alt="The roles and permissions editor" loading="lazy" />
+  <img src="/gear/screenshots/screenshot-2-roles-desktop.png" alt="The roles and permissions editor" loading="lazy" />
   <figcaption>Admin — roles and permissions.</figcaption>
 </figure>
 
@@ -40,7 +40,7 @@ sidebar_position: 2
   qualification.
 
 <figure className="gear-shot gear-shot-frame-desktop">
-  <img src="/gear/img/screenshots/screenshot-2-qualifications-desktop.png" alt="The qualifications list" loading="lazy" />
+  <img src="/gear/screenshots/screenshot-2-qualifications-desktop.png" alt="The qualifications list" loading="lazy" />
   <figcaption>Admin — qualifications.</figcaption>
 </figure>
 

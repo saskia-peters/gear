@@ -22,7 +22,7 @@ a client only ever sees a `credential_configured` boolean (NFR-S4). A
 **"Verbindung testen"** action verifies each destination inline.
 
 <figure className="gear-shot gear-shot-frame-desktop">
-  <img src="/gear/img/screenshots/screenshot-3-backup-desktop.png" alt="The backup destinations settings" loading="lazy" />
+  <img src="/gear/screenshots/screenshot-3-backup-desktop.png" alt="The backup destinations settings" loading="lazy" />
   <figcaption>Admin — backup destinations.</figcaption>
 </figure>
 

@@ -14,7 +14,7 @@ permission, you can:
   Führende/Admin holders.
 
 <figure className="gear-shot gear-shot-frame-desktop">
-  <img src="/gear/img/screenshots/screenshot-6-3-history-desktop.png" alt="The per-tool inspection history" loading="lazy" />
+  <img src="/gear/screenshots/screenshot-6-3-history-desktop.png" alt="The per-tool inspection history" loading="lazy" />
   <figcaption>The per-tool history.</figcaption>
 </figure>
 

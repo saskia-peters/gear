@@ -30,7 +30,7 @@ type's schedule. A tool always has a unique **inventory number** (e.g.
   details + inventory number).
 
 <figure className="gear-shot gear-shot-frame-desktop">
-  <img src="/gear/img/screenshots/screenshot-4-3-tools-desktop.png" alt="The admin tool catalogue" loading="lazy" />
+  <img src="/gear/screenshots/screenshot-4-3-tools-desktop.png" alt="The admin tool catalogue" loading="lazy" />
   <figcaption>Admin — the tool catalogue.</figcaption>
 </figure>
 
