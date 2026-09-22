@@ -1,0 +1,339 @@
+package core
+
+import (
+	"context"
+	"errors"
+	"fmt"
+	"log/slog"
+	"strings"
+	"time"
+)
+
+// Repository defines the outbound persistence contract required by the User core.
+type Repository interface {
+	CreateRegisteredUser(ctx context.Context, email, displayName, firstName, lastName, passwordHash string) (*User, error)
+	GetUserByEmail(ctx context.Context, email string) (*User, error)
+	ListPermissionsByUser(ctx context.Context, userID string) ([]string, error)
+	GetLoginAttempts(ctx context.Context, email string) (*LoginAttempts, error)
+	IncrementLoginAttempts(ctx context.Context, email string) error
+	ClearLoginAttempts(ctx context.Context, email string) error
+	// TOTP MFA persistence (FR-4): the shared secret is stored encrypted at
+	// rest (NFR-S4) and cleared on disable. The pending enrollment holds a
+	// short-lived encrypted copy of the server-issued secret so the confirm
+	// step validates the code against it (review finding 1.6-1).
+	SetUserTotpSecret(ctx context.Context, userID, encryptedSecret string) error
+	ClearUserTotpSecret(ctx context.Context, userID string) error
+	SetUserPendingTotpSecret(ctx context.Context, userID, encryptedSecret string, expiresAt time.Time) error
+	ClearUserPendingTotpSecret(ctx context.Context, userID string) error
+	// Password change persistence (FR-25): UpdateUserPassword writes the new
+	// Argon2id hash; InsertAuditEvent appends to the User-owned audit trail
+	// (NFR-O1/NFR-O2, spine table 11).
+	UpdateUserPassword(ctx context.Context, userID, passwordHash string) (*User, error)
+	InsertAuditEvent(ctx context.Context, userID, operation, detail, severity string) error
+	// Profile base-data persistence (Story 2.1): UpdateUserProfile writes the
+	// editable fields and the full custom-attribute set (Story 1.9);
+	// StagePendingEmail stores a staged email awaiting admin approval (the user
+	// stays active on the current email); ClearPendingEmail clears a staged
+	// change (Epic 2 admin workflow).
+	UpdateUserProfile(ctx context.Context, userID, firstName, lastName, displayName string, attributes map[string]any) (*User, error)
+	StagePendingEmail(ctx context.Context, userID, pendingEmail string) (*User, error)
+	ClearPendingEmail(ctx context.Context, userID string) error
+	// Password reset persistence (FR-26/AD-13): CreatePasswordResetToken stores
+	// the SHA-256 hash of a single-use 30-min token (invalidating earlier ones);
+	// ConsumePasswordResetToken atomically invalidates + returns a token (the
+	// losing concurrent completion sees no row, review finding 1.8-5);
+	// DeleteExpiredPasswordResetTokens lazily purges expired rows (review
+	// finding 1.8-7); Set/ClearUserMustChangePassword flip the forced-change
+	// flag (SMTP-not-configured fallback / Epic 2); InsertAuditEventAnonymous
+	// writes an audit row without an actor (unknown-email reset requests).
+	CreatePasswordResetToken(ctx context.Context, userID, tokenHash string, expiresAt time.Time) error
+	ConsumePasswordResetToken(ctx context.Context, tokenHash string) (*PasswordResetToken, error)
+	DeleteExpiredPasswordResetTokens(ctx context.Context, userID string) error
+	DeletePasswordResetToken(ctx context.Context, tokenHash string) error
+	SetUserMustChangePassword(ctx context.Context, userID string) error
+	ClearUserMustChangePassword(ctx context.Context, userID string) error
+	InsertAuditEventAnonymous(ctx context.Context, operation, detail, severity string) error
+	// One-time-password persistence (Spec 2.8): SetUserOneTimePassword upserts
+	// the Argon2id hash + expiry of an admin-issued OTP and flags
+	// must_change_password, reporting whether a row was affected (false = the
+	// target vanished, the credential must not be handed over); ClearUserOneTimePassword
+	// atomically CONSUMES the OTP via compare-and-swap on the stored hash and
+	// reports whether a row was affected — a false means a racing login already
+	// consumed it. GetUserByID resolves a single user's profile + state for the
+	// admin surfaces (unknown id → ErrAdminUserNotFound).
+	SetUserOneTimePassword(ctx context.Context, userID, hash string, expiresAt time.Time) (bool, error)
+	ClearUserOneTimePassword(ctx context.Context, userID, hash string) (bool, error)
+	GetUserByID(ctx context.Context, userID string) (*User, error)
+	// DSGVO data-access export persistence (Story 3.3, FR-24/AD-8):
+	// GetUserByIDFull returns the FULL user row by id (the same column set as
+	// GetUserByEmail — INCLUDING the secret columns, which the core strips
+	// before assembly, REPORT_SECRETS; an unknown id → ErrAdminUserNotFound);
+	// ListSessionsByUser returns the user's authentication sessions (newest
+	// first) WITHOUT the token hash — the report never carries an authenticator.
+	GetUserByIDFull(ctx context.Context, userID string) (*User, error)
+	ListSessionsByUser(ctx context.Context, userID string) ([]UserSessionExport, error)
+	// IsUserInPermissionGroup reports whether the user is a member of the named
+	// permission group (AD-12); the admin-group membership drives the
+	// server-authoritative IsAdmin flag (Story 1.8).
+	IsUserInPermissionGroup(ctx context.Context, userID, groupName string) (bool, error)
+	// Dual-admin recovery persistence (FR-27/AD-13): CountActiveAdmins reports
+	// how many active admins remain (last-admin guard);
+	// CreateAdminRecoveryRequest stores a recovery-marked single-use hashed
+	// 30-min token for the target admin, stamped with the requesting admin
+	// (invalidating earlier recovery requests);
+	// ApproveAdminRecovery mints a fresh token hash onto the pending request and
+	// stamps the approving admin, returning the request id (ErrNoRows when there
+	// is no approvable pending request); ConsumeAdminRecoveryToken atomically
+	// consumes an APPROVED recovery token (single-use); ListAdminRecoveryRequest
+	// returns the pending requests for the admin-B review surface;
+	// DenyAdminRecovery invalidates a pending request.
+	CountActiveAdmins(ctx context.Context) (int, error)
+	CreateAdminRecoveryRequest(ctx context.Context, userID, requestedByUserID, tokenHash string, expiresAt time.Time) error
+	ApproveAdminRecovery(ctx context.Context, userID, approvedByUserID, tokenHash string) (string, error)
+	ConsumeAdminRecoveryToken(ctx context.Context, tokenHash string) (*AdminRecoveryToken, error)
+	ListAdminRecoveryRequest(ctx context.Context) ([]*AdminRecoveryRequest, error)
+	DenyAdminRecovery(ctx context.Context, userID string) error
+	// User approval persistence (Story 2.4, FR-20): ListPendingUsers returns
+	// the pending-approval users oldest first (profile details only, never the
+	// password hash); ApproveUser atomically transitions a pending user to
+	// active AND seeds the default 'helfende' role (idempotent) in one
+	// transaction; RejectUser atomically transitions a pending user to
+	// deactivated so the pending record disappears and the account can neither
+	// log in nor re-register. Both return the resulting user for the audit
+	// detail and map an unknown/non-pending target to ErrUserNotPending.
+	ListPendingUsers(ctx context.Context) ([]*PendingUser, error)
+	ApproveUser(ctx context.Context, userID string) (*User, error)
+	RejectUser(ctx context.Context, userID string) (*User, error)
+	// Role & Permission-Group persistence (Story 2.5, AD-12): ListGroups returns
+	// every permission group (base roles first, then name) each with its granted
+	// codes; CreateGroup inserts a named group (is_base_role=false) AND its
+	// permission rows atomically; UpdateGroup replaces the group's
+	// name/description AND its permission set atomically (delete-then-insert in
+	// one transaction); ListAllPermissions returns the server-authoritative
+	// 23-code catalog with raw labels (the core derives the German labels).
+	// CreateGroup maps a case-insensitive duplicate name to ErrRoleNameTaken;
+	// UpdateGroup additionally maps an unknown id to ErrRoleNotFound.
+	ListGroups(ctx context.Context) ([]*RoleGroup, error)
+	CreateGroup(ctx context.Context, name, description string, permissionCodes []string) (*RoleGroup, error)
+	UpdateGroup(ctx context.Context, id, name, description string, permissionCodes []string) (*RoleGroup, error)
+	ListAllPermissions(ctx context.Context) ([]*PermissionCatalogEntry, error)
+	// User & Group Administration persistence (Story 2.6, AD-12): ListUsers
+	// returns every user (id, names, email, state) ordered by name;
+	// GetUserDetail composes a user's profile + roles (permission groups) +
+	// user groups (teams) + direct grants + qualification assignments (unknown
+	// id → ErrAdminUserNotFound); CreateAdminUser/UpdateAdminUser persist the
+	// profile AND the three assignment sets atomically (delete-then-insert in
+	// one transaction, never a data-modifying CTE — Story 2.5 lesson), mapping
+	// a case-insensitive duplicate email to ErrAdminUserEmailTaken;
+	// DeactivateUser flips an active user to deactivated (and revokes their
+	// sessions) — unknown id → ErrAdminUserNotFound, non-active →
+	// ErrUserNotActiveForDeactivate; ListUserGroups/CreateUserGroup/DeleteUserGroup
+	// manage the organisational teams (duplicate name → ErrUserGroupNameTaken,
+	// unknown group → ErrUserGroupNotFound);
+	// AssignUserGroupMembers replaces a group's member set atomically (unknown
+	// member → ErrUserGroupMemberUnknown); ListUserGroupMembers returns the
+	// current member ids of a group.
+	ListUsers(ctx context.Context, status *string) ([]*AdminUserSummary, error)
+	// ListUserGroupNamesByUsers returns the organisational team names each
+	// listed user belongs to, keyed by user id (Effort 2): one lookup for the
+	// whole admin user list so the SPA table renders inline group tags. Display
+	// data only — membership grants no permission (AD-12).
+	ListUserGroupNamesByUsers(ctx context.Context, userIDs []string) (map[string][]string, error)
+	GetUserDetail(ctx context.Context, userID string) (*AdminUserDetail, error)
+	CreateAdminUser(ctx context.Context, email, firstName, lastName, state string, roleIDs, userGroupIDs, grantCodes []string) (*User, error)
+	UpdateAdminUser(ctx context.Context, userID, email, firstName, lastName, state string, roleIDs, userGroupIDs, grantCodes []string) (*User, error)
+	DeactivateUser(ctx context.Context, userID string) (*User, error)
+	ListUserGroups(ctx context.Context) ([]*UserGroup, error)
+	CreateUserGroup(ctx context.Context, name, description string) (*UserGroup, error)
+	AssignUserGroupMembers(ctx context.Context, groupID string, userIDs []string) (*UserGroup, error)
+	ListUserGroupMembers(ctx context.Context, groupID string) ([]string, error)
+	DeleteUserGroup(ctx context.Context, groupID string) error
+	// ReplaceUserGroupMemberships replaces the organisational user-group set of
+	// a user from the USER detail (Effort 2) — delete-then-insert in one
+	// transaction (unknown user → ErrAdminUserNotFound, unknown group →
+	// ErrAdminUserUnknownUserGroup).
+	ReplaceUserGroupMemberships(ctx context.Context, userID string, groupIDs []string) (*User, error)
+	// Qualification Management persistence (Story 2.7, AD-7/FR-22):
+	// ListQualificationVocabulary returns the full qualification vocabulary
+	// (reusing the Story 2.6 ListQualifications query); CreateQualification/
+	// UpdateQualification persist the vocabulary rows (duplicate name →
+	// ErrQualificationNameTaken, unknown id → ErrQualificationNotFound);
+	// ListQualificationAssignees returns the current assignees (id + display
+	// name) of a qualification; ReplaceQualificationAssignees replaces the
+	// assignee set atomically (delete-then-insert in one transaction, Story 2.5
+	// lesson) — unknown member → ErrQualificationAssigneeUnknown.
+	ListQualificationVocabulary(ctx context.Context) ([]*Qualification, error)
+	CreateQualification(ctx context.Context, name, description, expiryKind string) (*Qualification, error)
+	UpdateQualification(ctx context.Context, id, name, description, expiryKind string) (*Qualification, error)
+	ListQualificationAssignees(ctx context.Context, id string) ([]*QualificationAssignee, error)
+	ReplaceQualificationAssignees(ctx context.Context, id string, userIDs []string) ([]*QualificationAssignee, error)
+	// Admin Rework Effort 1 (Spec 2.9): ListUserGroupRoles returns the roles
+	// an organisational user group grants its members; ReplaceUserGroupRoles
+	// replaces a group's role set atomically (unknown group →
+	// ErrUserGroupNotFound, unknown role → ErrAdminUserUnknownRole).
+	// AssignQualificationToUser assigns a qualification to a user with an
+	// optional per-assignment valid-until (fixed qualification REQUIRES an
+	// expires_at → ErrQualificationExpiryRequired; unlimited must not carry one
+	// → ErrQualificationInvalidExpiresAt); RevokeQualificationFromUser revokes
+	// it; UpdateUserQualificationExpiry edits the per-assignment valid-until
+	// (unknown user/qualification pair → ErrQualificationAssignmentNotFound).
+	ListUserGroupRoles(ctx context.Context, groupID string) ([]*RoleGroupRef, error)
+	ReplaceUserGroupRoles(ctx context.Context, groupID string, roleIDs []string) ([]*RoleGroupRef, error)
+	AssignQualificationToUser(ctx context.Context, userID, qualificationID string, expiresAt *time.Time) error
+	RevokeQualificationFromUser(ctx context.Context, userID, qualificationID string) error
+	UpdateUserQualificationExpiry(ctx context.Context, userID, qualificationID string, expiresAt *time.Time) error
+	// ListUserQualificationAssignments returns the qualification assignments of
+	// a user (Spec 2.9, Story 5.1): the vocabulary id/name/expiry-kind plus the
+	// PER-ASSIGNMENT expires_at (NULL for an unlimited assignment), so the core
+	// can derive expiry-aware eligibility (AD-7/FR-22). An unknown user yields
+	// an empty list (eligibility is a read; the caller already holds an
+	// authenticated session). Display status is NOT derived here — that is the
+	// core's job.
+	ListUserQualificationAssignments(ctx context.Context, userID string) ([]QualificationAssignment, error)
+	// DSGVO account-deletion persistence (Story 3.4, FR-24/AD-8):
+	// SoftDeleteAndArchive moves the target's personal data into
+	// dsgvo_deleted_accounts AND flips the users row to the scrubbed `deleted`
+	// tombstone in ONE transaction (an unknown id or an already-deleted
+	// tombstone maps to ErrAdminUserNotFound — the surface treats deleted as
+	// non-existent); ListDeletedAccounts returns the archived rows newest
+	// first; PurgeDeletedAccount hard-deletes an archived row AND its users
+	// tombstone in ONE transaction (an already-purged archive id maps to
+	// ErrDeletedAccountNotFound).
+	SoftDeleteAndArchive(ctx context.Context, targetUserID, reason, deletedBy string) (*User, error)
+	ListDeletedAccounts(ctx context.Context) ([]*DeletedAccount, error)
+	PurgeDeletedAccount(ctx context.Context, archiveID string) error
+}
+
+// SecretCipher encrypts/decrypts the TOTP shared secret at rest (NFR-S4). The
+// concrete implementation is an outbound adapter (AES-256-GCM with the
+// GEAR_ENCRYPTION_KEY) so the domain never touches key material directly.
+type SecretCipher interface {
+	Encrypt(plaintext string) (string, error)
+	Decrypt(encoded string) (string, error)
+}
+
+// PasswordHasher defines the password hashing contract.
+type PasswordHasher interface {
+	Hash(password string) (string, error)
+	Verify(password, encodedHash string) (bool, error)
+}
+
+// RegisterResult is the anti-enumeration confirmation returned on successful registration.
+type RegisterResult struct {
+	Message string `json:"message"`
+	Status  string `json:"status"`
+}
+
+// Service provides User domain operations.
+type Service struct {
+	repo     Repository
+	hasher   PasswordHasher
+	sessions *SessionManager
+	cipher   SecretCipher
+	logger   *slog.Logger
+	// resetSender is the reset-email delivery port (FR-26/AD-14). When nil or
+	// reporting NOT-configured, RequestPasswordReset falls back to flagging the
+	// account must_change_password (this story's default).
+	resetSender ResetEmailSender
+	// appOrigin is the public origin used to build reset links (GEAR_APP_ORIGIN,
+	// review finding 1.8-6). Empty → relative links.
+	appOrigin string
+	// forgotThrottle is the per-email forgot-request rate gate (review finding
+	// 1.8-2). Disabled when nil.
+	forgotThrottle *forgotThrottle
+}
+
+// NewService constructs a User domain Service. logger is used for structured
+// logging of best-effort operations inside the core (e.g. a failed audit write
+// during a password change, NFR-O1); it may be nil, in which case the package
+// falls back to slog.Default().
+func NewService(repo Repository, hasher PasswordHasher, sessions *SessionManager, cipher SecretCipher, logger *slog.Logger) *Service {
+	return &Service{
+		repo:           repo,
+		hasher:         hasher,
+		sessions:       sessions,
+		cipher:         cipher,
+		logger:         logger,
+		forgotThrottle: newForgotThrottle(ForgotPasswordMinInterval),
+	}
+}
+
+// SetResetEmailSender configures the reset-email delivery port (FR-26). When
+// unset, RequestPasswordReset falls back to the must_change_password flag (SMTP
+// not configured — the active default until Story 3.1 wires a real sender).
+func (s *Service) SetResetEmailSender(sender ResetEmailSender) {
+	s.resetSender = sender
+}
+
+// SetAppOrigin configures the public origin used to build clickable reset links
+// (GEAR_APP_ORIGIN, review finding 1.8-6). A trailing slash is trimmed.
+func (s *Service) SetAppOrigin(origin string) {
+	s.appOrigin = origin
+}
+
+// SetForgotThrottleInterval overrides the forgot-request rate-gate window
+// (review finding 1.8-2). An interval <= 0 disables throttling (used by tests).
+func (s *Service) SetForgotThrottleInterval(interval time.Duration) {
+	s.forgotThrottle = newForgotThrottle(interval)
+}
+
+// UniformSuccessMessage is the German microcopy returned for anti-enumeration.
+const UniformSuccessMessage = "Wenn deine E-Mail bereits registriert ist, erhältst du eine Bestätigung."
+
+// Register executes volunteer self-registration with password policy enforcement and anti-enumeration protection.
+func (s *Service) Register(ctx context.Context, input RegisterInput) (*RegisterResult, error) {
+	if err := input.Validate(); err != nil {
+		return nil, err
+	}
+
+	email := strings.ToLower(strings.TrimSpace(input.Email))
+	firstName := strings.TrimSpace(input.FirstName)
+	lastName := strings.TrimSpace(input.LastName)
+	displayName := fmt.Sprintf("%s %s", firstName, lastName)
+
+	// Check if user already exists (anti-enumeration check)
+	existing, err := s.repo.GetUserByEmail(ctx, email)
+	if err != nil {
+		return nil, fmt.Errorf("user core: failed to check existing user: %w", err)
+	}
+	if existing != nil {
+		// User already exists. Hash password to ensure uniform response timing
+		// without creating a duplicate user or leaking account existence (UX-DR7).
+		_, _ = s.hasher.Hash(input.Password)
+		return &RegisterResult{
+			Message: UniformSuccessMessage,
+			Status:  string(StatePendingApproval),
+		}, nil
+	}
+
+	// User does not exist, compute Argon2id hash and create record
+	hash, err := s.hasher.Hash(input.Password)
+	if err != nil {
+		return nil, fmt.Errorf("user core: failed to hash password: %w", err)
+	}
+
+	_, err = s.repo.CreateRegisteredUser(ctx, email, displayName, firstName, lastName, hash)
+	if err != nil {
+		// In case of duplicate key race condition, return uniform anti-enumeration response
+		if errors.Is(err, ErrUserAlreadyExists) || isDuplicateKeyErr(err) {
+			return &RegisterResult{
+				Message: UniformSuccessMessage,
+				Status:  string(StatePendingApproval),
+			}, nil
+		}
+		return nil, fmt.Errorf("user core: failed to create user: %w", err)
+	}
+
+	return &RegisterResult{
+		Message: UniformSuccessMessage,
+		Status:  string(StatePendingApproval),
+	}, nil
+}
+
+func isDuplicateKeyErr(err error) bool {
+	if err == nil {
+		return false
+	}
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "duplicate key") || strings.Contains(msg, "unique constraint") || strings.Contains(msg, "23505")
+}

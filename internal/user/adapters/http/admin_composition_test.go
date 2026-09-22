@@ -1,0 +1,523 @@
+package http
+
+import (
+	"bytes"
+	"context"
+	"encoding/json"
+	"fmt"
+	"log/slog"
+	"net/http"
+	"net/http/httptest"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/saskia-peters/gear/internal/platform/auth"
+	"github.com/saskia-peters/gear/internal/platform/crypto"
+	"github.com/saskia-peters/gear/internal/platform/dbtest"
+	"github.com/saskia-peters/gear/internal/platform/httpapi"
+	"github.com/saskia-peters/gear/internal/platform/router"
+	userpostgres "github.com/saskia-peters/gear/internal/user/adapters/postgres"
+	usercore "github.com/saskia-peters/gear/internal/user/core"
+)
+
+const argon2DummyHash = "$argon2id$v=19$m=65536,t=3,p=4$c2FsdHNhbHRzYWx0$8U3f5yO8JUpfGT5WmljHhL8n2nWlVEhL2fj7EXpS9gM"
+
+// newComposedAdminRouter builds the REAL composition-root wiring for the admin
+// module (AD-1, review finding 2.1-4): postgres Repository + SessionManager +
+// Service + the real AdminRoutes() mounted at /api/v1/admin behind the ANY-OF
+// admin-module gate (usercore.AdminModuleAccessCodes(), exactly as
+// cmd/server/main.go does — fuehrende/schirrmeister holding users.view +
+// users.qualifications.manage can enter, recovery stays admin-only). A generic
+// protected demo route is mounted too so hidden-existence tests can compare
+// admin 403s byte-for-byte against a generic forbidden response.
+func newComposedAdminRouter(t *testing.T, log *slog.Logger) (http.Handler, *userpostgres.Repository, *usercore.SessionManager, *pgxpool.Pool) {
+	t.Helper()
+
+	// Per-package schema isolation (Story 7.4): this composition suite runs in
+	// its own schema so parallel `go test ./...` never shares users/sessions
+	// with the user/postgres package.
+	pool := dbtest.Open(t, "gear_test_admincomp")
+
+	repo := userpostgres.NewRepository(userpostgres.New(pool))
+	sm := usercore.NewSessionManager(repo, time.Hour)
+	svc := usercore.NewService(repo, crypto.NewHasher(), sm, crypto.NewSecretCipher(make([]byte, 32)), log)
+	h := NewHandler(svc, log, sm)
+	adminSurface := auth.RequireAnyPermission(sm, repo, usercore.AdminModuleAccessCodes(), "admin access denied", log)(h.AdminRoutes())
+	r := router.New(pool, log,
+		router.WithProtected(auth.Route(sm, repo, adminModulePermission)),
+		router.WithMount("/api/v1/admin", adminSurface),
+	)
+	return r, repo, sm, pool
+}
+
+func doComposedAdminGET(h http.Handler, token, path string) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodGet, path, nil)
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+func doComposedAdminPOST(h http.Handler, token, path string, body []byte) *httptest.ResponseRecorder {
+	req := httptest.NewRequest(http.MethodPost, path, bytes.NewReader(body))
+	req.Header.Set("Content-Type", "application/json")
+	if token != "" {
+		req.Header.Set("Authorization", "Bearer "+token)
+	}
+	rec := httptest.NewRecorder()
+	h.ServeHTTP(rec, req)
+	return rec
+}
+
+// createActiveUser registers a FRESH user, activates it and returns the user
+// plus a live session token. Cleanup is registered IMMEDIATELY (review finding
+// 2.1-7) — before any t.Skip or later failure — so the row never leaks into the
+// shared dev DB. The cleanup deletes ONLY this user (sessions and recovery
+// tokens cascade on user delete), so it can never touch rows owned by OTHER
+// test binaries that share the database concurrently (the postgres adapter
+// suite). grantAdmin additionally attaches the admin role.
+func createActiveUser(t *testing.T, pool *pgxpool.Pool, repo *userpostgres.Repository, sm *usercore.SessionManager, email, display, first, last string, grantAdmin bool) (*usercore.User, string) {
+	t.Helper()
+	ctx := context.Background()
+	user, err := repo.CreateRegisteredUser(ctx, email, display, first, last, argon2DummyHash)
+	if err != nil {
+		t.Fatalf("CreateRegisteredUser(%s) failed: %v", email, err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, "DELETE FROM users WHERE email = $1", email)
+	})
+	if _, err := pool.Exec(ctx, "UPDATE users SET state = 'active' WHERE id = $1", user.ID); err != nil {
+		t.Fatalf("activating %s failed: %v", email, err)
+	}
+	user.State = usercore.StateActive
+	if grantAdmin {
+		if _, err := pool.Exec(ctx, "INSERT INTO user_permission_groups (user_id, permission_group_id) SELECT $1, g.id FROM permission_groups g WHERE g.name = 'admin'", user.ID); err != nil {
+			t.Fatalf("granting admin role to %s failed: %v", email, err)
+		}
+	}
+	token, err := sm.Issue(ctx, user)
+	if err != nil {
+		t.Fatalf("Issue session for %s failed: %v", email, err)
+	}
+	return user, token
+}
+
+func TestComposedAdminRouteGroup(t *testing.T) {
+	r, repo, sm, pool := newComposedAdminRouter(t, discardLogger())
+
+	// 401: no token.
+	if rec := doComposedAdminGET(r, "", "/api/v1/admin"); rec.Code != http.StatusUnauthorized {
+		t.Errorf("no token: status = %d, want 401", rec.Code)
+	}
+
+	volunteerEmail := fmt.Sprintf("admcomp.vol.%s@gear.local", time.Now().Format("20060102150405.000000"))
+	_, volunteerToken := createActiveUser(t, pool, repo, sm, volunteerEmail, "Comp Vol", "Comp", "Vol", false)
+
+	// 403 + hidden existence on the root: the uniform envelope, byte-identical
+	// to a generic forbidden route and carrying no admin hint (FR-19, review
+	// finding 2.1-8c).
+	rec := doComposedAdminGET(r, volunteerToken, "/api/v1/admin")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("volunteer: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	var env httpapi.ErrorEnvelope
+	if err := json.Unmarshal(rec.Body.Bytes(), &env); err != nil {
+		t.Fatalf("decoding forbidden envelope failed: %v", err)
+	}
+	if env.Error.Code != "forbidden" {
+		t.Errorf("forbidden code = %q, want forbidden", env.Error.Code)
+	}
+	if strings.Contains(strings.ToLower(rec.Body.String()), "admin") {
+		t.Errorf("403 body hints at the admin module: %s", rec.Body.String())
+	}
+	genericRec := doComposedAdminGET(r, volunteerToken, "/api/v1/protected/me")
+	if genericRec.Code != http.StatusForbidden {
+		t.Fatalf("generic protected route status = %d, want 403", genericRec.Code)
+	}
+	if genericRec.Body.String() != rec.Body.String() {
+		t.Errorf("admin 403 body differs from the generic forbidden body\nadmin:   %s\ngeneric: %s",
+			rec.Body.String(), genericRec.Body.String())
+	}
+
+	// 403 + hidden existence on a NESTED admin sub-path (review finding 2.1-8b):
+	// the gateway runs before routing, so a non-admin never reaches the admin
+	// surface or a 404 that would hint at it.
+	nestedRec := doComposedAdminGET(r, volunteerToken, "/api/v1/admin/recovery/pending")
+	if nestedRec.Code != http.StatusForbidden {
+		t.Errorf("nested sub-path: status = %d, want 403 (body %s)", nestedRec.Code, nestedRec.Body.String())
+	}
+	if strings.Contains(strings.ToLower(nestedRec.Body.String()), "admin") {
+		t.Errorf("nested 403 body hints at the admin module: %s", nestedRec.Body.String())
+	}
+
+	// 200: a genuine admin (FRESH user — the seeded admins are concurrently used
+	// by the postgres adapter suite) resolves the admin permission via the live
+	// permission set (AD-12) and reaches the real admin-status surface.
+	adminEmail := fmt.Sprintf("admcomp.admin.%s@gear.local", time.Now().Format("20060102150405.000000"))
+	admin, adminToken := createActiveUser(t, pool, repo, sm, adminEmail, "Comp Admin", "Comp", "Admin", true)
+	rec = doComposedAdminGET(r, adminToken, "/api/v1/admin")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("admin: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var wire map[string]string
+	_ = json.Unmarshal(rec.Body.Bytes(), &wire)
+	if wire["module"] != "admin" || wire["status"] != "ok" {
+		t.Errorf("admin status payload = %v, want module=admin status=ok", wire)
+	}
+
+	// Revocation is IMMEDIATE (AD-2/FR-21): after removing the admin role, the
+	// SAME session token is denied 403 on the next request. The fresh admin's
+	// role revocation never touches the seeded admins.
+	if _, err := pool.Exec(context.Background(), "DELETE FROM user_permission_groups upg USING permission_groups g WHERE upg.permission_group_id = g.id AND g.name = 'admin' AND upg.user_id = $1", admin.ID); err != nil {
+		t.Fatalf("revoking admin role failed: %v", err)
+	}
+	if rec := doComposedAdminGET(r, adminToken, "/api/v1/admin"); rec.Code != http.StatusForbidden {
+		t.Errorf("revoked admin: status = %d, want 403", rec.Code)
+	}
+}
+
+// TestComposedAdminFuehrendeEntersModule pins the Effort 2 outer-gate widening
+// through the REAL wiring: a fuehrende/schirrmeister holding ONLY users.view +
+// users.qualifications.manage (the 'fuehrende' base role, migration 000013)
+// reaches GET /api/v1/admin → 200, while a caller with NO admin-module code
+// stays denied 403 with the uniform hidden-existence envelope (FR-19).
+func TestComposedAdminFuehrendeEntersModule(t *testing.T) {
+	r, repo, sm, pool := newComposedAdminRouter(t, discardLogger())
+	stamp := time.Now().Format("20060102150405.000000")
+
+	fuehrendeEmail := fmt.Sprintf("admcomp.fuehr.%s@gear.local", stamp)
+	user, token := createActiveUser(t, pool, repo, sm, fuehrendeEmail, "Fuehrend", "Fue", "Ehrende", false)
+	if _, err := pool.Exec(context.Background(),
+		`INSERT INTO user_permission_groups (user_id, permission_group_id) SELECT $1, g.id FROM permission_groups g WHERE g.name = 'fuehrende'`, user.ID); err != nil {
+		t.Fatalf("granting fuehrende role failed: %v", err)
+	}
+
+	// Sanity: the fuehrende base role carries users.view + users.qualifications.manage.
+	perms, err := repo.ListPermissionsByUser(context.Background(), user.ID)
+	if err != nil {
+		t.Fatalf("resolving fuehrende permissions failed: %v", err)
+	}
+	has := func(code string) bool {
+		for _, p := range perms {
+			if p == code {
+				return true
+			}
+		}
+		return false
+	}
+	if !has("users.view") || !has("users.qualifications.manage") {
+		t.Fatalf("fuehrende permissions = %v, want users.view + users.qualifications.manage", perms)
+	}
+
+	rec := doComposedAdminGET(r, token, "/api/v1/admin")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("fuehrende: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var wire map[string]string
+	_ = json.Unmarshal(rec.Body.Bytes(), &wire)
+	if wire["module"] != "admin" || wire["status"] != "ok" {
+		t.Errorf("admin status payload = %v, want module=admin status=ok", wire)
+	}
+
+	// No admin-module code → uniform hidden-existence 403.
+	noAdminEmail := fmt.Sprintf("admcomp.none.%s@gear.local", stamp)
+	_, noAdminToken := createActiveUser(t, pool, repo, sm, noAdminEmail, "No Access", "No", "Access", false)
+	rec = doComposedAdminGET(r, noAdminToken, "/api/v1/admin")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("no admin code: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(strings.ToLower(rec.Body.String()), "admin") {
+		t.Errorf("403 body hints at the admin module: %s", rec.Body.String())
+	}
+}
+
+func TestComposedAdminForbiddenStructuredLogged(t *testing.T) {
+	// NFR-O1 (review finding 2.1-5): an admin-route denial emits BOTH the
+	// router-level request log line AND a denial-specific structured line
+	// (message, caller email, path, required permission) — distinct from the
+	// generic request log.
+	var buf bytes.Buffer
+	log := slog.New(slog.NewTextHandler(&buf, nil))
+	r, repo, sm, pool := newComposedAdminRouter(t, log)
+
+	volunteerEmail := fmt.Sprintf("admlog.vol.%s@gear.local", time.Now().Format("20060102150405.000000"))
+	_, volunteerToken := createActiveUser(t, pool, repo, sm, volunteerEmail, "Log Vol", "Log", "Vol", false)
+
+	if rec := doComposedAdminGET(r, volunteerToken, "/api/v1/admin"); rec.Code != http.StatusForbidden {
+		t.Fatalf("volunteer: status = %d, want 403", rec.Code)
+	}
+
+	out := buf.String()
+	if !strings.Contains(out, "status=403") {
+		t.Errorf("structured request log missing the 403 line: %s", out)
+	}
+	if !strings.Contains(out, "admin access denied") {
+		t.Errorf("denial-specific log missing 'admin access denied': %s", out)
+	}
+	if !strings.Contains(out, "path=/api/v1/admin") {
+		t.Errorf("denial log missing the admin path: %s", out)
+	}
+	// The any-of gate logs the FULL joined code list, not a single code.
+	wantRequired := strings.Join(usercore.AdminModuleAccessCodes(), ",")
+	if !strings.Contains(out, "permission_required="+wantRequired) {
+		t.Errorf("denial log missing the required permission list %q: %s", wantRequired, out)
+	}
+	if !strings.Contains(out, volunteerEmail) {
+		t.Errorf("denial log missing the caller email: %s", out)
+	}
+}
+
+func TestComposedAdminRecoveryRoutesReachable(t *testing.T) {
+	// Review finding 2.1-1: the admin-recovery surface is a member of the
+	// isolated /api/v1/admin group. Through the REAL handler + REAL wiring the
+	// request/approve/deny/pending flows are reachable at the new URLs and still
+	// work (FR-27), while a non-admin is denied 403 at the group gateway. All
+	// participants are FRESH admins so the seeded admins (concurrently used by
+	// the postgres adapter suite) are never touched.
+	r, repo, sm, pool := newComposedAdminRouter(t, discardLogger())
+	stamp := time.Now().Format("20060102150405.000000")
+
+	requesterEmail := fmt.Sprintf("admcomp.req.%s@gear.local", stamp)
+	_, requesterToken := createActiveUser(t, pool, repo, sm, requesterEmail, "Requester", "Req", "Admin", true)
+	targetEmail := fmt.Sprintf("admcomp.target.%s@gear.local", stamp)
+	_, _ = createActiveUser(t, pool, repo, sm, targetEmail, "Target", "Tgt", "Admin", true)
+	approverEmail := fmt.Sprintf("admcomp.appr.%s@gear.local", stamp)
+	_, approverToken := createActiveUser(t, pool, repo, sm, approverEmail, "Approver", "Appr", "Admin", true)
+	volunteerEmail := fmt.Sprintf("admcomp.reqvol.%s@gear.local", stamp)
+	_, volunteerToken := createActiveUser(t, pool, repo, sm, volunteerEmail, "Req Vol", "Req", "Vol", false)
+
+	// pending: the route is reachable for an admin (200). The pending list is a
+	// shared, global surface (concurrent postgres-suite tests may hold pending
+	// requests for the seeded admins), so only the HTTP contract is asserted
+	// here; the target-specific assertions below are what prove this test's own
+	// request shows up.
+	rec := doComposedAdminGET(r, requesterToken, "/api/v1/admin/recovery/pending")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pending: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// request: the requester (A) requests recovery for the target (T).
+	requestBody := []byte(fmt.Sprintf(`{"email":%q}`, targetEmail))
+	rec = doComposedAdminPOST(r, requesterToken, "/api/v1/admin/recovery/request", requestBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("request: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// The target now appears in the pending list (this test's own request).
+	rec = doComposedAdminGET(r, requesterToken, "/api/v1/admin/recovery/pending")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pending after request: status = %d, want 200", rec.Code)
+	}
+	if !strings.Contains(rec.Body.String(), targetEmail) {
+		t.Errorf("pending list missing the target %s: %s", targetEmail, rec.Body.String())
+	}
+
+	// deny: the independent approver B (neither requester nor target) denies T.
+	denyBody := []byte(fmt.Sprintf(`{"email":%q,"reason":"unberechtigt"}`, targetEmail))
+	rec = doComposedAdminPOST(r, approverToken, "/api/v1/admin/recovery/deny", denyBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("deny: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// request again, then approve: B approves T's fresh request and receives the
+	// single-use token (the ONLY caller who may see it).
+	rec = doComposedAdminPOST(r, requesterToken, "/api/v1/admin/recovery/request", requestBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("request (2nd): status = %d, want 200", rec.Code)
+	}
+	approveBody := []byte(fmt.Sprintf(`{"email":%q,"reason":"Ausgesperrt","confirmed":true}`, targetEmail))
+	rec = doComposedAdminPOST(r, approverToken, "/api/v1/admin/recovery/approve", approveBody)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("approve: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	var approveRes struct {
+		RecoveryToken string `json:"recovery_token"`
+	}
+	if err := json.Unmarshal(rec.Body.Bytes(), &approveRes); err != nil {
+		t.Fatalf("decoding approve response failed: %v", err)
+	}
+	if approveRes.RecoveryToken == "" {
+		t.Errorf("approve returned an empty recovery token")
+	}
+
+	// A non-admin never reaches any recovery route: 403 with no admin hint.
+	rec = doComposedAdminPOST(r, volunteerToken, "/api/v1/admin/recovery/request", requestBody)
+	if rec.Code != http.StatusForbidden {
+		t.Errorf("volunteer request: status = %d, want 403", rec.Code)
+	}
+	if strings.Contains(strings.ToLower(rec.Body.String()), "admin") {
+		t.Errorf("volunteer 403 body hints at the admin module: %s", rec.Body.String())
+	}
+}
+
+// TestComposedAdminUserApprovalFlow covers the Story 2.4 HTTP contract through
+// the REAL wiring (postgres repo + service + admin router behind the outer
+// admin-only gateway and the inner users.approve gate): list pending, approve
+// (→ active + helfende seed + audit), reject (→ deactivated + audit), the
+// uniform 404 for an unknown/non-pending target, and the hidden-existence 403
+// for a caller without `users.approve`.
+func TestComposedAdminUserApprovalFlow(t *testing.T) {
+	r, repo, sm, pool := newComposedAdminRouter(t, discardLogger())
+	stamp := time.Now().Format("20060102150405.000000")
+
+	adminEmail := fmt.Sprintf("apprcomp.admin.%s@gear.local", stamp)
+	_, adminToken := createActiveUser(t, pool, repo, sm, adminEmail, "Appr Admin", "Appr", "Admin", true)
+
+	volunteerEmail := fmt.Sprintf("apprcomp.vol.%s@gear.local", stamp)
+	_, volunteerToken := createActiveUser(t, pool, repo, sm, volunteerEmail, "Appr Vol", "Appr", "Vol", false)
+
+	// A genuine pending registration (Story 1.3): stays pending_approval.
+	pendingEmail := fmt.Sprintf("apprcomp.pend.%s@gear.local", stamp)
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), "DELETE FROM users WHERE email = $1", pendingEmail)
+	})
+	pending, err := repo.CreateRegisteredUser(context.Background(), pendingEmail, "Tim Müller", "Tim", "Müller", argon2DummyHash)
+	if err != nil {
+		t.Fatalf("creating pending user failed: %v", err)
+	}
+
+	// LIST_PENDING: the admin reaches the surface and sees the pending request.
+	rec := doComposedAdminGET(r, adminToken, "/api/v1/admin/users/pending")
+	if rec.Code != http.StatusOK {
+		t.Fatalf("pending list: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), pendingEmail) {
+		t.Errorf("pending list missing %s: %s", pendingEmail, rec.Body.String())
+	}
+	if strings.Contains(rec.Body.String(), "password") {
+		t.Errorf("pending list leaks password material: %s", rec.Body.String())
+	}
+
+	// LIST_FORBIDDEN: a caller without users.approve gets the uniform
+	// hidden-existence 403 (no admin hint).
+	rec = doComposedAdminGET(r, volunteerToken, "/api/v1/admin/users/pending")
+	if rec.Code != http.StatusForbidden {
+		t.Fatalf("volunteer pending: status = %d, want 403 (body %s)", rec.Code, rec.Body.String())
+	}
+	if strings.Contains(strings.ToLower(rec.Body.String()), "admin") {
+		t.Errorf("volunteer 403 body hints at the admin module: %s", rec.Body.String())
+	}
+
+	// APPROVE_VALID: the user moves to active, helfende is seeded, audit row.
+	rec = doComposedAdminPOST(r, adminToken, "/api/v1/admin/users/"+pending.ID+"/approve", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("approve: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), usercore.MsgUserApproved) {
+		t.Errorf("approve body missing confirmation: %s", rec.Body.String())
+	}
+	var activeState string
+	if err := pool.QueryRow(context.Background(), "SELECT state FROM users WHERE id = $1", pending.ID).Scan(&activeState); err != nil {
+		t.Fatalf("reading state after approve failed: %v", err)
+	}
+	if activeState != string(usercore.StateActive) {
+		t.Errorf("state after approve = %q, want active", activeState)
+	}
+	var helfendeCnt int
+	if err := pool.QueryRow(context.Background(), `
+		SELECT COUNT(*) FROM user_permission_groups upg
+		JOIN permission_groups g ON g.id = upg.permission_group_id
+		WHERE upg.user_id = $1 AND g.name = 'helfende'`, pending.ID).Scan(&helfendeCnt); err != nil {
+		t.Fatalf("counting helfende failed: %v", err)
+	}
+	if helfendeCnt != 1 {
+		t.Errorf("helfende memberships = %d, want 1", helfendeCnt)
+	}
+	var approveAudit int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM audit_log WHERE operation = 'user.approve' AND operation_detail = 'target=' || $1`, pendingEmail).Scan(&approveAudit); err != nil {
+		t.Fatalf("counting approve audit failed: %v", err)
+	}
+	if approveAudit != 1 {
+		t.Errorf("approve audit rows = %d, want 1", approveAudit)
+	}
+
+	// APPROVE_NONPENDING: approving the same (now active) user is a uniform 404
+	// (no leak beyond what the admin already sees).
+	rec = doComposedAdminPOST(r, adminToken, "/api/v1/admin/users/"+pending.ID+"/approve", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("re-approve: status = %d, want 404 (body %s)", rec.Code, rec.Body.String())
+	}
+
+	// A second pending user to reject.
+	rejectEmail := fmt.Sprintf("apprcomp.rej.%s@gear.local", stamp)
+	t.Cleanup(func() {
+		_, _ = pool.Exec(context.Background(), "DELETE FROM users WHERE email = $1", rejectEmail)
+	})
+	rejectTarget, err := repo.CreateRegisteredUser(context.Background(), rejectEmail, "Paul Lehne", "Paul", "Lehne", argon2DummyHash)
+	if err != nil {
+		t.Fatalf("creating reject target failed: %v", err)
+	}
+
+	// REJECT_VALID: the pending record disappears (state deactivated) + audit.
+	rec = doComposedAdminPOST(r, adminToken, "/api/v1/admin/users/"+rejectTarget.ID+"/reject", nil)
+	if rec.Code != http.StatusOK {
+		t.Fatalf("reject: status = %d, want 200 (body %s)", rec.Code, rec.Body.String())
+	}
+	if !strings.Contains(rec.Body.String(), usercore.MsgUserRejected) {
+		t.Errorf("reject body missing confirmation: %s", rec.Body.String())
+	}
+	var deactState string
+	if err := pool.QueryRow(context.Background(), "SELECT state FROM users WHERE id = $1", rejectTarget.ID).Scan(&deactState); err != nil {
+		t.Fatalf("reading state after reject failed: %v", err)
+	}
+	if deactState != string(usercore.StateDeactivated) {
+		t.Errorf("state after reject = %q, want deactivated", deactState)
+	}
+	rec = doComposedAdminGET(r, adminToken, "/api/v1/admin/users/pending")
+	if strings.Contains(rec.Body.String(), rejectEmail) {
+		t.Errorf("rejected user still in pending list: %s", rec.Body.String())
+	}
+	var rejectAudit int
+	if err := pool.QueryRow(context.Background(),
+		`SELECT COUNT(*) FROM audit_log WHERE operation = 'user.reject' AND operation_detail = 'target=' || $1`, rejectEmail).Scan(&rejectAudit); err != nil {
+		t.Fatalf("counting reject audit failed: %v", err)
+	}
+	if rejectAudit != 1 {
+		t.Errorf("reject audit rows = %d, want 1", rejectAudit)
+	}
+
+	// APPROVE_UNKNOWN / REJECT_UNKNOWN: a nonexistent id is a uniform 404.
+	unknown := "00000000-0000-0000-0000-000000000000"
+	rec = doComposedAdminPOST(r, adminToken, "/api/v1/admin/users/"+unknown+"/approve", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("approve unknown: status = %d, want 404", rec.Code)
+	}
+	rec = doComposedAdminPOST(r, adminToken, "/api/v1/admin/users/"+unknown+"/reject", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("reject unknown: status = %d, want 404", rec.Code)
+	}
+
+	// APPROVE_UNKNOWN / REJECT_UNKNOWN (malformed id): a non-UUID {userID} is
+	// the uniform 404 not_found through the REAL wiring — never a 500.
+	for _, path := range []string{"/api/v1/admin/users/not-a-uuid/approve", "/api/v1/admin/users/not-a-uuid/reject"} {
+		rec = doComposedAdminPOST(r, adminToken, path, nil)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("malformed id %s: status = %d, want 404 (body %s)", path, rec.Code, rec.Body.String())
+		}
+	}
+
+	// REJECT_NONPENDING: an already-active user cannot be rejected — uniform 404.
+	rec = doComposedAdminPOST(r, adminToken, "/api/v1/admin/users/"+pending.ID+"/reject", nil)
+	if rec.Code != http.StatusNotFound {
+		t.Errorf("reject active: status = %d, want 404 (body %s)", rec.Code, rec.Body.String())
+	}
+	if activeState := queryUserState(t, pool, pending.ID); activeState != string(usercore.StateActive) {
+		t.Errorf("reject changed an active user's state: %q", activeState)
+	}
+}
+
+// queryUserState reads a user's state directly from the DB.
+func queryUserState(t *testing.T, pool *pgxpool.Pool, userID string) string {
+	t.Helper()
+	var state string
+	if err := pool.QueryRow(context.Background(), "SELECT state FROM users WHERE id = $1", userID).Scan(&state); err != nil {
+		t.Fatalf("querying user state failed: %v", err)
+	}
+	return state
+}

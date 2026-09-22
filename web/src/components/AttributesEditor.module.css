@@ -1,0 +1,101 @@
+.attributes {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-3);
+  padding: var(--gear-space-4);
+  border: 1px solid var(--gear-color-border-hairline);
+  border-radius: var(--gear-radius-md);
+  background-color: var(--gear-color-surface-base);
+}
+
+.label {
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  color: var(--gear-color-ink-primary);
+}
+
+.hint {
+  margin: 0;
+  font-size: var(--gear-font-meta-size);
+  color: var(--gear-color-ink-secondary);
+}
+
+.emptyHint {
+  margin: 0;
+  color: var(--gear-color-ink-secondary);
+  font-size: var(--gear-font-body-size);
+}
+
+.rows {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-2);
+}
+
+.attrRow {
+  display: flex;
+  align-items: center;
+  gap: var(--gear-space-2);
+}
+
+.attrRow .input {
+  flex: 1;
+  min-width: 0;
+}
+
+.iconButton {
+  min-width: 48px;
+  min-height: 48px;
+  padding: 0;
+  border-radius: var(--gear-radius-md);
+  border: 1px solid var(--gear-color-border-hairline);
+  background-color: var(--gear-color-surface-raised);
+  color: var(--gear-color-ink-primary);
+  font-size: var(--gear-font-title-size);
+  font-family: var(--gear-font-family);
+  cursor: pointer;
+  flex-shrink: 0;
+}
+
+.addRow {
+  display: flex;
+}
+
+.addButton {
+  min-height: 48px;
+  padding: 0 var(--gear-space-4);
+  border-radius: var(--gear-radius-md);
+  border: 1px solid var(--gear-color-border-hairline);
+  background-color: var(--gear-color-surface-raised);
+  color: var(--gear-color-ink-primary);
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  font-family: var(--gear-font-family);
+  cursor: pointer;
+}
+
+.addButton:disabled,
+.iconButton:disabled {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+.errors {
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-1);
+}
+
+.errors li {
+  font-size: var(--gear-font-meta-size);
+  color: var(--gear-color-status-red);
+}
+
+.size {
+  margin: 0;
+  font-size: var(--gear-font-meta-size);
+  color: var(--gear-color-ink-secondary);
+}

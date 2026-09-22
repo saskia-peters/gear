@@ -1,0 +1,63 @@
+# G.E.A.R. local development stack (podman-compose).
+# Single Compose source driven from the justfile.
+# Story 7.6 adds the `app` service: `just db-up` still brings up only the db
+# (targeted `up -d db`); `just container-run` builds + runs the full app+db
+# stack. The app connects to the db service over the compose network
+# (GEAR_DATABASE_URL below), and GEAR_WEB_DIST defaults to ./web/dist.
+
+services:
+  db:
+    image: docker.io/library/postgres:18
+    container_name: gear-db
+    environment:
+      # Local-development DB credentials only — never the app's seeded admin
+      # credentials (those are provisioned out-of-band, FR-27/AD-13). The
+      # password is interpolated so a deploy .env can override it.
+      POSTGRES_USER: gear
+      POSTGRES_PASSWORD: ${GEAR_DB_PASSWORD:-gear}
+      POSTGRES_DB: gear
+    ports:
+      - "5432:5432"
+    volumes:
+      # PG 18+ image convention: mount at /var/lib/postgresql so the data
+      # lives in a major-version subdirectory (pg_upgrade-friendly).
+      - gear_pgdata:/var/lib/postgresql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U gear -d gear"]
+      interval: 5s
+      timeout: 3s
+      start_period: 20s
+      retries: 10
+
+  app:
+    # Story 7.6 (NFR-R1): the single app image serving API + SPA. `build: .`
+    # is the local-dev path; the production/local-proof variants pull from a
+    # registry via `image:` (see deploy/compose.local-proof.yaml).
+    build:
+      context: .
+    image: ${GEAR_IMAGE:-gear-app}
+    container_name: gear-app
+    environment:
+      # The app reaches the db over the compose network (service name `db`),
+      # never localhost. The password comes from the same interpolation as the
+      # db service so the pair always agrees.
+      GEAR_DATABASE_URL: postgres://gear:${GEAR_DB_PASSWORD:-gear}@db:5432/gear?sslmode=disable
+      GEAR_HTTP_ADDR: :8080
+      GEAR_APP_ORIGIN: ${GEAR_APP_ORIGIN:-http://localhost:5173}
+      GEAR_ENCRYPTION_KEY: ${GEAR_ENCRYPTION_KEY:-}
+      GEAR_WEB_DIST: ${GEAR_WEB_DIST:-./web/dist}
+    ports:
+      # Host 8081 avoids colliding with the `just dev` server on :8080.
+      - "8081:8080"
+    depends_on:
+      db:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "/app/gear-server", "-healthcheck"]
+      interval: 10s
+      timeout: 5s
+      start_period: 15s
+      retries: 10
+
+volumes:
+  gear_pgdata:

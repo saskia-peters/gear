@@ -1,0 +1,370 @@
+package http
+
+import (
+	"encoding/json"
+	"errors"
+	"net/http"
+	"time"
+
+	"github.com/go-chi/chi/v5"
+
+	"github.com/saskia-peters/gear/internal/platform/auth"
+	"github.com/saskia-peters/gear/internal/platform/httpapi"
+	toolscore "github.com/saskia-peters/gear/internal/tools/core"
+	usercore "github.com/saskia-peters/gear/internal/user/core"
+)
+
+// toolDTO is the GET payload — the typed core fields plus the tool's type
+// display name (JOIN), the inventory number and the attributes jsonb
+// passthrough. An EMPTY schedule_id means the tool inherits its type's default
+// schedule (AD-5); archived tools never reach the active surface. ArchivedAt
+// is null on the active surface and set (RFC3339) after a soft archive — it is
+// the observable state-change signal of the POST /{id}/archive response.
+type toolDTO struct {
+	ID              string         `json:"id"`
+	Name            string         `json:"name"`
+	ToolTypeID      string         `json:"tool_type_id"`
+	ToolTypeName    string         `json:"tool_type_name"`
+	ScheduleID      string         `json:"schedule_id"`
+	InventoryNumber string         `json:"inventory_number"`
+	Attributes      map[string]any `json:"attributes"`
+	ArchivedAt      *string        `json:"archived_at"`
+	CreatedAt       string         `json:"created_at"`
+	UpdatedAt       string         `json:"updated_at"`
+}
+
+// toolWriteDTO adds the server-authoritative German confirmation.
+type toolWriteDTO struct {
+	toolDTO
+	Message string `json:"message"`
+}
+
+
+// dashboardToolDTO is the minimal GET /api/v1/tools payload (Story 4-3b +
+// 6.1): the id, name, the tool type's display name (JOIN), the inventory
+// number (row meta) and the DERIVED status (FR-16/AD-4/AD-5 — computed on
+// read, never stored). Deliberately small — no schedule/attributes/audit data
+// on this surface (the admin surface exposes the full DTO).
+type dashboardToolDTO struct {
+	ID              string    `json:"id"`
+	Name            string    `json:"name"`
+	ToolTypeID      string    `json:"tool_type_id"`
+	ToolTypeName    string    `json:"tool_type_name"`
+	InventoryNumber string    `json:"inventory_number"`
+	Status          statusDTO `json:"status"`
+}
+
+
+
+// ToolRoutes returns the Tool tool router (Story 4.3 + 4-3b, FR-9/FR-10):
+// GET/POST / and PUT /{id}, POST /{id}/archive — soft archive only, NO DELETE
+// endpoint (archived rows keep FK history intact). The outer mount gate is
+// any-of [tools.manage, tool.edit] (Spec 4-3b): a tool.edit-only holder can
+// GET (list) + PUT (edit, incl. the inventory number) but NOT create/archive.
+// The writes POST / (create), POST /{id}/archive (archive) and POST /import
+// (bulk CSV import, Story 4.5) are wrapped in a chi GROUP that
+// re-applies a tools.manage-ONLY RequireAnyPermission (the real auth
+// middleware, mirroring the admin sub-surface precedent in
+// internal/user/adapters/http/admin.go) — the tighter write-only gate — while
+// GET / and PUT /{id} stay at the mount level. The core re-checks the same
+// split defense-in-depth (AD-6). 404/405 answer with the uniform JSON envelope
+// so no sub-path can emit a plain-text body.
+func (h *Handler) ToolRoutes() http.Handler {
+	r := chi.NewRouter()
+	r.NotFound(httpapi.NotFoundHandler())
+	r.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
+	r.Get("/", h.ListTools)
+	r.Put("/{id}", h.UpdateTool)
+
+	// Write-only sub-gate (Spec 4-3b + 4.5): POST / (create), POST /{id}/archive
+	// and POST /import re-apply a tools.manage-only RequireAnyPermission. The
+	// outer any-of gate already authenticated + resolved the caller's permission
+	// set; this group re-runs the REAL auth middleware so a tool.edit-only
+	// holder is denied the writes with the uniform 403 (no tool data, FR-19).
+	r.Group(func(writes chi.Router) {
+		writes.Use(auth.RequireAnyPermission(h.sessionValidator, h.permissionResolver,
+			[]string{toolscore.ToolsManagePermission}, "tools.manage write access denied", h.logger))
+		writes.Post("/", h.CreateTool)
+		writes.Post("/{id}/archive", h.ArchiveTool)
+		writes.Post("/import", h.ImportTools)
+	})
+
+	return r
+}
+
+// DashboardToolsRoutes returns the GEAR-module (non-admin) tool router (Story
+// 4-3b): GET / only, answering the minimal dashboard DTO (id, name, type
+// name, inventory number). The whole group is gated by `dashboard.view` at the
+// composition-root mount point — its OWN gate, one permission per surface
+// (AD-6) — so this router carries no gateway itself; 404/405 answer with the
+// uniform JSON envelope so no sub-path can emit a plain-text body. No writes
+// live here (admin-only, Story 4.3).
+func (h *Handler) DashboardToolsRoutes() http.Handler {
+	r := chi.NewRouter()
+	r.NotFound(httpapi.NotFoundHandler())
+	r.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
+	r.Get("/", h.ListDashboardTools)
+	return r
+}
+
+
+
+
+
+// ListTools handles GET /api/v1/admin/tools (GET_LIST_EMPTY / GET_LIST): it
+// returns the ACTIVE tool catalog, oldest first, each with its type display
+// name and inventory number. Archived tools never appear.
+//
+// Error mapping (uniform envelope):
+//   - 401 unauthorized when the caller is not authenticated
+//   - 403 forbidden when the caller lacks BOTH tools.manage and tool.edit
+//     (gateway or core re-check; no tool data exposed)
+//   - 500 internal_error on an unexpected failure
+func (h *Handler) ListTools(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFrom(r.Context())
+	if user == nil {
+		httpapi.WriteError(w, http.StatusUnauthorized, "unauthorized", "Authentifizierung erforderlich.")
+		return
+	}
+
+	tools, err := h.service.ListTools(r.Context(), user.ID)
+	if err != nil {
+		h.mapToolError(w, r, err, user)
+		return
+	}
+	out := make([]toolDTO, 0, len(tools))
+	for _, tool := range tools {
+		out = append(out, toToolDTO(tool))
+	}
+	httpapi.WriteJSON(w, http.StatusOK, out)
+}
+
+// ListDashboardTools handles GET /api/v1/tools (GET_LIST_EMPTY / GET_LIST,
+// Story 4-3b + 6.1): it returns the ACTIVE tool catalog, oldest first, each
+// with its type display name AND its derived status (FR-16/AD-4/AD-5), as the
+// minimal dashboard DTO. The `dashboard.view` gate lives at the
+// composition-root mount (all base roles hold it) — the core read is ungated
+// by design, so this handler never re-checks `tools.manage`. Archived tools
+// never appear.
+//
+// Error mapping (uniform envelope):
+//   - 401 unauthorized when the caller is not authenticated
+//   - 500 internal_error on an unexpected failure
+func (h *Handler) ListDashboardTools(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFrom(r.Context())
+	if user == nil {
+		httpapi.WriteError(w, http.StatusUnauthorized, "unauthorized", "Authentifizierung erforderlich.")
+		return
+	}
+
+	tools, err := h.service.ListToolsForDashboard(r.Context())
+	if err != nil {
+		h.mapToolError(w, r, err, user)
+		return
+	}
+	out := make([]dashboardToolDTO, 0, len(tools))
+	for _, tool := range tools {
+		out = append(out, dashboardToolDTO{
+			ID:              tool.ID,
+			Name:            tool.Name,
+			ToolTypeID:      tool.ToolTypeID,
+			ToolTypeName:    tool.ToolTypeName,
+			InventoryNumber: tool.InventoryNumber,
+			Status:          toStatusDTO(tool.Status),
+		})
+	}
+	httpapi.WriteJSON(w, http.StatusOK, out)
+}
+
+// CreateTool handles POST /api/v1/admin/tools (CREATE_VALID / CREATE_OVERRIDE /
+// CREATE_DUPLICATE / CREATE_INVALID / CREATE_BAD_TYPE / CREATE_BAD_OVERRIDE):
+// it persists a new tool belonging to exactly one tool type, with the optional
+// per-tool schedule override (empty → inherit the type default). The inventory
+// number is AUTO-ASSIGNED by the server (a client-sent value is ignored) and
+// returned in the response. Gated `tools.manage`-only by the write-only
+// sub-router (a tool.edit-only holder is denied). Audited (tool.create).
+func (h *Handler) CreateTool(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFrom(r.Context())
+	if user == nil {
+		httpapi.WriteError(w, http.StatusUnauthorized, "unauthorized", "Authentifizierung erforderlich.")
+		return
+	}
+
+	var input toolscore.ToolInput
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&input); err != nil {
+		httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", "Ungültiges JSON-Format.")
+		return
+	}
+
+	tool, err := h.service.CreateTool(r.Context(), user.ID, input)
+	if err != nil {
+		h.mapToolError(w, r, err, user)
+		return
+	}
+	h.log().Info("tool created", "email", user.Email, "name", tool.Name, "type", tool.ToolTypeName)
+
+	httpapi.WriteJSON(w, http.StatusCreated, toolWriteDTO{toolDTO: toToolDTO(tool), Message: toolscore.MsgToolSaved})
+}
+
+// UpdateTool handles PUT /api/v1/admin/tools/{id} (UPDATE_CLEAR_OVERRIDE /
+// UPDATE_INVENTORY): it persists the tool's name, type, override, inventory
+// number and attributes; an EMPTY schedule_id CLEARS the stored override (the
+// tool inherits its type's default again, AD-5). A non-empty inventory_number
+// edits the stored number (uniquely enforced); an empty one is rejected 400
+// (a tool always has one). Updating an already-archived tool answers the 404
+// sentinel (UPDATE_ARCHIVED). Any-of [tools.manage, tool.edit] holder may call
+// it. Audited (tool.update).
+func (h *Handler) UpdateTool(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFrom(r.Context())
+	if user == nil {
+		httpapi.WriteError(w, http.StatusUnauthorized, "unauthorized", "Authentifizierung erforderlich.")
+		return
+	}
+
+	id := chi.URLParam(r, "id")
+	var input toolscore.ToolInput
+	if err := json.NewDecoder(http.MaxBytesReader(w, r.Body, 1<<20)).Decode(&input); err != nil {
+		httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", "Ungültiges JSON-Format.")
+		return
+	}
+
+	tool, err := h.service.UpdateTool(r.Context(), user.ID, id, input)
+	if err != nil {
+		h.mapToolError(w, r, err, user)
+		return
+	}
+	h.log().Info("tool updated", "email", user.Email, "id", id, "name", tool.Name)
+
+	httpapi.WriteJSON(w, http.StatusOK, toolWriteDTO{toolDTO: toToolDTO(tool), Message: toolscore.MsgToolSaved})
+}
+
+// ArchiveTool handles POST /api/v1/admin/tools/{id}/archive (ARCHIVE): it
+// soft-archives the tool — archived_at is set and the row leaves the active
+// list. Archiving an already-archived row answers the 404 sentinel. Gated
+// `tools.manage`-only by the write-only sub-router (a tool.edit-only holder is
+// denied). Audited (tool.archive).
+func (h *Handler) ArchiveTool(w http.ResponseWriter, r *http.Request) {
+	user := auth.UserFrom(r.Context())
+	if user == nil {
+		httpapi.WriteError(w, http.StatusUnauthorized, "unauthorized", "Authentifizierung erforderlich.")
+		return
+	}
+
+	id := chi.URLParam(r, "id")
+	tool, err := h.service.ArchiveTool(r.Context(), user.ID, id)
+	if err != nil {
+		h.mapToolError(w, r, err, user)
+		return
+	}
+	h.log().Info("tool archived", "email", user.Email, "id", id, "name", tool.Name)
+
+	httpapi.WriteJSON(w, http.StatusOK, toolWriteDTO{toolDTO: toToolDTO(tool), Message: toolscore.MsgToolArchived})
+}
+
+// importBodyLimit caps the CSV import body at 5 MB (IMPORT_TOO_LARGE → German
+// 400). The multipart overhead is part of the cap, so a "5 MB CSV" plus form
+// framing still fits comfortably.
+const importBodyLimit = 5 << 20
+
+// importParseSentinels distinguish the CSV parse failures so the handler can
+// surface the German 400 microcopy (the parse layer returns sentinels, the
+// message stays at the HTTP boundary — matching the codebase convention).
+var (
+	errImportCSVUnreadable  = errors.New("tools http: unreadable csv")
+	errImportCSVEmpty       = errors.New("tools http: empty csv")
+	errImportCSVNotUTF8     = errors.New("tools http: csv is not utf-8")
+	errImportCSVMissingCols = errors.New("tools http: missing required csv columns")
+	errImportCSVDupCols     = errors.New("tools http: duplicate csv columns")
+	errImportCSVNoRows      = errors.New("tools http: csv has no data rows")
+)
+
+// ImportTools handles POST /api/v1/admin/tools/import (IMPORT_HAPPY /
+// IMPORT_MIXED / IMPORT_MISSING_HEADER / IMPORT_MALFORMED / IMPORT_EMPTY /
+// IMPORT_TOO_LARGE / IMPORT_FORBIDDEN, Story 4.5, FR-9/FR-23): it parses the
+// uploaded CSV (multipart field `file`, UTF-8, encoding/csv with trimmed
+// leading space) into structured core rows — the hexagon boundary: NO CSV
+// parsing happens in core — maps the header columns case-insensitively by
+// name (`name`/`tool_type` required, `schedule`/`inventory_number` optional,
+// extra columns ignored) and delegates to the service, which validates +
+// partitions + batch-persists. Gated `tools.manage`-ONLY by the write-only
+// sub-router; the core re-checks defense-in-depth (AD-6). Audited once per call.
+//
+// Error mapping (uniform envelope):
+//   - 401 unauthorized when the caller is not authenticated
+//   - 403 forbidden when the caller lacks tools.manage (no tool data, AD-6)
+//   - 400 invalid_request (German) for a missing `file` field, a body over
+//     5 MB, an unparseable CSV, non-UTF-8 bytes, duplicate header columns, a
+//     missing `name`/`tool_type` header column, an empty file or a header-only
+//     file — BEFORE any row is processed
+//   - 200 { imported, errors[] } when the import ran (per-row errors for the
+//     invalid rows; the SPA renders them + offers the error report download)
+
+// toToolDTO maps the domain tool to the wire payload. The active surface never
+// carries an archived row; an empty schedule_id (inherit) serializes as "".
+// ArchivedAt is null for an active tool and a set RFC3339 string after a soft
+// archive (the POST /{id}/archive state-change signal).
+func toToolDTO(tool *toolscore.Tool) toolDTO {
+	var archivedAt *string
+	if tool.ArchivedAt != nil {
+		s := tool.ArchivedAt.UTC().Format(time.RFC3339)
+		archivedAt = &s
+	}
+	return toolDTO{
+		ID:              tool.ID,
+		Name:            tool.Name,
+		ToolTypeID:      tool.ToolTypeID,
+		ToolTypeName:    tool.ToolTypeName,
+		ScheduleID:      tool.ScheduleID,
+		InventoryNumber: tool.InventoryNumber,
+		Attributes:      attributesOrEmpty(tool.Attributes),
+		ArchivedAt:      archivedAt,
+		CreatedAt:       tool.CreatedAt.UTC().Format(time.RFC3339),
+		UpdatedAt:       tool.UpdatedAt.UTC().Format(time.RFC3339),
+	}
+}
+
+// mapInspectionError writes the uniform envelope for the inspection service
+// errors (Story 5.1 + 5.3). The qualification-gate denial is its OWN 403
+// with the German reason (MsgToolQualificationMissing) — distinct from the
+
+// mapToolError writes the uniform envelope for the tool service's errors.
+func (h *Handler) mapToolError(w http.ResponseWriter, r *http.Request, err error, user *usercore.User) {
+	var inv *toolscore.InvalidToolError
+	switch {
+	case errors.Is(err, toolscore.ErrForbidden):
+		h.log().Warn("tool access forbidden", "email", user.Email)
+		httpapi.WriteError(w, http.StatusForbidden, "forbidden", "Keine Berechtigung.")
+	case errors.Is(err, toolscore.ErrToolNotFound):
+		httpapi.WriteError(w, http.StatusNotFound, "not_found", toolscore.MsgToolNotFound)
+	case errors.Is(err, toolscore.ErrInvalidAttributes):
+		mapInvalidAttributesError(w, err)
+	case errors.As(err, &inv):
+		httpapi.WriteError(w, http.StatusBadRequest, "invalid_request", inv.Message)
+	default:
+		// Client-abort guard: a canceled request has no one to answer.
+		if r.Context().Err() != nil {
+			return
+		}
+		h.log().Error("tool request failed unexpectedly", "error", err)
+		httpapi.WriteError(w, http.StatusInternalServerError, "internal_error", "Ein interner Fehler ist aufgetreten.")
+	}
+}
+
+// toChecklistItemDTOs maps the ordered domain checklist items to the wire shape
+// (Story 5.2 mode-aware start / Story 4.2 type surface). Shared by the
+// tool-type and inspection-start DTOs so the two surfaces serialize items
+// identically.
+func toChecklistItemDTOs(items []toolscore.ToolTypeChecklistItem) []toolTypeChecklistItemDTO {
+	out := make([]toolTypeChecklistItemDTO, 0, len(items))
+	for _, item := range items {
+		out = append(out, toolTypeChecklistItemDTO{
+			ID:       item.ID,
+			Position: item.Position,
+			Label:    item.Label,
+		})
+	}
+	return out
+}
+
+
+

@@ -1,0 +1,1088 @@
+package postgres
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"time"
+
+	"github.com/jackc/pgx/v5"
+	"github.com/jackc/pgx/v5/pgconn"
+	"github.com/jackc/pgx/v5/pgtype"
+
+	"github.com/saskia-peters/gear/internal/user/core"
+)
+
+// Repository wraps the sqlc-generated Queries to implement core.Repository.
+type Repository struct {
+	queries *Queries
+}
+
+// NewRepository creates a new postgres user repository.
+func NewRepository(queries *Queries) *Repository {
+	return &Repository{queries: queries}
+}
+
+// CreateRegisteredUser inserts a new user record in pending_approval state.
+func (r *Repository) CreateRegisteredUser(ctx context.Context, email, displayName, firstName, lastName, passwordHash string) (*core.User, error) {
+	row, err := r.queries.CreateRegisteredUser(ctx, CreateRegisteredUserParams{
+		Email:        email,
+		DisplayName:  displayName,
+		FirstName:    firstName,
+		LastName:     lastName,
+		PasswordHash: passwordHash,
+	})
+	if err != nil {
+		// Reliable duplicate-key detection (review finding): match the Postgres
+		// error code directly instead of fragile string matching. The core's
+		// isDuplicateKeyErr remains only as a belt-and-suspenders fallback.
+		if isPgUniqueViolation(err) {
+			return nil, core.ErrUserAlreadyExists
+		}
+		return nil, err
+	}
+
+	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
+		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail, row.OneTimePasswordHash, row.OneTimePasswordExpiresAt)
+}
+
+// GetUserByEmail queries a user by their email address. If not found, returns nil, nil.
+func (r *Repository) GetUserByEmail(ctx context.Context, email string) (*core.User, error) {
+	row, err := r.queries.GetUserByEmail(ctx, email)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+
+	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
+		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail, row.OneTimePasswordHash, row.OneTimePasswordExpiresAt)
+}
+
+// ListPermissionsByUser resolves the user's live permission set (AD-12):
+// the additive union of permission-group memberships and direct grants.
+func (r *Repository) ListPermissionsByUser(ctx context.Context, userID string) ([]string, error) {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return nil, err
+	}
+	return r.queries.ListPermissionsByUser(ctx, uid)
+}
+
+// ResolveDisplayNames returns the id → display_name map for the EXISTING users
+// among the given set (Story 6.3, FR-18/AD-8): the Tool history surface
+// resolves inspector/actor display names through this seam — the Tool module
+// never joins user tables (AD-8/AD-11). A user id ABSENT from the result (a
+// deleted account, Story 3.4 not yet built) is simply a MISSING key — the Tool
+// core maps it to the literal "Deleted User", never a 404 or an empty string.
+// An empty input answers an empty map (no query).
+func (r *Repository) ResolveDisplayNames(ctx context.Context, userIDs []string) (map[string]string, error) {
+	uuids, err := uuidSlice(userIDs)
+	if err != nil {
+		return nil, err
+	}
+	if len(uuids) == 0 {
+		return map[string]string{}, nil
+	}
+	rows, err := r.queries.ListUsersByIDs(ctx, uuids)
+	if err != nil {
+		return nil, err
+	}
+	out := make(map[string]string, len(rows))
+	for _, row := range rows {
+		out[uuidToString(row.ID.Bytes)] = row.DisplayName
+	}
+	return out, nil
+}
+
+// CreateSession persists a new server-side session row and returns its domain
+// representation (NFR-S2).
+func (r *Repository) CreateSession(ctx context.Context, userID, tokenHash string, expiresAt time.Time) (*core.Session, error) {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return nil, err
+	}
+	row, err := r.queries.CreateSession(ctx, CreateSessionParams{
+		UserID:    uid,
+		TokenHash: tokenHash,
+		ExpiresAt: pgtype.Timestamptz{Time: expiresAt, Valid: true},
+	})
+	if err != nil {
+		return nil, err
+	}
+	return &core.Session{
+		ID:        uuidToString(row.ID.Bytes),
+		UserID:    uuidToString(row.UserID.Bytes),
+		TokenHash: row.TokenHash,
+		ExpiresAt: row.ExpiresAt.Time,
+		CreatedAt: row.CreatedAt.Time,
+	}, nil
+}
+
+// GetSessionByTokenHash looks up a session by its hashed token, returning the
+// associated user. Not found maps to core.ErrSessionNotFound.
+func (r *Repository) GetSessionByTokenHash(ctx context.Context, tokenHash string) (*core.Session, error) {
+	row, err := r.queries.GetSessionByTokenHash(ctx, tokenHash)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, core.ErrSessionNotFound
+		}
+		return nil, err
+	}
+
+	var attrs map[string]any
+	if len(row.Attributes) > 0 {
+		if err := json.Unmarshal(row.Attributes, &attrs); err != nil {
+			// A stored attributes value that is not a JSON object (written
+			// out-of-band) must surface as a clear error, never a crash or a
+			// silent data-loss read (Story 1.9 boundary). The auth gateway maps
+			// this session-resolution failure to the uniform 401 envelope.
+			return nil, fmt.Errorf("user postgres: invalid stored attributes jsonb: %w", err)
+		}
+	}
+
+	secret := ""
+	if row.TotpSecretEncrypted.Valid {
+		secret = row.TotpSecretEncrypted.String
+	}
+	pendingSecret := ""
+	if row.PendingTotpSecretEncrypted.Valid {
+		pendingSecret = row.PendingTotpSecretEncrypted.String
+	}
+	var pendingExpiry time.Time
+	if row.PendingTotpExpiresAt.Valid {
+		pendingExpiry = row.PendingTotpExpiresAt.Time
+	}
+	pendingEmail := ""
+	if row.PendingEmail.Valid {
+		pendingEmail = row.PendingEmail.String
+	}
+
+return &core.Session{
+			ID:        uuidToString(row.ID.Bytes),
+			UserID:    uuidToString(row.UserID.Bytes),
+			TokenHash: row.TokenHash,
+			ExpiresAt: row.ExpiresAt.Time,
+			CreatedAt: row.CreatedAt.Time,
+			User: &core.User{
+				ID:                         uuidToString(row.UserID.Bytes),
+				Email:                      row.Email,
+				PendingEmail:               pendingEmail,
+				DisplayName:                row.DisplayName,
+				FirstName:                  row.FirstName,
+				LastName:                   row.LastName,
+				State:                      core.UserState(row.State),
+				IsMFAEnabled:               row.IsMfaEnabled,
+				MustChangePassword:         row.MustChangePassword,
+				PasswordHash:               row.PasswordHash,
+				TotpSecretEncrypted:        secret,
+				PendingTotpSecretEncrypted: pendingSecret,
+				PendingTotpExpiresAt:       pendingExpiry,
+				Attributes:                 attrs,
+			},
+		}, nil
+}
+
+// DeleteSessionByTokenHash removes a session row server-side by its hashed
+// token (NFR-S2). Atomic: no Get-then-Delete window. Unknown hashes are a no-op.
+func (r *Repository) DeleteSessionByTokenHash(ctx context.Context, tokenHash string) error {
+	return r.queries.DeleteSessionByTokenHash(ctx, tokenHash)
+}
+
+// GetLoginAttempts reads the email's login attempt record (FR-3). Returns nil,
+// nil when the email has no tracked attempts yet.
+func (r *Repository) GetLoginAttempts(ctx context.Context, email string) (*core.LoginAttempts, error) {
+	row, err := r.queries.GetLoginAttempts(ctx, email)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	return &core.LoginAttempts{
+		Email:        row.Email,
+		FailedCount:  int(row.FailedCount),
+		LockoutUntil: row.LockoutUntil.Time,
+		UpdatedAt:    row.UpdatedAt.Time,
+	}, nil
+}
+
+// IncrementLoginAttempts atomically records a failed login for the email: it
+// increments the failure counter and sets the progressive lockout window when a
+// threshold is crossed, in a single statement (FR-3) so concurrent attempts for
+// the same email cannot lose updates.
+func (r *Repository) IncrementLoginAttempts(ctx context.Context, email string) error {
+	return r.queries.IncrementLoginAttempts(ctx, email)
+}
+
+// ClearLoginAttempts resets the email's failure counter and lockout window
+// after a successful login (fresh cycle).
+func (r *Repository) ClearLoginAttempts(ctx context.Context, email string) error {
+	return r.queries.ClearLoginAttempts(ctx, email)
+}
+
+// SetUserTotpSecret persists the AES-256-GCM encrypted TOTP secret and enables
+// MFA for the user (FR-4/NFR-S4). The plaintext secret is never stored.
+func (r *Repository) SetUserTotpSecret(ctx context.Context, userID, encryptedSecret string) error {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return err
+	}
+	return r.queries.SetUserTotpSecret(ctx, SetUserTotpSecretParams{
+		ID:                  uid,
+		TotpSecretEncrypted: pgtype.Text{String: encryptedSecret, Valid: true},
+	})
+}
+
+// ClearUserTotpSecret disables MFA and clears the stored encrypted secret
+// (FR-4).
+func (r *Repository) ClearUserTotpSecret(ctx context.Context, userID string) error {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return err
+	}
+	return r.queries.ClearUserTotpSecret(ctx, uid)
+}
+
+// SetUserPendingTotpSecret persists a short-lived pending TOTP enrollment: the
+// freshly generated secret is stored ENCRYPTED at rest (NFR-S4) with an expiry
+// (FR-4 / review finding 1.6-1).
+func (r *Repository) SetUserPendingTotpSecret(ctx context.Context, userID, encryptedSecret string, expiresAt time.Time) error {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return err
+	}
+	return r.queries.SetUserPendingTotpSecret(ctx, SetUserPendingTotpSecretParams{
+		ID:                       uid,
+		PendingTotpSecretEncrypted: pgtype.Text{String: encryptedSecret, Valid: true},
+		PendingTotpExpiresAt:     pgtype.Timestamptz{Time: expiresAt, Valid: true},
+	})
+}
+
+// ClearUserPendingTotpSecret clears a pending TOTP enrollment after the confirm
+// step (success or failure).
+func (r *Repository) ClearUserPendingTotpSecret(ctx context.Context, userID string) error {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return err
+	}
+	return r.queries.ClearUserPendingTotpSecret(ctx, uid)
+}
+
+// DeleteSessionsByUser revokes every session of a user (NFR-S2).
+func (r *Repository) DeleteSessionsByUser(ctx context.Context, userID string) error {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return err
+	}
+	return r.queries.DeleteSessionsByUser(ctx, uid)
+}
+
+// DeleteSessionsByUserExcept revokes all of a user's sessions except the one
+// identified by the given token hash (NFR-S2 / review finding 1.6-2).
+func (r *Repository) DeleteSessionsByUserExcept(ctx context.Context, userID, exceptTokenHash string) error {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return err
+	}
+	return r.queries.DeleteSessionsByUserExcept(ctx, DeleteSessionsByUserExceptParams{
+		UserID:     uid,
+		TokenHash: exceptTokenHash,
+	})
+}
+
+// UpdateUserPassword persists a new Argon2id password hash for the user and
+// returns the updated user (FR-25/AD-13). Only the hash is stored; the
+// plaintext password is never written.
+func (r *Repository) UpdateUserPassword(ctx context.Context, userID, passwordHash string) (*core.User, error) {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return nil, err
+	}
+	row, err := r.queries.UpdateUserPassword(ctx, UpdateUserPasswordParams{
+		ID:           uid,
+		PasswordHash: passwordHash,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
+		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail, row.OneTimePasswordHash, row.OneTimePasswordExpiresAt)
+}
+
+// UpdateUserProfile persists the user's editable base data (first/last/display
+// name, Story 2.1) and the full custom-attribute set (Story 1.9) and returns
+// the updated user. Email and state are never touched. The attributes map is
+// marshalled to JSONB for storage (a nil map becomes `{}`). Absent-vs-clear is
+// decided by the core (review finding): the core passes the current value
+// through for "leave unchanged", so the repository always receives a concrete
+// map to write. An unknown user ID maps to core.ErrUserNotFound.
+func (r *Repository) UpdateUserProfile(ctx context.Context, userID, firstName, lastName, displayName string, attributes map[string]any) (*core.User, error) {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return nil, err
+	}
+	attrsJSON := []byte("{}")
+	if attributes != nil {
+		raw, err := json.Marshal(attributes)
+		if err != nil {
+			return nil, fmt.Errorf("user postgres: failed to marshal attributes: %w", err)
+		}
+		attrsJSON = raw
+	}
+	row, err := r.queries.UpdateUserProfile(ctx, UpdateUserProfileParams{
+		ID:          uid,
+		FirstName:   firstName,
+		LastName:    lastName,
+		DisplayName: displayName,
+		Attributes:  attrsJSON,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, core.ErrUserNotFound
+		}
+		return nil, err
+	}
+	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
+		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail, row.OneTimePasswordHash, row.OneTimePasswordExpiresAt)
+}
+
+// StagePendingEmail stores a staged email change (Story 2.1) in a single
+// conditional UPDATE: the address is persisted only while NO OTHER account
+// holds it as its current email or as an already-staged pending_email
+// (case-insensitive). This is the DB-level TOCTOU guard that keeps a racing
+// registration from leaving a mixed collision. Both "no row updated" (the
+// address is taken) and a duplicate-key violation (23505, the pending_email
+// UNIQUE backstop) map to core.ErrEmailInUse.
+func (r *Repository) StagePendingEmail(ctx context.Context, userID, pendingEmail string) (*core.User, error) {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return nil, err
+	}
+	row, err := r.queries.StagePendingEmail(ctx, StagePendingEmailParams{
+		ID:           uid,
+		PendingEmail: pgtype.Text{String: pendingEmail, Valid: true},
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, core.ErrEmailInUse
+		}
+		if isPgUniqueViolation(err) {
+			return nil, core.ErrEmailInUse
+		}
+		return nil, err
+	}
+	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
+		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail, row.OneTimePasswordHash, row.OneTimePasswordExpiresAt)
+}
+
+// ClearPendingEmail clears a staged email change (pending_email -> NULL) for
+// the user. Used by the Epic 2 admin workflow when the staged address becomes
+// the real email or the change is cancelled. Unknown user IDs are a no-op.
+func (r *Repository) ClearPendingEmail(ctx context.Context, userID string) error {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return err
+	}
+	return r.queries.ClearPendingEmail(ctx, uid)
+}
+
+// RefreshSessionUser is a no-op: the postgres session store never caches a
+// user snapshot — GetSessionByTokenHash re-derives it live from users via the
+// JOIN on every Validate — so profile edits are always reflected immediately
+// (review finding: stale session snapshot).
+func (r *Repository) RefreshSessionUser(_ context.Context, _ *core.User) error {
+	return nil
+}
+
+// InsertAuditEvent appends a row to the User-owned append-only audit trail
+// (NFR-O1/NFR-O2, spine table 11). It records actor_user_id, operation,
+// created_at plus an optional operation_detail (e.g. the admin-recovery
+// Begründung and target email) and a severity ('normal' by default, 'high' for
+// recovery events) — never password values or other sensitive payloads. The
+// detail and severity are optional; callers that do not care pass "".
+func (r *Repository) InsertAuditEvent(ctx context.Context, userID, operation, detail, severity string) error {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return err
+	}
+	sev := severity
+	if sev == "" {
+		sev = "normal"
+	}
+	return r.queries.InsertAuditEvent(ctx, InsertAuditEventParams{
+		ActorUserID:     uid,
+		Operation:       operation,
+		OperationDetail: pgtype.Text{String: detail, Valid: detail != ""},
+		Severity:        sev,
+	})
+}
+
+// InsertAuditEventAnonymous appends an audit row WITHOUT an actor (actor_user_id
+// stays NULL). Used for anti-enumeration paths with no authenticated user, e.g.
+// a forgot-password request for an unknown email (review findings 1.8-3/1.8-10):
+// enumeration attempts leave a trail (NFR-O1) and the path performs
+// comparable-cost work. The Story 7.7 backup job also audits through here (it
+// has no user session) with a detail + severity, mirroring the actor path.
+func (r *Repository) InsertAuditEventAnonymous(ctx context.Context, operation, detail, severity string) error {
+	sev := severity
+	if sev == "" {
+		sev = "normal"
+	}
+	return r.queries.InsertAuditEventAnonymous(ctx, InsertAuditEventAnonymousParams{
+		Operation:       operation,
+		OperationDetail: pgtype.Text{String: detail, Valid: detail != ""},
+		Severity:        sev,
+	})
+}
+
+// CreatePasswordResetToken stores the SHA-256 hash of a fresh single-use reset
+// token, atomically invalidating every earlier token of the user (only the
+// latest request stays valid, FR-26/AD-13). The raw token is never persisted.
+func (r *Repository) CreatePasswordResetToken(ctx context.Context, userID, tokenHash string, expiresAt time.Time) error {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return err
+	}
+	return r.queries.CreatePasswordResetToken(ctx, CreatePasswordResetTokenParams{
+		UserID:    uid,
+		TokenHash: tokenHash,
+		ExpiresAt: pgtype.Timestamptz{Time: expiresAt, Valid: true},
+	})
+}
+
+// GetPasswordResetTokenByHash resolves a reset token by its stored hash with
+// its owning user (JOIN on users), so the completion step can verify the
+// account is still active. An unknown hash maps to core.ErrResetTokenInvalid.
+func (r *Repository) GetPasswordResetTokenByHash(ctx context.Context, tokenHash string) (*core.PasswordResetToken, error) {
+	row, err := r.queries.GetPasswordResetTokenByHash(ctx, tokenHash)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, core.ErrResetTokenInvalid
+		}
+		return nil, err
+	}
+	return &core.PasswordResetToken{
+		ID:        uuidToString(row.ID.Bytes),
+		UserID:    uuidToString(row.UserID.Bytes),
+		TokenHash: row.TokenHash,
+		ExpiresAt: row.ExpiresAt.Time,
+		CreatedAt: row.CreatedAt.Time,
+		User: &core.User{
+			ID:                 uuidToString(row.UserID.Bytes),
+			Email:              row.Email,
+			DisplayName:        row.DisplayName,
+			FirstName:          row.FirstName,
+			LastName:           row.LastName,
+			State:              core.UserState(row.State),
+			IsMFAEnabled:       row.IsMfaEnabled,
+			MustChangePassword: row.MustChangePassword,
+			PasswordHash:       row.PasswordHash,
+		},
+	}, nil
+}
+
+// ConsumePasswordResetToken atomically invalidates a reset token and returns it
+// with its owning user (review finding 1.8-5): the DELETE and the read happen in
+// one statement, so two concurrent completions with the same token cannot both
+// succeed — the loser sees no row and this maps to core.ErrResetTokenInvalid.
+func (r *Repository) ConsumePasswordResetToken(ctx context.Context, tokenHash string) (*core.PasswordResetToken, error) {
+	row, err := r.queries.ConsumePasswordResetToken(ctx, tokenHash)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, core.ErrResetTokenInvalid
+		}
+		return nil, err
+	}
+	return &core.PasswordResetToken{
+		ID:        uuidToString(row.ID.Bytes),
+		UserID:    uuidToString(row.UserID.Bytes),
+		TokenHash: row.TokenHash,
+		ExpiresAt: row.ExpiresAt.Time,
+		CreatedAt: row.CreatedAt.Time,
+		User: &core.User{
+			ID:                 uuidToString(row.UserID.Bytes),
+			Email:              row.Email,
+			DisplayName:        row.DisplayName,
+			FirstName:          row.FirstName,
+			LastName:           row.LastName,
+			State:              core.UserState(row.State),
+			IsMFAEnabled:       row.IsMfaEnabled,
+			MustChangePassword: row.MustChangePassword,
+			PasswordHash:       row.PasswordHash,
+		},
+	}, nil
+}
+
+// DeletePasswordResetToken invalidates a single reset token after use
+// (single-use, FR-26). Unknown hashes are a no-op.
+func (r *Repository) DeletePasswordResetToken(ctx context.Context, tokenHash string) error {
+	return r.queries.DeletePasswordResetToken(ctx, tokenHash)
+}
+
+// DeleteExpiredPasswordResetTokens lazily purges a user's expired reset tokens
+// (review finding 1.8-7): run on each reset request so expired rows do not
+// accumulate indefinitely. Unknown users are a no-op.
+func (r *Repository) DeleteExpiredPasswordResetTokens(ctx context.Context, userID string) error {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return err
+	}
+	return r.queries.DeleteExpiredPasswordResetTokens(ctx, uid)
+}
+
+// SetUserMustChangePassword flags an active account so the next login forces a
+// mandatory password change (FR-26, SMTP-not-configured fallback / Epic 2
+// one-time password).
+func (r *Repository) SetUserMustChangePassword(ctx context.Context, userID string) error {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return err
+	}
+	return r.queries.SetUserMustChangePassword(ctx, uid)
+}
+
+// ClearUserMustChangePassword clears the mandatory-change flag once the user
+// completes a password change via the forced flow or a reset link (FR-26).
+func (r *Repository) ClearUserMustChangePassword(ctx context.Context, userID string) error {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return err
+	}
+	return r.queries.ClearUserMustChangePassword(ctx, uid)
+}
+
+// GetUserByID returns a single user's profile + state for the admin surfaces
+// (Story 2.6 / Spec 2.8 one-time-password target check). No secret material is
+// selected. An unknown or malformed id maps to core.ErrAdminUserNotFound.
+func (r *Repository) GetUserByID(ctx context.Context, userID string) (*core.User, error) {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return nil, core.ErrAdminUserNotFound
+	}
+	row, err := r.queries.GetUserByID(ctx, uid)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, core.ErrAdminUserNotFound
+		}
+		return nil, err
+	}
+	return &core.User{
+		ID:          uuidToString(row.ID.Bytes),
+		Email:       row.Email,
+		DisplayName: row.DisplayName,
+		FirstName:   row.FirstName,
+		LastName:    row.LastName,
+		State:       core.UserState(row.State),
+	}, nil
+}
+
+// GetUserByIDFull returns the FULL user row by id (Story 3.3, FR-24/AD-8): the
+// same column set as GetUserByEmail — attributes + created_at/updated_at AND
+// the secret columns (password hash, encrypted TOTP secret, pending TOTP
+// secret, one-time-password hash). The DSGVO export reads this row and STRIPS
+// every authenticator in the core before assembly (REPORT_SECRETS); it is
+// deliberately never serialized directly. An unknown or malformed id maps to
+// core.ErrAdminUserNotFound.
+func (r *Repository) GetUserByIDFull(ctx context.Context, userID string) (*core.User, error) {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return nil, core.ErrAdminUserNotFound
+	}
+	row, err := r.queries.GetUserByIDFull(ctx, uid)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, core.ErrAdminUserNotFound
+		}
+		return nil, err
+	}
+	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
+		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail, row.OneTimePasswordHash, row.OneTimePasswordExpiresAt)
+}
+
+// ListSessionsByUser returns the authentication sessions of a user (Story 3.3,
+// FR-24 auth history), newest first. The token hash is deliberately NOT
+// selected — the DSGVO report never carries an authenticator (REPORT_SECRETS);
+// only identity + the created/expiry timestamps are exported. An unknown or
+// malformed user id answers an EMPTY list, nil-safe. The existing
+// sessions.user_id_idx serves the read.
+func (r *Repository) ListSessionsByUser(ctx context.Context, userID string) ([]core.UserSessionExport, error) {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return []core.UserSessionExport{}, nil
+	}
+	rows, err := r.queries.ListSessionsByUser(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]core.UserSessionExport, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, core.UserSessionExport{
+			ID:        uuidToString(row.ID.Bytes),
+			CreatedAt: row.CreatedAt.Time,
+			ExpiresAt: row.ExpiresAt.Time,
+		})
+	}
+	return out, nil
+}
+
+// SetUserOneTimePassword upserts an admin-issued one-time password for an
+// ACTIVE account (Spec 2.8): it stores the Argon2id hash + TTL expiry and flips
+// must_change_password so the next login forces the Story 1.8 change flow. The
+// plaintext OTP is never stored (NFR-S4). Re-issuing REPLACES the hash/expiry,
+// so the old OTP is invalid immediately (RE_ISSUE). It reports whether a row
+// was actually affected: a zero-row write (the target vanished between the
+// eligibility read and this update) returns false so the caller never hands
+// over a credential that cannot work.
+func (r *Repository) SetUserOneTimePassword(ctx context.Context, userID, hash string, expiresAt time.Time) (bool, error) {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return false, err
+	}
+	n, err := r.queries.SetUserOneTimePassword(ctx, SetUserOneTimePasswordParams{
+		ID:                         uid,
+		OneTimePasswordHash:        hash,
+		OneTimePasswordExpiresAt:   pgtype.Timestamptz{Time: expiresAt, Valid: true},
+	})
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// ClearUserOneTimePassword atomically consumes a single-use one-time password
+// (Spec 2.8 Design Notes): the UPDATE is a compare-and-swap on the stored hash
+// (WHERE id AND one_time_password_hash = $2), so two concurrent logins
+// presenting the same OTP cannot both succeed — the losing statement affects
+// zero rows and this method reports false, which the caller treats as an
+// already-consumed OTP (login fails).
+func (r *Repository) ClearUserOneTimePassword(ctx context.Context, userID, hash string) (bool, error) {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return false, err
+	}
+	n, err := r.queries.ClearUserOneTimePassword(ctx, ClearUserOneTimePasswordParams{
+		ID:                  uid,
+		OneTimePasswordHash: hash,
+	})
+	if err != nil {
+		return false, err
+	}
+	return n > 0, nil
+}
+
+// IsUserInPermissionGroup reports whether the user is a member of the named
+// permission group (AD-12), e.g. the 'admin' group. It drives the
+// server-authoritative IsAdmin flag for ADMIN module visibility (Story 1.8).
+func (r *Repository) IsUserInPermissionGroup(ctx context.Context, userID, groupName string) (bool, error) {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return false, err
+	}
+	return r.queries.IsUserInPermissionGroup(ctx, IsUserInPermissionGroupParams{
+		UserID: uid,
+		Name:   groupName,
+	})
+}
+
+// CountActiveAdmins reports how many users are BOTH active AND members of the
+// admin permission group (FR-27 last-admin guard): recovery of the last
+// remaining active admin is deliberately disabled via self-service.
+func (r *Repository) CountActiveAdmins(ctx context.Context) (int, error) {
+	n, err := r.queries.CountActiveAdmins(ctx)
+	if err != nil {
+		return 0, err
+	}
+	return int(n), nil
+}
+
+// CreateAdminRecoveryRequest stores a recovery-marked single-use hashed 30-min
+// token for the target admin, atomically invalidating every earlier recovery
+// request of that user (only the latest stays valid, FR-27) and stamps the
+// requesting admin (requestedByUserID) so the core can enforce the
+// dual-control rule (a requester can never approve their own request). The raw
+// token is never persisted.
+func (r *Repository) CreateAdminRecoveryRequest(ctx context.Context, userID, requestedByUserID, tokenHash string, expiresAt time.Time) error {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return err
+	}
+	requester, err := uuidFromString(requestedByUserID)
+	if err != nil {
+		return err
+	}
+	return r.queries.CreateAdminRecoveryRequest(ctx, CreateAdminRecoveryRequestParams{
+		UserID:            uid,
+		RequestedByUserID: requester,
+		TokenHash:         tokenHash,
+		ExpiresAt:         pgtype.Timestamptz{Time: expiresAt, Valid: true},
+	})
+}
+
+// ApproveAdminRecovery mints a fresh token hash onto the target's latest
+// pending admin-recovery request and stamps the approving admin (B), returning
+// the request id (FR-27). A zero-row update — no pending request, already
+// approved, or expired — maps to core.ErrAdminRecoveryInvalid.
+func (r *Repository) ApproveAdminRecovery(ctx context.Context, userID, approvedByUserID, tokenHash string) (string, error) {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return "", err
+	}
+	approver, err := uuidFromString(approvedByUserID)
+	if err != nil {
+		return "", err
+	}
+	id, err := r.queries.ApproveAdminRecovery(ctx, ApproveAdminRecoveryParams{
+		UserID:           uid,
+		ApprovedByUserID: approver,
+		TokenHash:        tokenHash,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return "", core.ErrAdminRecoveryInvalid
+		}
+		return "", err
+	}
+	return uuidToString(id.Bytes), nil
+}
+
+// ConsumeAdminRecoveryToken atomically consumes an APPROVED admin-recovery token
+// (FR-27): the DELETE and the read happen in one statement, so two concurrent
+// completions with the same token cannot both succeed — the loser sees no row
+// and this maps to core.ErrAdminRecoveryInvalid. Only tokens that are
+// recovery-marked AND approved are consumed.
+func (r *Repository) ConsumeAdminRecoveryToken(ctx context.Context, tokenHash string) (*core.AdminRecoveryToken, error) {
+	row, err := r.queries.ConsumeAdminRecoveryToken(ctx, tokenHash)
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, core.ErrAdminRecoveryInvalid
+		}
+		return nil, err
+	}
+	approvedBy := ""
+	if row.ApprovedByUserID.Valid {
+		approvedBy = uuidToString(row.ApprovedByUserID.Bytes)
+	}
+	requestedBy := ""
+	if row.RequestedByUserID.Valid {
+		requestedBy = uuidToString(row.RequestedByUserID.Bytes)
+	}
+	return &core.AdminRecoveryToken{
+		ID:                 uuidToString(row.ID.Bytes),
+		UserID:             uuidToString(row.UserID.Bytes),
+		TokenHash:          row.TokenHash,
+		ExpiresAt:          row.ExpiresAt.Time,
+		CreatedAt:          row.CreatedAt.Time,
+		ApprovedByUserID:   approvedBy,
+		RequestedByUserID:  requestedBy,
+		User: &core.User{
+			ID:                 uuidToString(row.UserID.Bytes),
+			Email:              row.Email,
+			DisplayName:        row.DisplayName,
+			FirstName:          row.FirstName,
+			LastName:           row.LastName,
+			State:              core.UserState(row.State),
+			IsMFAEnabled:       row.IsMfaEnabled,
+			MustChangePassword: row.MustChangePassword,
+			PasswordHash:       row.PasswordHash,
+		},
+	}, nil
+}
+
+// ListAdminRecoveryRequest returns the pending (not-yet-approved)
+// admin-recovery requests, newest first, joined to their target user (FR-27
+// admin-B review surface). The password hash is never selected.
+func (r *Repository) ListAdminRecoveryRequest(ctx context.Context) ([]*core.AdminRecoveryRequest, error) {
+	rows, err := r.queries.ListAdminRecoveryRequest(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*core.AdminRecoveryRequest, 0, len(rows))
+	for _, row := range rows {
+		requestedBy := ""
+		if row.RequestedByUserID.Valid {
+			requestedBy = uuidToString(row.RequestedByUserID.Bytes)
+		}
+		approvedBy := ""
+		if row.ApprovedByUserID.Valid {
+			approvedBy = uuidToString(row.ApprovedByUserID.Bytes)
+		}
+		out = append(out, &core.AdminRecoveryRequest{
+			ID:                 uuidToString(row.ID.Bytes),
+			UserID:             uuidToString(row.UserID.Bytes),
+			TokenHash:          row.TokenHash,
+			ExpiresAt:          row.ExpiresAt.Time,
+			CreatedAt:          row.CreatedAt.Time,
+			ApprovedByUserID:   approvedBy,
+			RequestedByUserID:  requestedBy,
+			User: &core.User{
+				ID:                 uuidToString(row.UserID.Bytes),
+				Email:              row.Email,
+				DisplayName:        row.DisplayName,
+				FirstName:          row.FirstName,
+				LastName:           row.LastName,
+				State:              core.UserState(row.State),
+				IsMFAEnabled:       row.IsMfaEnabled,
+				MustChangePassword: row.MustChangePassword,
+			},
+		})
+	}
+	return out, nil
+}
+
+// DenyAdminRecovery invalidates the target's pending admin-recovery request so
+// it can no longer be approved (FR-27). A zero-row delete (no pending request,
+// already approved, or expired) is a no-op; the deny audit is written by the
+// core regardless (NFR-O1).
+func (r *Repository) DenyAdminRecovery(ctx context.Context, userID string) error {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return err
+	}
+	return r.queries.DenyAdminRecovery(ctx, uid)
+}
+
+// txBeginner is the subset of pgxpool.Pool that can open a transaction. The
+// Queries handle is constructed over the pool (New(pool) in the composition
+// root), so beginTx recovers it from the underlying DBTX without a separate
+// constructor dependency.
+type txBeginner interface {
+	Begin(ctx context.Context) (pgx.Tx, error)
+}
+
+// beginTx opens a fresh transaction on the underlying pool. A Queries handle
+// built over anything that is not transaction-capable (only conceivable in a
+// unit test) surfaces a clear error instead of panicking.
+func (r *Repository) beginTx(ctx context.Context) (pgx.Tx, error) {
+	if r.queries == nil {
+		return nil, errors.New("user postgres: nil queries")
+	}
+	pool, ok := r.queries.db.(txBeginner)
+	if !ok {
+		return nil, errors.New("user postgres: db handle does not support transactions")
+	}
+	return pool.Begin(ctx)
+}
+
+// ListPendingUsers returns the pending-approval users, oldest first (Story 2.4,
+// FR-20). Only the profile details plus id and created_at are selected — the
+// password hash and other secret material are never exposed (NFR-O1).
+func (r *Repository) ListPendingUsers(ctx context.Context) ([]*core.PendingUser, error) {
+	rows, err := r.queries.ListPendingUsers(ctx)
+	if err != nil {
+		return nil, err
+	}
+	out := make([]*core.PendingUser, 0, len(rows))
+	for _, row := range rows {
+		out = append(out, &core.PendingUser{
+			ID:        uuidToString(row.ID.Bytes),
+			Vorname:   row.FirstName,
+			Nachname:  row.LastName,
+			Email:     row.Email,
+			CreatedAt: row.CreatedAt.Time,
+		})
+	}
+	return out, nil
+}
+
+// ApproveUser atomically transitions a pending-approval user to active AND
+// seeds the default 'helfende' base role in ONE transaction (Story 2.4,
+// FR-20/AD-2): the state flip and the role seed are all-or-nothing, so there is
+// never a half-approved user. The role seed is idempotent (ON CONFLICT DO
+// NOTHING), so an already-in-helfende user is never duplicated. An unknown id,
+// a malformed (non-UUID) id, or a user that left `pending_approval`
+// (concurrently approved, rejected or deleted) maps to core.ErrUserNotPending —
+// the uniform not-found the admin already sees (no existence leak, FR-19).
+//
+// The seed outcome is VERIFIED: a missing 'helfende' group would make the
+// INSERT a silent zero-row no-op, so after the insert the membership is
+// re-checked and a failed seed fails the transaction (the state flip is rolled
+// back) instead of silently approving a user with no role.
+func (r *Repository) ApproveUser(ctx context.Context, userID string) (*core.User, error) {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return nil, core.ErrUserNotPending
+	}
+
+	tx, err := r.beginTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op after Commit
+
+	q := r.queries.WithTx(tx)
+	row, err := q.SetUserState(ctx, SetUserStateParams{
+		StateNew:     string(core.StateActive),
+		StateCurrent: string(core.StatePendingApproval),
+		ID:           uid,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, core.ErrUserNotPending
+		}
+		return nil, err
+	}
+	if err := q.AddUserToGroup(ctx, AddUserToGroupParams{
+		UserID:    uid,
+		GroupName: core.DefaultUserRoleGroup,
+	}); err != nil {
+		return nil, err
+	}
+	// Guard the silent no-op: the seed must actually land. If the user is NOT
+	// in 'helfende' after the insert — a missing group row would make the
+	// INSERT affect zero rows without an error — fail and roll back the state
+	// flip (no half-approved user).
+	seeded, err := q.IsUserInPermissionGroup(ctx, IsUserInPermissionGroupParams{
+		UserID: uid,
+		Name:   core.DefaultUserRoleGroup,
+	})
+	if err != nil {
+		return nil, err
+	}
+	if !seeded {
+		return nil, fmt.Errorf("user postgres: role seed failed: %q group missing or user not added", core.DefaultUserRoleGroup)
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+
+	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
+		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail, row.OneTimePasswordHash, row.OneTimePasswordExpiresAt)
+}
+
+// RejectUser atomically transitions a pending-approval user to deactivated
+// (Story 2.4, FR-20): the pending record disappears from the pending list and
+// the account can neither log in (login requires active state, AD-2) nor
+// re-register (the email stays taken). An unknown id or a user that left
+// `pending_approval` maps to core.ErrUserNotPending.
+func (r *Repository) RejectUser(ctx context.Context, userID string) (*core.User, error) {
+	uid, err := uuidFromString(userID)
+	if err != nil {
+		return nil, core.ErrUserNotPending
+	}
+
+	tx, err := r.beginTx(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() { _ = tx.Rollback(ctx) }() // no-op after Commit
+
+	q := r.queries.WithTx(tx)
+	row, err := q.SetUserState(ctx, SetUserStateParams{
+		StateNew:     string(core.StateDeactivated),
+		StateCurrent: string(core.StatePendingApproval),
+		ID:           uid,
+	})
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			return nil, core.ErrUserNotPending
+		}
+		return nil, err
+	}
+	if err := tx.Commit(ctx); err != nil {
+		return nil, err
+	}
+
+	return userFromRow(row.ID, row.Email, row.DisplayName, row.FirstName, row.LastName,
+		row.PasswordHash, row.State, row.IsMfaEnabled, row.MustChangePassword, row.TotpSecretEncrypted,
+		row.PendingTotpSecretEncrypted, row.PendingTotpExpiresAt, row.Attributes, row.CreatedAt, row.UpdatedAt, row.PendingEmail, row.OneTimePasswordHash, row.OneTimePasswordExpiresAt)
+}
+
+func uuidToString(b [16]byte) string {
+	return fmt.Sprintf("%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+		b[0], b[1], b[2], b[3],
+		b[4], b[5],
+		b[6], b[7],
+		b[8], b[9],
+		b[10], b[11], b[12], b[13], b[14], b[15],
+	)
+}
+
+// userFromRow maps an sqlc user row to the core.User domain entity. A stored
+// `attributes` value that cannot be parsed into a JSON object (e.g. an array or
+// scalar written out-of-band — the jsonb column rejects syntactically invalid
+// JSON, so a "malformed" value is a valid non-object shape) surfaces as a clear
+// error instead of silently dropping it (Story 1.9 boundary: reads never crash
+// and never silently lose data).
+func userFromRow(id pgtype.UUID, email, displayName, firstName, lastName, passwordHash, state string, isMfa, mustChange bool, totpSecret pgtype.Text, pendingSecret pgtype.Text, pendingExpiry pgtype.Timestamptz, attributes []byte, createdAt, updatedAt pgtype.Timestamptz, pendingEmail pgtype.Text, oneTimePasswordHash string, oneTimePasswordExpiresAt pgtype.Timestamptz) (*core.User, error) {
+	var attrs map[string]any
+	if len(attributes) > 0 {
+		if err := json.Unmarshal(attributes, &attrs); err != nil {
+			return nil, fmt.Errorf("user postgres: invalid stored attributes jsonb: %w", err)
+		}
+	}
+	secret := ""
+	if totpSecret.Valid {
+		secret = totpSecret.String
+	}
+	pending := ""
+	if pendingSecret.Valid {
+		pending = pendingSecret.String
+	}
+	var expiry time.Time
+	if pendingExpiry.Valid {
+		expiry = pendingExpiry.Time
+	}
+	staged := ""
+	if pendingEmail.Valid {
+		staged = pendingEmail.String
+	}
+	var otpExpiry time.Time
+	if oneTimePasswordExpiresAt.Valid {
+		otpExpiry = oneTimePasswordExpiresAt.Time
+	}
+	return &core.User{
+		ID:                         uuidToString(id.Bytes),
+		Email:                      email,
+		PendingEmail:               staged,
+		DisplayName:                displayName,
+		FirstName:                  firstName,
+		LastName:                   lastName,
+		PasswordHash:               passwordHash,
+		State:                      core.UserState(state),
+		IsMFAEnabled:               isMfa,
+		MustChangePassword:         mustChange,
+		OneTimePasswordHash:        oneTimePasswordHash,
+		OneTimePasswordExpiresAt:   otpExpiry,
+		TotpSecretEncrypted:        secret,
+		PendingTotpSecretEncrypted: pending,
+		PendingTotpExpiresAt:       expiry,
+		Attributes:                 attrs,
+		CreatedAt:                  createdAt.Time,
+		UpdatedAt:                  updatedAt.Time,
+	}, nil
+}
+
+// uuidFromString parses a canonical UUID string into a pgtype.UUID.
+func uuidFromString(s string) (pgtype.UUID, error) {
+	var b [16]byte
+	_, err := fmt.Sscanf(s, "%02x%02x%02x%02x-%02x%02x-%02x%02x-%02x%02x-%02x%02x%02x%02x%02x%02x",
+		&b[0], &b[1], &b[2], &b[3],
+		&b[4], &b[5],
+		&b[6], &b[7],
+		&b[8], &b[9],
+		&b[10], &b[11], &b[12], &b[13], &b[14], &b[15],
+	)
+	if err != nil {
+		return pgtype.UUID{}, err
+	}
+	return pgtype.UUID{Bytes: b, Valid: true}, nil
+}
+
+// isPgUniqueViolation reports whether err is a Postgres unique-violation
+// (SQLSTATE 23505). Matching the structured pgconn.PgError code is reliable —
+// unlike matching the human-readable error string (review finding: pgx 23505
+// mapping).
+func isPgUniqueViolation(err error) bool {
+	var pgErr *pgconn.PgError
+	return errors.As(err, &pgErr) && pgErr.Code == "23505"
+}

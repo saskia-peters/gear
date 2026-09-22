@@ -1,0 +1,390 @@
+/**
+ * GEAR — Docusaurus theme.
+ * Brand: GEAR-Blau (RAL 5002 Ultramarine / Pantone 286) ≈ #003399.
+ * Status colors (Green/Orange/Red) match the app's dashboard semantics.
+ */
+
+:root {
+  --gear-blue: #003399;
+  --gear-navy: #001a66;
+  --gear-navy-deep: #00124d;
+  --gear-orange: #f5821f;
+
+  --ifm-color-primary: #003399;
+  --ifm-color-primary-dark: #002d88;
+  --ifm-color-primary-darker: #002777;
+  --ifm-color-primary-darkest: #001e59;
+  --ifm-color-primary-light: #1f47b8;
+  --ifm-color-primary-lighter: #3a5dc4;
+  --ifm-color-primary-lightest: #6f8cd6;
+  --ifm-code-font-size: 95%;
+  --docusaurus-highlighted-code-line-bg: rgba(0, 51, 153, 0.1);
+  --ifm-hero-background-color: #003399;
+  --ifm-footer-background-color: var(--gear-navy-deep);
+  --ifm-toc-border-color: #e3e8f0;
+}
+
+/* Lighter blue family so links/buttons stay readable on dark background */
+[data-theme='dark'] {
+  --gear-blue: #7aa2ff;
+  --gear-navy: #2a3f8f;
+  --gear-navy-deep: #0d1b4d;
+
+  --ifm-color-primary: #6690f0;
+  --ifm-color-primary-dark: #5a80dd;
+  --ifm-color-primary-darker: #4f72c9;
+  --ifm-color-primary-darkest: #3f5ba0;
+  --ifm-color-primary-light: #7aa1f5;
+  --ifm-color-primary-lighter: #8db0f8;
+  --ifm-color-primary-lightest: #b3c9fb;
+  --docusaurus-highlighted-code-line-bg: rgba(127, 162, 255, 0.2);
+  --ifm-footer-background-color: #0a1330;
+}
+
+.navbar {
+  background-color: var(--gear-navy);
+}
+
+.navbar__title,
+.navbar__link,
+.navbar__item a {
+  color: #ffffff;
+}
+
+.navbar__link:hover,
+.navbar__link--active {
+  color: #c9d6ff;
+}
+
+.navbar__brand {
+  color: #ffffff;
+}
+
+.footer {
+  background-color: var(--ifm-footer-background-color);
+  color: #dfe6f5;
+}
+
+.footer a {
+  color: #b8cbff;
+}
+
+.footer a:hover {
+  color: #ffffff;
+}
+
+.hero--primary {
+  background: linear-gradient(135deg, #003399 0%, #002570 55%, #001a55 100%);
+}
+
+html[data-theme='dark'] .hero--primary {
+  background: linear-gradient(135deg, #14306e 0%, #0d1f4f 55%, #0a1739 100%);
+}
+
+.hero__title,
+.hero__subtitle {
+  color: #ffffff;
+}
+
+.hero--primary .button--secondary {
+  background-color: #ffffff;
+  color: #003399;
+}
+
+html[data-theme='dark'] .hero--primary .button--secondary {
+  background-color: #dbe4ff;
+  color: #001a66;
+}
+
+.hero--primary .button--secondary:hover {
+  background-color: #e5ecff;
+  color: #001a66;
+}
+
+/* Slightly condensed docs layout */
+.table-of-contents__link:hover {
+  color: #003399;
+}
+
+html[data-theme='dark'] .table-of-contents__link:hover {
+  color: #8db0f8;
+}
+
+/* ---------------------------------------------------------------------------
+   Card navigation (Card / CardGrid) — topic hub cards.
+--------------------------------------------------------------------------- */
+.gear-card-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 1rem;
+  margin: 1.5rem 0;
+}
+
+.gear-card {
+  display: flex;
+  flex-direction: column;
+  gap: 0.35rem;
+  padding: 1.1rem 1.2rem;
+  border: 1px solid var(--ifm-color-emphasis-200);
+  border-radius: 12px;
+  background: var(--ifm-background-surface-color);
+  color: var(--ifm-font-color-base);
+  text-decoration: none;
+  transition: border-color 0.15s ease, box-shadow 0.15s ease, transform 0.1s ease;
+}
+
+.gear-card:hover {
+  border-color: var(--gear-blue);
+  box-shadow: 0 4px 12px rgba(0, 51, 153, 0.12);
+  text-decoration: none;
+}
+
+.gear-card-icon {
+  font-size: 1.5rem;
+}
+
+.gear-card-title {
+  font-weight: 600;
+  font-size: 1.02rem;
+}
+
+.gear-card-desc {
+  font-size: 0.88rem;
+  color: var(--ifm-color-emphasis-700);
+}
+
+/* ---------------------------------------------------------------------------
+   Story cards — framed stories with the same chapter structure.
+--------------------------------------------------------------------------- */
+.story-card {
+  border: 1px solid var(--ifm-color-emphasis-300);
+  border-left: 5px solid var(--ifm-color-emphasis-300);
+  border-radius: 10px;
+  padding: 0.9rem 1.2rem;
+  margin: 1rem 0;
+  background: var(--ifm-background-surface-color);
+}
+
+.story-card > :first-child {
+  margin-top: 0;
+}
+
+.story-card > :last-child {
+  margin-bottom: 0;
+}
+
+/* Status badges */
+.story-status {
+  display: inline-block;
+  font-size: 0.78rem;
+  font-weight: 600;
+  padding: 0.1rem 0.6rem;
+  border-radius: 9999px;
+  margin-left: 0.5rem;
+  vertical-align: middle;
+  color: #fff;
+}
+
+.story-status-backlog { background: #6b7280; }
+.story-status-ready-for-dev { background: #7aa2ff; }
+.story-status-in-progress { background: #f5821f; }
+.story-status-review { background: #9a6bff; }
+.story-status-done { background: #2e9e4f; }
+
+/* Acceptance criteria inside story cards: each Given starts a mini-block,
+   When/Then/And render as a clean labelled list. */
+.story-card details {
+  margin-top: 0.5rem;
+}
+
+.story-card details > summary {
+  cursor: pointer;
+  font-weight: 600;
+  color: var(--gear-blue);
+}
+
+.story-card details > p:first-of-type {
+  margin-top: 0.6rem;
+}
+
+.story-card details p strong {
+  color: var(--gear-blue);
+}
+
+.story-card details ul {
+  margin-top: 0.25rem;
+  margin-bottom: 0.75rem;
+  padding-left: 1.25rem;
+}
+
+.story-card details li {
+  margin: 0.2rem 0;
+  line-height: 1.5;
+}
+
+.story-card details li strong {
+  color: var(--gear-blue);
+  margin-right: 0.25rem;
+}
+
+/* ---------------------------------------------------------------------------
+   Screenshot frames (desktop / mobile) and placeholders.
+--------------------------------------------------------------------------- */
+.gear-shot {
+  margin: 1rem 0;
+  border: 1px solid var(--ifm-color-emphasis-200);
+  border-radius: 12px;
+  padding: 0.6rem;
+  background: var(--ifm-background-surface-color);
+}
+
+.gear-shot img {
+  display: block;
+  width: 100%;
+  height: auto;
+  border-radius: 8px;
+}
+
+.gear-shot-frame-desktop {
+  max-width: 760px;
+}
+
+.gear-shot-frame-mobile {
+  max-width: 320px;
+}
+
+.gear-shot-placeholder {
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  justify-content: center;
+  gap: 0.4rem;
+  aspect-ratio: 16 / 10;
+  background:
+    repeating-linear-gradient(
+      45deg,
+      var(--ifm-color-emphasis-100),
+      var(--ifm-color-emphasis-100) 10px,
+      var(--ifm-background-surface-color) 10px,
+      var(--ifm-background-surface-color) 20px
+    );
+  border: 2px dashed var(--ifm-color-emphasis-300);
+  border-radius: 8px;
+  color: var(--ifm-color-emphasis-600);
+  font-size: 0.9rem;
+  text-align: center;
+}
+
+.gear-shot-placeholder code {
+  background: transparent;
+  font-size: 0.78rem;
+}
+
+.gear-shot figcaption {
+  margin-top: 0.5rem;
+  font-size: 0.85rem;
+  color: var(--ifm-color-emphasis-700);
+  text-align: center;
+}
+
+/* ---------------------------------------------------------------------------
+   Implementation status — progress bars.
+--------------------------------------------------------------------------- */
+.gear-progress {
+  display: inline-block;
+  vertical-align: middle;
+  width: min(100%, 320px);
+  height: 12px;
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.gear-progress::-webkit-progress-bar {
+  background: var(--ifm-color-emphasis-200);
+  border-radius: 6px;
+}
+
+.gear-progress::-webkit-progress-value {
+  background: linear-gradient(90deg, var(--gear-blue), #2e9e4f);
+  border-radius: 6px;
+}
+
+.gear-progress::-moz-progress-bar {
+  background: linear-gradient(90deg, var(--gear-blue), #2e9e4f);
+  border-radius: 6px;
+}
+
+.gear-progress-label {
+  display: inline-block;
+  vertical-align: middle;
+  margin-left: 0.6rem;
+  font-weight: 600;
+  min-width: 2.6rem;
+}
+
+/* ---------------------------------------------------------------------------
+   User stories — animated elements (Overview / user-stories).
+--------------------------------------------------------------------------- */
+
+/* Animated traffic-light pulse: draws the eye to the current status. */
+@keyframes gear-pulse {
+  0%   { box-shadow: 0 0 0 0 rgba(46, 158, 79, 0.5); }
+  70%  { box-shadow: 0 0 0 12px rgba(46, 158, 79, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(46, 158, 79, 0); }
+}
+
+@keyframes gear-pulse-red {
+  0%   { box-shadow: 0 0 0 0 rgba(198, 40, 40, 0.5); }
+  70%  { box-shadow: 0 0 0 12px rgba(198, 40, 40, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(198, 40, 40, 0); }
+}
+
+@keyframes gear-pulse-orange {
+  0%   { box-shadow: 0 0 0 0 rgba(245, 130, 31, 0.5); }
+  70%  { box-shadow: 0 0 0 12px rgba(245, 130, 31, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(245, 130, 31, 0); }
+}
+
+.gear-status-dot {
+  display: inline-block;
+  width: 14px;
+  height: 14px;
+  border-radius: 50%;
+  margin-right: 0.4rem;
+  vertical-align: middle;
+}
+.gear-status-dot.gear-green { background: #2e9e4f; animation: gear-pulse 2s infinite; }
+.gear-status-dot.gear-orange { background: #f5821f; animation: gear-pulse-orange 2s infinite; }
+.gear-status-dot.gear-red { background: #c62828; animation: gear-pulse-red 2s infinite; }
+.gear-status-dot.gear-oos { background: #1c1c1c; }
+
+/* Step flow: a horizontal "journey" strip whose steps light up one after the
+   other, showing the order of a user story. */
+@keyframes gear-step-in {
+  from { opacity: 0; transform: translateY(8px); }
+  to   { opacity: 1; transform: translateY(0); }
+}
+
+.gear-story-step {
+  animation: gear-step-in 0.5s ease both;
+}
+
+/* A soft "breathing" highlight for the screenshot captions of a story. */
+@keyframes gear-breathe {
+  0%, 100% { border-color: var(--ifm-color-emphasis-200); }
+  50%      { border-color: var(--gear-blue); }
+}
+.gear-story-shot .gear-shot {
+  animation: gear-breathe 6s ease-in-out infinite;
+}
+
+/* Progress "track" that fills in a screenshot's journey (e.g. 1/3 → 3/3). */
+@keyframes gear-fill {
+  from { width: 0; }
+}
+.gear-fill-bar {
+  height: 8px;
+  border-radius: 4px;
+  background: linear-gradient(90deg, var(--gear-blue), #2e9e4f);
+  animation: gear-fill 1.2s ease-out both;
+}

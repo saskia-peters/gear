@@ -1,0 +1,357 @@
+# STATUS DEFINITIONS:
+# ==================
+# Epic Status:
+#   - backlog: Epic not yet started
+#   - in-progress: Epic actively being worked on
+#   - done: All stories in epic completed
+
+# Story Status:
+#   - backlog: Story only exists in epic file
+#   - ready-for-dev: Story file created, ready for development
+#   - in-progress: Developer actively working on implementation
+#   - review: Implementation complete, ready for review
+#   - done: Story completed
+
+# Retrospective Status:
+#   - optional: Can be completed but not required
+#   - done: Retrospective has been completed
+
+# Action Item Status:
+#   - open: Committed during a retrospective, not yet addressed
+#   - in-progress: Actively being worked on
+#   - done: Completed
+
+# WORKFLOW NOTES:
+# ===============
+# - Epic transitions to 'in-progress' automatically when its first story starts (via build's sprint sync)
+# - Stories can be worked in parallel if team capacity allows
+# - Developer typically creates the next story after the previous one is 'done' to incorporate learnings
+# - Dev moves story to 'review', then runs code-review (fresh context, different LLM recommended)
+# - Retrospective appends its action items to action_items; the status view surfaces open ones
+generated: 09-04-2026 19:40
+last_updated: 2026-09-21
+project: gear
+project_key: NOKEY
+tracking_system: file-system
+story_location: 
+  /home/saskia/devprojects/gear/_bmad-output/implementation-artifacts
+development_status:
+  epic-1: done
+  1-1-project-scaffold-database-foundation: done
+  1-2-dashboard-foundation-app-home: done
+  1-3-self-registration-with-admin-pending-approval: done
+  1-4-email-password-authentication: done
+  1-5-progressive-login-lockout: done
+  1-6-optional-totp-multi-factor-authentication: done
+  1-7-change-own-password: done
+  profile-page-edit-base-data: done
+  1-8-self-service-password-reset-forgot-password: done
+  1-9-flexible-user-attributes: done
+  1-10-dual-admin-credential-recovery: done
+  1-11-auth-ux-foundation: done
+  epic-1-retrospective: done
+
+  epic-2: done
+  2-1-admin-module-access-isolation: done
+  2-2-resolution-of-active-permission-set: done
+  2-3-admin-ux-foundation: done
+  2-4-user-approval-workflow: done
+  2-5-role-permission-group-management: done
+  2-6-user-group-administration: done
+  2-7-qualification-management: done
+  2-8-admin-one-time-password-otp-issuance: done
+  2-9-admin-rework-effort-1-model-backend: done
+  2-10-admin-rework-effort-2-spreadsheet-ui: done
+  epic-2-retrospective: done
+
+  epic-3: done
+  3-1-smtp-configuration-admin-settings-email: done
+  3-2-backup-destination-configuration-admin-settings-backup: done
+  3-3-dsgvo-data-access-report: done
+  3-4-dsgvo-account-deletion: done
+  epic-3-retrospective: done
+  5-2c-tool-settings-adoption-and-schedule-polish: done
+
+  epic-4: done
+  4-1-schedule-catalog-management: done
+  4-2-tool-type-management: done
+  4-3-tool-management: done
+  4-3b-gear-module-tool-list-dashboard-view: done
+  4-3b-inventory-number-tool-edit: done
+  4-4-flexible-attributes-on-tools-tool-types: done
+  4-5-bulk-csv-import: review
+  4-6-admin-catalog-lists-and-create-pages: done
+  epic-4-retrospective: done
+
+  epic-5: done
+  5-1-qualification-gated-inspection-start: done
+  5-2-inspection-ux-foundation: done
+  5-2b-configurable-system-settings: done
+  5-3-out-of-service-flagging: done
+  5-4-pass-fail-inspection-execution: done
+  5-5-checklist-inspection-execution: done
+  5-6-out-of-service-reinstatement: done
+  epic-5-retrospective: done
+
+  epic-6: done
+  6-1-color-coded-status-dashboard: done
+  6-1b-dashboard-row-details-navigation: done
+  6-2-status-report-export-pdf: done
+  6-3-inspection-history-per-tool: done
+  6-3b-tool-details-track-record: done
+  6-3c-tool-details-condensed-back: done
+  epic-6-retrospective: done
+
+  epic-7: in-progress
+  7-1-ci-pipeline: done
+  7-2-production-serving: backlog
+  7-3-integration-seed-assertions: done
+  7-4-parallel-db-test-isolation: done
+  7-5-idempotency-hardening: done
+  7-6-deployment-staging-prod: done
+  7-7-backup-restore-procedure: done
+  7-8-performance-testing: backlog
+action_items:
+  - id: "epic-1-retro-item-1-extract-a-shared-authheaders-helper-into"
+    epic: 1
+    action: "Extract a shared authHeaders helper into web/src/auth and import it across
+      the auth pages instead of each page defining its own."
+    owner: "dev loop"
+    status: done
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-1-retro-2026-09-06.md"
+  - id: "epic-1-retro-item-2-append-resolution-notes-to-deferred-work"
+    epic: 1
+    action: "Append resolution notes to deferred-work.md for the Vite /api dev proxy
+      (Story 1.3) and the web lint/test gate in just test/just lint (Story 1.2/1.3)."
+    owner: "human"
+    status: done
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-1-retro-2026-09-06.md"
+  - id: "epic-1-retro-item-3-re-route-the-deferred-work-items-redirec"
+    epic: 1
+    action: "Re-route the deferred-work items redirect-away-from-login and set_updated_at
+      trigger to a future auth story and decide whether to implement them."
+    owner: "human"
+    status: open
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-1-retro-2026-09-06.md"
+  - id: "epic-2-retro-item-4-fix-recovery-deny-authorization-re-add-a"
+    epic: 2
+    action: "Fix recovery/deny authorization — re-add an admin.recovery.approve gate
+      (route-level or core) so only approvers can deny a pending recovery request"
+    owner: "dev loop"
+    status: done
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-2-retro-2026-09-09.md"
+  - id: "epic-2-retro-item-5-guard-empty-body-on-group-members-and-us"
+    epic: 2
+    action: "Guard empty-body on group-members and user-groups replace endpoints —
+      reject a missing user_ids/user_group_ids field like the sibling roles/qualifications
+      endpoints"
+    owner: "dev loop"
+    status: done
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-2-retro-2026-09-09.md"
+  - id: "epic-2-retro-item-6-enforce-fixed-requires-expiry-on-the-per"
+    epic: 2
+    action: "Enforce fixed-requires-expiry on the per-user expiry-update path — reject
+      nil on a fixed assignment, or re-read the vocabulary kind and require a date"
+    owner: "dev loop"
+    status: done
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-2-retro-2026-09-09.md"
+  - id: "epic-2-retro-item-7-reconcile-specs-to-as-built-spec-2-7-2-9"
+    epic: 2
+    action: "Reconcile specs to as-built — spec 2.7/2.9 (qualification vocabulary
+      drop), spec 2.3/2.4 (pending-approvals page), reject semantics wording"
+    owner: "human"
+    status: open
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-2-retro-2026-09-09.md"
+  - id: "epic-2-retro-item-8-sync-22-base-codes-everywhere-fix-permis"
+    epic: 2
+    action: "Sync 22 base codes everywhere — fix permission_test.go (21 to 22, rename
+      ResolvesAll21 test) and roles.ts checkbox-count comment"
+    owner: "dev loop"
+    status: done
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-2-retro-2026-09-09.md"
+  - id: "epic-2-retro-item-9-extract-shared-web-request-and-authtoken"
+    epic: 2
+    action: "Extract shared web request() and authTokenHeaders into a single web/src/auth/http.ts
+      used by roles/qualifications/users"
+    owner: "dev loop"
+    status: done
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-2-retro-2026-09-09.md"
+  - id: "epic-2-retro-item-10-refresh-stale-never-joins-user_groups-co"
+    epic: 2
+    action: "Refresh stale never-joins-user_groups comments in queries.sql and core
+      to reflect the Spec 2.9 team-role UNION branch"
+    owner: "dev loop"
+    status: done
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-2-retro-2026-09-09.md"
+  - id: "epic-4-retro-item-11-pin-document-update-of-tool-after-type-a"
+    epic: 4
+    action: "Pin + document update-of-tool-after-type-archived semantics (B1)"
+    owner: "dev loop"
+    status: done
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-4-retro-2026-09-12.md"
+  - id: "epic-4-retro-item-12-pin-document-update-of-tool-type-after-s"
+    epic: 4
+    action: "Pin + document update-of-tool/type-after-schedule-archived semantics
+      (B2)"
+    owner: "dev loop"
+    status: done
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-4-retro-2026-09-12.md"
+  - id: "epic-4-retro-item-13-reconcile-the-gear-module-dto-spec-to-th"
+    epic: 4
+    action: "Reconcile the gear-module DTO spec to the inventory addition (S4)"
+    owner: "human"
+    status: open
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-4-retro-2026-09-12.md"
+  - id: "epic-4-retro-item-14-record-the-qualification-optional-deviat"
+    epic: 4
+    action: "Record the qualification-optional deviation in spec-4-2 change log (S3)"
+    owner: "human"
+    status: open
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-4-retro-2026-09-12.md"
+  - id: "epic-4-retro-item-15-add-the-4-3b-dashboard-story-to-sprint-t"
+    epic: 4
+    action: "Add the 4-3b dashboard story to sprint tracking (S1)"
+    owner: "dev loop"
+    status: done
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-4-retro-2026-09-12.md"
+  - id: "epic-4-retro-item-16-consolidate-the-duplicated-uuid-parse-he"
+    epic: 4
+    action: "Consolidate the duplicated UUID-parse helpers (D1)"
+    owner: "dev loop"
+    status: done
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-4-retro-2026-09-12.md"
+  - id: "epic-4-retro-item-17-pin-document-update-of-tool-after-type-a"
+    epic: 4
+    action: "Pin + document update-of-tool-after-type-archived semantics (B1)"
+    owner: "dev loop"
+    status: done
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-4-retro-2026-09-12.md"
+  - id: "epic-4-retro-item-18-pin-document-update-of-tool-type-after-s"
+    epic: 4
+    action: "Pin + document update-of-tool/type-after-schedule-archived semantics
+      (B2)"
+    owner: "dev loop"
+    status: done
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-4-retro-2026-09-12.md"
+  - id: "epic-4-retro-item-19-reconcile-the-gear-module-dto-spec-to-th"
+    epic: 4
+    action: "Reconcile the gear-module DTO spec to the inventory addition (S4)"
+    owner: "human"
+    status: open
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-4-retro-2026-09-12.md"
+  - id: "epic-4-retro-item-20-record-the-qualification-optional-deviat"
+    epic: 4
+    action: "Record the qualification-optional deviation in spec-4-2 change log (S3)"
+    owner: "human"
+    status: open
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-4-retro-2026-09-12.md"
+  - id: "epic-4-retro-item-21-add-the-4-3b-dashboard-story-to-sprint-t"
+    epic: 4
+    action: "Add the 4-3b dashboard story to sprint tracking (S1)"
+    owner: "dev loop"
+    status: done
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-4-retro-2026-09-12.md"
+  - id: "epic-4-retro-item-22-consolidate-the-duplicated-uuid-parse-he"
+    epic: 4
+    action: "Consolidate the duplicated UUID-parse helpers (D1)"
+    owner: "dev loop"
+    status: done
+    ref: "/home/saskia/devprojects/gear/_bmad-output/implementation-artifacts/epic-4-retro-2026-09-12.md"
+  - id: "epic-3-retro-item-23-split-admineinstellungenpage-tsx-extract"
+    epic: 3
+    action: "Split AdminEinstellungenPage.tsx — extract the E-Mail/Backup/Schedule/System
+      tabs into sibling files before the next settings story"
+    owner: "dev loop"
+    status: done
+    ref: "_bmad-output/implementation-artifacts/epic-3-retro-2026-09-18.md"
+  - id: "epic-3-retro-item-24-fix-the-dsgvo-delete-body-decode-malform"
+    epic: 3
+    action: "Fix the DSGVO delete-body decode — malformed JSON maps to Ungültiges
+      JSON-Format + add http.MaxBytesReader"
+    owner: "dev loop"
+    status: done
+    ref: "_bmad-output/implementation-artifacts/epic-3-retro-2026-09-18.md"
+  - id: "epic-3-retro-item-25-remove-the-dead-toolscore-errtoolnotfoun"
+    epic: 3
+    action: "Remove the dead toolscore.ErrToolNotFound branch in admin/adapters/http/dsgvo.go
+      + correct the ordering comment"
+    owner: "dev loop"
+    status: done
+    ref: "_bmad-output/implementation-artifacts/epic-3-retro-2026-09-18.md"
+  - id: "epic-3-retro-item-26-reconcile-spec-3-4-suggested-review-orde"
+    epic: 3
+    action: "Reconcile spec-3-4 Suggested Review Order — purge route is DELETE /users/deleted/{archiveId},
+      not POST"
+    owner: "dev loop"
+    status: done
+    ref: "_bmad-output/implementation-artifacts/epic-3-retro-2026-09-18.md"
+  - id: "epic-3-retro-item-27-collapse-the-duplicated-permission-audit"
+    epic: 3
+    action: "Collapse the duplicated permission/audit helpers in the DSGVO orchestrator
+      (requirePermission + audit)"
+    owner: "dev loop"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-3-retro-2026-09-18.md"
+  - id: "epic-3-retro-item-28-decide-the-dsgvo-orchestrator-wire-coupl"
+    epic: 3
+    action: "Decide the DSGVO orchestrator wire-coupling stance (JSON-tagged core
+      structs vs DTOs)"
+    owner: "human"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-3-retro-2026-09-18.md"
+  - id: "epic-3-retro-item-29-record-or-fix-the-000029-sqlc-scope-drif"
+    epic: 3
+    action: "Record or fix the 000029 sqlc-scope drift — sessions index is User-owned
+      but sits in the Tools sqlc block"
+    owner: "dev loop"
+    status: done
+    ref: "_bmad-output/implementation-artifacts/epic-3-retro-2026-09-18.md"
+  - id: "epic-6-retro-item-30-fix-summarygrid-vocabulary-drift-read-st"
+    epic: 6
+    action: "Fix SummaryGrid vocabulary drift — read STATUS_VOCAB from filters.ts
+      instead of hardcoding the German labels"
+    owner: "dev loop"
+    status: done
+    ref: "_bmad-output/implementation-artifacts/epic-6-retro-2026-09-18.md"
+  - id: "epic-6-retro-item-31-reconcile-the-orange-window-docs-update"
+    epic: 6
+    action: "Reconcile the orange-window docs — update the stale ≤14 days text in
+      spec-6-1 and the DashboardPage.tsx header comment to the proportional rule"
+    owner: "dev loop"
+    status: done
+    ref: "_bmad-output/implementation-artifacts/epic-6-retro-2026-09-18.md"
+  - id: "epic-6-retro-item-32-split-the-tool-module-god-classes-extrac"
+    epic: 6
+    action: "Split the Tool-module god-classes — extract the history surface + validation
+      from inspections.go (933 lines) and trim core/tools.go / http/tools.go"
+    owner: "dev loop"
+    status: done
+    ref: "_bmad-output/implementation-artifacts/epic-6-retro-2026-09-18.md"
+  - id: "epic-6-retro-item-33-log-mount-level-403s-for-tool-surfaces-p"
+    epic: 6
+    action: "Log mount-level 403s for tool surfaces — pass a logger + German denyMsg
+      to RequirePermission for report.export / inspection.history.view"
+    owner: "dev loop"
+    status: done
+    ref: "_bmad-output/implementation-artifacts/epic-6-retro-2026-09-18.md"
+  - id: "epic-6-retro-item-34-consolidate-the-ts-status-union-drop-too"
+    epic: 6
+    action: "Consolidate the TS status union — drop ToolStatusCode in favor of the
+      shared StatusCode"
+    owner: "dev loop"
+    status: done
+    ref: "_bmad-output/implementation-artifacts/epic-6-retro-2026-09-18.md"
+  - id: "epic-6-retro-item-35-decide-submit-reinstate-idempotency-whet"
+    epic: 6
+    action: "Decide submit/reinstate idempotency — whether an idempotency key is required
+      before production hardening (Epic 5 item 3)"
+    owner: "human"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-6-retro-2026-09-18.md"
+  - id: "epic-6-retro-item-36-track-proposed-retro-items-in-the-ledger"
+    epic: 6
+    action: "Track proposed retro items in the ledger — append Epic 5s split-inspections.go
+      and idempotency items to sprint-status action_items"
+    owner: "dev loop"
+    status: open
+    ref: "_bmad-output/implementation-artifacts/epic-6-retro-2026-09-18.md"

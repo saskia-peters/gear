@@ -1,0 +1,381 @@
+// Command server is the G.E.A.R. composition root (AD-1): the only place that
+// wires module hexagons and their adapters together and mounts the HTTP
+// surface. No business logic lives here — handlers, adapters and repositories
+// delegate to the modules.
+package main
+
+import (
+	"context"
+	"errors"
+	"flag"
+	"fmt"
+	"log/slog"
+	"net"
+	"net/http"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/go-chi/chi/v5"
+
+	admbck "github.com/saskia-peters/gear/internal/admin/adapters/backup"
+	adminhttp "github.com/saskia-peters/gear/internal/admin/adapters/http"
+	adminpostgres "github.com/saskia-peters/gear/internal/admin/adapters/postgres"
+	admsmtp "github.com/saskia-peters/gear/internal/admin/adapters/smtp"
+	admcore "github.com/saskia-peters/gear/internal/admin/core"
+	dsgvocore "github.com/saskia-peters/gear/internal/dsgvo/core"
+	"github.com/saskia-peters/gear/internal/platform/auth"
+	"github.com/saskia-peters/gear/internal/platform/backupjob"
+	"github.com/saskia-peters/gear/internal/platform/config"
+	"github.com/saskia-peters/gear/internal/platform/crypto"
+	"github.com/saskia-peters/gear/internal/platform/httpapi"
+	"github.com/saskia-peters/gear/internal/platform/logger"
+	"github.com/saskia-peters/gear/internal/platform/router"
+	"github.com/saskia-peters/gear/internal/platform/spa"
+	toolhttp "github.com/saskia-peters/gear/internal/tools/adapters/http"
+	toolpostgres "github.com/saskia-peters/gear/internal/tools/adapters/postgres"
+	toolscore "github.com/saskia-peters/gear/internal/tools/core"
+	userhttp "github.com/saskia-peters/gear/internal/user/adapters/http"
+	userpostgres "github.com/saskia-peters/gear/internal/user/adapters/postgres"
+	usercore "github.com/saskia-peters/gear/internal/user/core"
+)
+
+// resetEmailStub was the placeholder ResetEmailSender for Story 1.8 (FR-26).
+// Story 3.1 replaces it with the real SMTP sender built from the Admin
+// settings port (see main); the port contract stays unchanged.
+
+// healthcheckFlag is the container HEALTHCHECK probe switch (Story 7.6). It
+// probes /healthz, which reflects BOTH the HTTP listener AND the database pool
+// (health.New pings the pool) — so a DB outage marks the app not-ready, which
+// is the correct readiness semantics for a DB-backed service. It must run as a
+// short-lived probe, never as the long-running server.
+var healthcheckFlag = flag.Bool("healthcheck", false, "run the container HEALTHCHECK probe and exit")
+
+// backupStartupDelay is the wait before the backup job's first (startup) run
+// (Story 7.7): a fresh deploy gets its first backup without waiting a full
+// interval, but only after migrations/settings are warm.
+const backupStartupDelay = 5 * time.Second
+
+// startBackupJob wires the Story 7.7 backup job (NFR-R3) from the
+// composition-root seams and starts its goroutine on ctx (canceled on
+// shutdown). The ticker interval comes from the `backup_interval` app setting.
+// Kept as a seam so the composition test can drive it with fakes.
+func startBackupJob(ctx context.Context, log *slog.Logger, settings backupjob.SettingsPort, dests backupjob.DestinationsPort, cipher backupjob.CipherPort, audit backupjob.AuditPort, dumper backupjob.Dumper, startupDelay time.Duration) {
+	job := backupjob.New(backupjob.Deps{
+		Logger:       log,
+		Settings:     settings,
+		Destinations: dests,
+		Cipher:       cipher,
+		Audit:        audit,
+		Dumper:       dumper,
+	}, backupjob.WithStartupDelay(startupDelay))
+	go job.Start(ctx)
+}
+
+// runHealthcheck opens a short-lived HTTP request to the local /healthz and
+// returns 0 on 2xx, 1 otherwise. It dials the configured GEAR_HTTP_ADDR (or
+// the :8080 default) on loopback, tolerating a non-loopback bind address
+// (e.g. 0.0.0.0:8080) by extracting the port.
+func runHealthcheck() int {
+	addr := os.Getenv("GEAR_HTTP_ADDR")
+	if addr == "" {
+		addr = config.DefaultHTTPAddr
+	}
+	_, port, err := net.SplitHostPort(addr)
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "healthcheck: invalid GEAR_HTTP_ADDR %q: %v\n", addr, err)
+		return 1
+	}
+	client := &http.Client{Timeout: 3 * time.Second}
+	resp, err := client.Get("http://127.0.0.1:" + port + "/healthz")
+	if err != nil {
+		fmt.Fprintf(os.Stderr, "healthcheck: %v\n", err)
+		return 1
+	}
+	defer func() { _ = resp.Body.Close() }()
+	if resp.StatusCode < 200 || resp.StatusCode >= 300 {
+		fmt.Fprintf(os.Stderr, "healthcheck: status %d\n", resp.StatusCode)
+		return 1
+	}
+	return 0
+}
+
+func main() {
+	flag.Parse()
+	// Story 7.6: `-healthcheck` is the container HEALTHCHECK probe (distroless
+	// runtime has no shell/wget). It opens a short-lived HTTP request to
+	// /healthz and exits 0/1 so the orchestrator can gate readiness. The probe
+	// reflects app + DB readiness (healthz pings the pool) — the intended
+	// semantics for a DB-backed container.
+	if *healthcheckFlag {
+		os.Exit(runHealthcheck())
+	}
+
+	cfg := config.Load(os.Getenv)
+	log := logger.New(cfg.LogLevel)
+
+	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
+	defer stop()
+
+	pool, err := pgxpool.New(ctx, cfg.DatabaseURL)
+	if err != nil {
+		log.Error("invalid database configuration", "error", err)
+		os.Exit(1)
+	}
+	defer pool.Close()
+
+	// AD-1: adapters are constructed here and handed to the hexagons.
+	userStore := userpostgres.New(pool)
+	userRepo := userpostgres.NewRepository(userStore)
+	hasher := crypto.NewHasher()
+	// TOTP secret encryption at rest (NFR-S4): the 32-byte key from
+	// GEAR_ENCRYPTION_KEY. A missing/invalid key is surfaced as a clear startup
+	// warning (MFA will be unavailable and MFA endpoints answer 503
+	// "MFA ist derzeit nicht verfügbar.") rather than silently disabling MFA
+	// (review finding 1.6-3). A missing key only affects MFA flows, not
+	// ordinary login/register.
+	encKey, keyErr := cfg.EncryptionKeyBytes()
+	if keyErr != nil {
+		log.Warn("GEAR_ENCRYPTION_KEY missing or invalid; MFA operations will be unavailable",
+			"error", keyErr, "hint", "generate a 32-byte key: openssl rand -hex 32")
+	}
+	secretCipher := crypto.NewSecretCipher(encKey)
+	sessionManager := usercore.NewSessionManager(userRepo, cfg.SessionIdle)
+	userService := usercore.NewService(userRepo, hasher, sessionManager, secretCipher, log)
+
+	// Story 3.1 + 3.2 + 4.1 — materialized Admin hexagon for the settings
+	// surfaces (FR-28/FR-29/FR-30/AD-1): the Admin-owned smtp_settings +
+	// backup_destinations + schedules stores (AD-11/AD-14/AD-15/AD-16), the
+	// settings core and the settings HTTP handlers. The core consumes the User
+	// module's repository READ-ONLY for the permission re-check (AD-12) and
+	// the audit trail (NFR-O1/NFR-O2, audit_log is User-owned) — the Admin
+	// module never authors another module's SQL (AD-8/AD-11).
+	adminStore := adminpostgres.New(pool)
+	adminRepo := adminpostgres.NewRepository(adminStore)
+	adminSettingsService := admcore.NewService(adminRepo, adminRepo, adminRepo, adminRepo, secretCipher, userRepo, userRepo, admsmtp.Client{Log: log}, admbck.NewTester(), log)
+	adminSettingsHandler := adminhttp.NewHandler(adminSettingsService, log)
+
+	// Story 7.7 — the in-process backup job (NFR-R3): started at the
+	// composition root right after the Admin settings service and the pool so
+	// the settings/destinations ports it consumes are already wired. It runs
+	// once a few seconds after boot (migrations/settings warm) and then on the
+	// `backup_interval` app-setting ticker; it stops on ctx cancel (clean
+	// shutdown). pg_dump comes from the runtime image (Dockerfile), not a new
+	// module.
+	startBackupJob(ctx, log, adminSettingsService, adminSettingsService, secretCipher, userRepo, backupjob.PgDumper{DSN: cfg.DatabaseURL}, backupStartupDelay)
+
+	// Password reset email delivery (FR-26/AD-14): Story 3.1 wires the REAL
+	// SMTP sender (built below from the Admin settings port), replacing the
+	// Epic-1 stub. Configured() is true only when a working server is
+	// configured, so the must-change-password fallback stays active otherwise —
+	// no behavioral regression when unconfigured.
+	userService.SetResetEmailSender(admsmtp.NewResetEmailSender(adminSettingsService, secretCipher, log))
+	// Reset links are built from the public app origin (GEAR_APP_ORIGIN, review
+	// finding 1.8-6) so a real sender can deliver a clickable link.
+	userService.SetAppOrigin(cfg.AppOrigin)
+	userHandler := userhttp.NewHandler(userService, log, sessionManager)
+
+	// The auth gateway resolves sessions and the live permission set (AD-6).
+	// The ADMIN module's outer gate is ANY admin-module code (Spec 2.9 /
+	// Effort 2): fuehrende/schirrmeister hold `users.view` +
+	// `users.qualifications.manage` and must reach the user directory + the
+	// qualification assignment on the user detail, so the outer gate can no
+	// longer be `admin.recovery.approve`-only. Holding ANY of
+	// usercore.AdminModuleAccessCodes opens the module; each sub-surface then
+	// applies its own tighter gate (e.g. recovery still requires
+	// `admin.recovery.approve`, user create/edit requires `users.manage`).
+	adminSurface := auth.RequireAnyPermission(sessionManager, userRepo, usercore.AdminModuleAccessCodes(), "admin access denied", log)(userHandler.AdminRoutes())
+
+	// The settings surface is a sibling sub-mount under /api/v1/admin with its
+	// OWN tighter gate: only holders of `admin.settings.email` reach it (AD-6);
+	// the core re-checks the same code defense-in-depth.
+	settingsSurface := auth.RequireAnyPermission(sessionManager, userRepo, []string{admcore.SmtpSettingsPermission}, "admin.settings.email access denied", log)(adminSettingsHandler.Routes())
+
+	// The backup-destination surface mounts under /api/v1/admin/settings/backup
+	// with its OWN gate — one permission per surface (AD-6): only holders of
+	// `admin.settings.backup` reach it. The core re-checks the same code
+	// defense-in-depth. It deliberately does NOT widen the SMTP gate above.
+	backupSurface := auth.RequireAnyPermission(sessionManager, userRepo, []string{admcore.BackupSettingsPermission}, "admin.settings.backup access denied", log)(adminSettingsHandler.BackupRoutes())
+
+	// The schedule-catalog surface mounts under
+	// /api/v1/admin/settings/schedules with its OWN gate — one permission per
+	// surface (AD-6/AD-16): only holders of `schedules.manage` reach it. The
+	// core re-checks the same code defense-in-depth. It deliberately does NOT
+	// widen the SMTP/backup gates above.
+	schedulesSurface := auth.RequireAnyPermission(sessionManager, userRepo, []string{admcore.SchedulesPermission}, "schedules.manage access denied", log)(adminSettingsHandler.ScheduleRoutes())
+
+	// The configurable system-settings surface (Story 5-2b) mounts under
+	// /api/v1/admin/settings/system with its OWN gate — one permission per
+	// surface (AD-6): only holders of `admin.settings.system` reach it. The
+	// core re-checks the same code defense-in-depth. It deliberately does NOT
+	// widen the SMTP/backup/schedules gates above.
+	systemSettingsSurface := auth.RequireAnyPermission(sessionManager, userRepo, []string{admcore.AppSettingsPermission}, "admin.settings.system access denied", log)(adminSettingsHandler.SystemRoutes())
+
+	// Story 4.2 — materialized Tool hexagon for the tool-type surface
+	// (FR-8/FR-10/FR-23/AD-1/AD-10): the Tool-owned tool_types store, the tools
+	// core and the tools HTTP handlers. The core consumes the Admin module's
+	// read-only SchedulesPort (validates the default_schedule_id FK is ACTIVE,
+	// AD-16), the User module's read-only QualificationCatalogPort (validates
+	// the required_qualification_id FK exists, AD-7/AD-11) and the User
+	// repository READ-ONLY for the permission re-check (AD-12) and the audit
+	// trail (NFR-O1/NFR-O2) — the Tool module never joins another module's
+	// tables (AD-7/AD-10/AD-11).
+	toolStore := toolpostgres.New(pool)
+	toolRepo := toolpostgres.NewRepository(toolStore)
+	toolService := toolscore.NewService(toolRepo, adminSettingsService, userService, adminSettingsService, userRepo, userRepo, userRepo, log)
+	toolHandler := toolhttp.NewHandler(toolService, sessionManager, userRepo, log)
+
+	// The tool-type surface mounts under /api/v1/admin/tool-types with its OWN
+	// gate — one permission per surface (AD-6/AD-10): only holders of
+	// `tool_types.manage` reach it. The core re-checks the same code
+	// defense-in-depth. It deliberately does NOT widen any existing gate.
+	toolTypesSurface := auth.RequireAnyPermission(sessionManager, userRepo, []string{toolscore.ToolTypesManagePermission}, "tool_types.manage access denied", log)(toolHandler.ToolTypeRoutes())
+
+	// The tool surface mounts under /api/v1/admin/tools with its OWN gate —
+	// ANY-of [tools.manage, tool.edit] (Spec 4-3b, AD-6): a tool.edit-only
+	// holder (e.g. a Führende with only the scoped code) can VIEW + EDIT tools
+	// (incl. the inventory number) but NOT create/archive. The reads (GET/PUT)
+	// are the any-of gate; POST (create) and POST /{id}/archive re-apply a
+	// tools.manage-ONLY gate inside ToolRoutes (the write-only sub-router, the
+	// admin sub-surface precedent). The core re-checks the same split
+	// defense-in-depth. It deliberately does NOT widen the tool_types gate.
+	toolToolsSurface := auth.RequireAnyPermission(sessionManager, userRepo, []string{toolscore.ToolsManagePermission, toolscore.ToolEditPermission}, "tools.manage/tool.edit access denied", log)(toolHandler.ToolRoutes())
+
+	// The dashboard tool-list surface mounts under /api/v1/tools with its OWN
+	// gate — one permission per surface (AD-6, Story 4-3b + 6.1): any
+	// `dashboard.view` holder (all base roles) reaches the ACTIVE tool list. The
+	// core read (ListToolsForDashboard) is UNGATED by design — the HTTP mount
+	// carries the gate — so a tools.manage-less dashboard.view holder (e.g.
+	// Helfer*in) can render the Werkzeugliste. No writes live here, but the
+	// surface DOES derive each tool's status on read (Story 6.1, AD-4 — the
+	// dashboard never stores a status).
+	dashboardToolsSurface := auth.RequirePermission(sessionManager, userRepo, toolscore.DashboardViewPermission)(toolHandler.DashboardToolsRoutes())
+
+	// Story 5.1 + 5.3 — the qualification-gated inspection START and SUBMIT are
+	// a NEW surface under /api/v1/tools with its OWN gate — one permission per
+	// surface (AD-6, FR-11/AD-7): only `inspection.submit` holders (all base
+	// roles) reach it. The core re-checks the exact code defense-in-depth (AD-6)
+	// and resolves the caller's granted qualifications through the User module's
+	// QualificationCatalogPort (expiry-aware). It deliberately does NOT widen the
+	// dashboard.view gate — a dashboard.view-but-not-inspection.submit caller can
+	// still read the Werkzeugliste but 403s on the start/submit.
+	inspectionSurface := auth.RequirePermission(sessionManager, userRepo, toolscore.InspectionSubmitPermission)(toolHandler.InspectionRoutes())
+
+	// Story 5.6 — the reinstatement surface under /api/v1/tools with its OWN
+	// gate — one permission per surface (AD-6, FR-15/AD-9): only `tool.reinstate`
+	// holders (Fuehrung/Admin, the base roles seed it) reach it. The core
+	// re-checks the exact code defense-in-depth (AD-6). It deliberately does NOT
+	// widen the inspection.submit gate — a reinstate-less inspection.submit
+	// caller can still start/submit but 403s on the reinstatement.
+	reinstateSurface := auth.RequirePermission(sessionManager, userRepo, toolscore.ToolReinstatePermission)(toolHandler.ReinstateRoutes())
+
+	// Story 6.3 — the per-tool history surface under /api/v1/tools with its OWN
+	// gate — one permission per surface (AD-6, FR-18): only `inspection.history.view`
+	// holders (Schirrmeister/Fuehrung/Admin, the base roles seed it) reach the
+	// inspection + reinstatement history. The core re-checks the exact code
+	// defense-in-depth (AD-6). It deliberately does NOT widen the
+	// dashboard.view / inspection.submit gates — a history-less caller can still
+	// read the Werkzeugliste and start/submit but 403s on the history.
+	historySurface := auth.RequireAnyPermission(sessionManager, userRepo, []string{toolscore.InspectionHistoryViewPermission}, "inspection.history.view access denied", log)(toolHandler.HistoryRoutes())
+
+	// Story 6.2 — the status-report surface under /api/v1/tools with its OWN
+	// gate — one permission per surface (AD-6, FR-17): only `report.export`
+	// holders (Fuehrung/Admin, the base roles seed it) reach the PDF. The core
+	// re-checks the exact code defense-in-depth (AD-6). It deliberately does NOT
+	// widen the dashboard.view / inspection.submit / tool.reinstate /
+	// inspection.history.view gates — a report-less caller can still read the
+	// Werkzeugliste and start/submit/reinstate but 403s on the export with no
+	// PDF bytes.
+	reportSurface := auth.RequireAnyPermission(sessionManager, userRepo, []string{toolscore.ReportExportPermission}, "report.export access denied", log)(toolHandler.ReportRoutes())
+
+	// Story 3.3 + 3.4 — the DSGVO orchestrator (AD-8): the composition-root
+	// assembly point for the data-access report AND the account-deletion
+	// lifecycle. It consumes the User module's read-only export port + lifecycle
+	// deletion port (userService) and the Tool module's read-only export port +
+	// anonymization port (toolService), plus the User repository READ-ONLY for
+	// the defense-in-depth permission re-check (AD-6/AD-12), the actor
+	// resolution (GetUserByID) and the audit trail (NFR-O1/NFR-O2) — it never
+	// authors another module's SQL (AD-8/AD-11).
+	dsgvoService := dsgvocore.NewService(userService, toolService, userService, toolService, userRepo, userRepo, userRepo, log)
+	dsgvoHandler := adminhttp.NewDsgvoHandler(dsgvoService, log)
+
+	// The DSGVO surface mounts under /api/v1/admin/dsgvo with its OWN gate —
+	// one permission per surface (AD-6): ANY of [dsgvo.access_report,
+	// dsgvo.delete] opens it (the SPA tab bar then applies the per-code gate for
+	// Datenauskunft vs Konto löschen). The orchestrator re-checks
+	// `dsgvo.access_report` defense-in-depth before ANY personal data is
+	// assembled. It deliberately does NOT widen any existing gate.
+	dsgvoSurface := auth.RequireAnyPermission(sessionManager, userRepo, []string{dsgvocore.AccessReportPermission, dsgvocore.DeletePermission}, "dsgvo access denied", log)(dsgvoHandler.DsgvoRoutes())
+
+	// The two /api/v1/tools surfaces are combined into ONE router: the dashboard
+	// list (GET /, dashboard.view), the inspection start + submit (POST
+	// /{id}/inspection/start and POST /{id}/inspection, inspection.submit), the
+	// reinstatement (POST /{id}/reinstatement, tool.reinstate), the history
+	// (GET /{id}/history, inspection.history.view) and the status report (GET
+	// /report.pdf, report.export). Each surface is mounted at
+	// the full path prefix (chi Mount strips it and preserves the {id} param) —
+	// InspectionRoutes/ReinstateRoutes/HistoryRoutes/ReportRoutes own the route
+	// patterns, never duplicated here. Each surface keeps ITS OWN gate — no
+	// shared middleware.
+	toolsSurface := chi.NewRouter()
+	toolsSurface.NotFound(httpapi.NotFoundHandler())
+	toolsSurface.MethodNotAllowed(httpapi.MethodNotAllowedHandler())
+	toolsSurface.Handle("/", dashboardToolsSurface)
+	toolsSurface.Mount("/{id}/inspection", inspectionSurface)
+	toolsSurface.Mount("/{id}/reinstatement", reinstateSurface)
+	toolsSurface.Mount("/{id}/history", historySurface)
+	toolsSurface.Mount("/report.pdf", reportSurface)
+
+	// Demo route for the gateway composition tests: any active user holding
+	// `dashboard.view` (all base roles) can reach /api/v1/protected/me.
+	protectedRoute := auth.Route(sessionManager, userRepo, "dashboard.view")
+
+	log.Info("wired user repository, sessions and registration/auth service", "store", fmt.Sprintf("%T", userStore))
+
+	r := router.New(pool, log,
+		router.WithAuth(userHandler.Routes()),
+		router.WithProtected(protectedRoute),
+		router.WithMount("/api/v1/admin", adminSurface),
+		router.WithMount("/api/v1/admin/settings", settingsSurface),
+		router.WithMount("/api/v1/admin/settings/backup", backupSurface),
+		router.WithMount("/api/v1/admin/settings/schedules", schedulesSurface),
+		router.WithMount("/api/v1/admin/settings/system", systemSettingsSurface),
+		router.WithMount("/api/v1/admin/tool-types", toolTypesSurface),
+		router.WithMount("/api/v1/admin/tools", toolToolsSurface),
+		router.WithMount("/api/v1/admin/dsgvo", dsgvoSurface),
+		router.WithMount("/api/v1/tools", toolsSurface),
+		// Story 7.6: the SPA catch-all is mounted LAST so chi's most-specific
+		// matching keeps every /api route JSON (an unknown API path answers the
+		// JSON 404, never the SPA). Non-API unknown routes fall back to
+		// index.html (client-side routing). Served from GEAR_WEB_DIST.
+		router.WithMount("/", spa.New(cfg.WebDist, log)),
+	)
+
+	srv := &http.Server{
+		Addr:              cfg.HTTPAddr,
+		Handler:           r,
+		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       15 * time.Second,
+		WriteTimeout:      15 * time.Second,
+		IdleTimeout:       60 * time.Second,
+	}
+
+	go func() {
+		<-ctx.Done()
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		if err := srv.Shutdown(shutdownCtx); err != nil {
+			log.Error("graceful shutdown failed", "error", err)
+		}
+	}()
+
+	log.Info("server listening", "addr", cfg.HTTPAddr)
+	if err := srv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		log.Error("server failed", "error", err)
+		os.Exit(1)
+	}
+	log.Info("server stopped")
+}

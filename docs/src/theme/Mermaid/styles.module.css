@@ -1,0 +1,182 @@
+.svgContainer {
+  max-width: 100%;
+}
+
+.svgContainer > svg {
+  max-width: 100%;
+}
+
+.wrapper {
+  position: relative;
+  display: block;
+  max-width: 100%;
+}
+
+.inline {
+  cursor: zoom-in;
+  line-height: 0;
+}
+
+.expandButton {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  z-index: 2;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 32px;
+  height: 32px;
+  padding: 0;
+  border: none;
+  border-radius: 6px;
+  background: rgb(0 51 153 / 0.85);
+  color: #fff;
+  cursor: pointer;
+  opacity: 0;
+  transition: opacity 0.15s ease;
+}
+
+.wrapper:hover .expandButton,
+.expandButton:focus-visible {
+  opacity: 1;
+}
+
+.expandButton:hover {
+  background: #00124d;
+}
+
+.backdrop {
+  position: fixed;
+  inset: 0;
+  z-index: 1000;
+  background: rgb(0 0 0 / 0.88);
+  cursor: grab;
+}
+
+.backdrop:active {
+  cursor: grabbing;
+}
+
+.stage {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+}
+
+.transform {
+  position: absolute;
+  left: 50%;
+  top: 50%;
+  will-change: transform;
+  background: #fff;
+  color: #1b1b1d;
+  box-shadow: 0 8px 40px rgb(0 0 0 / 0.5);
+  border-radius: 6px;
+  overflow: hidden;
+}
+
+.transform :global(svg) {
+  width: 100%;
+  height: 100%;
+  display: block;
+  max-width: none !important;
+}
+
+.transform :global(button) {
+  color: inherit;
+}
+
+.loading {
+  color: #fff;
+  font-size: 14px;
+  letter-spacing: 0.03em;
+}
+
+.closeButton {
+  position: absolute;
+  top: 20px;
+  right: 20px;
+  z-index: 3;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  width: 40px;
+  height: 40px;
+  padding: 0;
+  border: none;
+  border-radius: 50%;
+  background: #fff;
+  color: #00124d;
+  cursor: pointer;
+}
+
+.closeButton:hover {
+  background: #f5821f;
+  color: #fff;
+}
+
+.toolbar {
+  position: absolute;
+  bottom: 22px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3;
+  display: flex;
+  gap: 8px;
+  padding: 6px;
+  border-radius: 999px;
+  background: rgb(255 255 255 / 0.14);
+  backdrop-filter: blur(4px);
+}
+
+.toolButton {
+  min-width: 40px;
+  height: 34px;
+  padding: 0 12px;
+  border: none;
+  border-radius: 999px;
+  background: #003399;
+  color: #fff;
+  font-size: 15px;
+  cursor: pointer;
+}
+
+.toolButton:hover {
+  background: #00124d;
+}
+
+.hint {
+  position: absolute;
+  bottom: 76px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 3;
+  color: rgb(255 255 255 / 0.6);
+  font-size: 12px;
+  letter-spacing: 0.04em;
+  pointer-events: none;
+}
+
+@media (max-width: 480px) {
+  .hint {
+    display: none;
+  }
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .backdrop {
+    animation: fadeIn 0.15s ease;
+  }
+}
+
+@keyframes fadeIn {
+  from {
+    opacity: 0;
+  }
+  to {
+    opacity: 1;
+  }
+}

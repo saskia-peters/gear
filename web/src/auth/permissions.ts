@@ -1,0 +1,160 @@
+// Admin-module navigation model (Story 2.3, UX-DR6/AD-6/FR-19). This is the
+// single source of truth for the eight EXPERIENCE.md admin entries: their
+// gating permission codes, their routes, and their plain-language labels.
+//
+// User-facing microcopy must stay jargon-free (no permission-code names in the
+// landing/nav — those stay server-side, UX-DR4/5/8). The gating codes are only
+// used here to filter which entries a caller's resolved permission set exposes.
+// Kept in its own file so the app-shell and nav code do not grow into a
+// god-class (standing convention).
+
+import type { ComponentType } from 'react'
+import {
+  IconBenutzer,
+  IconBenutzergruppen,
+  IconDsgvo,
+  IconEinstellungen,
+  IconQualifikationen,
+  IconRollen,
+  IconUebersicht,
+  IconWerkzeuge,
+} from '../components/Icons.tsx'
+
+export interface AdminNavEntry {
+  /** Stable key, also used for the route segment. */
+  key: string
+  /** Route under /admin (without a leading slash). Übersicht is the landing. */
+  route: string
+  /** Plain-language label shown in the nav and on the landing card. */
+  label: string
+  /** Plain-language purpose shown on the landing card (no codes, no jargon). */
+  description: string
+  /** Permission codes that gate this entry (holding any of them exposes it). */
+  codes: string[]
+  /** Icon rendered next to the label in the nav + landing card. */
+  icon?: ComponentType<{ className?: string }>
+  /** Accent color for the icon (a --gear-color-icon-* token). */
+  iconColor?: string
+}
+
+export const ADMIN_NAV_ENTRIES: readonly AdminNavEntry[] = [
+  {
+    key: 'uebersicht',
+    route: '/admin',
+    label: 'Übersicht',
+    description: 'Start der Verwaltung mit allen anstehenden Freigaben.',
+    icon: IconUebersicht,
+    iconColor: 'var(--gear-color-icon-blue)',
+    codes: [
+      'users.view',
+      'users.approve',
+      'users.manage',
+      'roles.create',
+      'roles.edit',
+      'roles.assign',
+      'qualifications.manage',
+      'tools.manage',
+      'tool_types.manage',
+      'admin.settings.email',
+      'admin.settings.backup',
+      'schedules.manage',
+      'admin.settings.system',
+      'dsgvo.access_report',
+      'dsgvo.delete',
+      'admin.recovery.approve',
+    ],
+  },
+  {
+    key: 'benutzer',
+    route: '/admin/benutzer',
+    label: 'Benutzer',
+    description: 'Mitglieder verwalten und neue Anträge freigeben.',
+    icon: IconBenutzer,
+    iconColor: 'var(--gear-color-icon-green)',
+    codes: ['users.view', 'users.approve', 'users.manage'],
+  },
+  {
+    key: 'benutzergruppen',
+    route: '/admin/benutzergruppen',
+    label: 'Benutzergruppen',
+    description: 'Teams anlegen, Mitglieder zuordnen und Rollen vergeben.',
+    icon: IconBenutzergruppen,
+    iconColor: 'var(--gear-color-icon-teal)',
+    codes: ['user_groups.manage'],
+  },
+  {
+    key: 'rollen',
+    route: '/admin/rollen',
+    label: 'Rollen',
+    description: 'Rollen ansehen und anpassen.',
+    icon: IconRollen,
+    iconColor: 'var(--gear-color-icon-purple)',
+    codes: ['roles.create', 'roles.edit', 'roles.assign'],
+  },
+  {
+    key: 'qualifikationen',
+    route: '/admin/qualifikationen',
+    label: 'Qualifikationen',
+    description: 'Qualifikationen pflegen, z. B. Zertifikate und Lizenzen.',
+    icon: IconQualifikationen,
+    iconColor: 'var(--gear-color-icon-orange)',
+    codes: ['qualifications.manage'],
+  },
+  {
+    key: 'werkzeuge',
+    route: '/admin/werkzeuge',
+    label: 'Werkzeuge',
+    description: 'Geräte und Gerätetypen verwalten.',
+    icon: IconWerkzeuge,
+    iconColor: 'var(--gear-color-icon-red)',
+    // tool.edit (Story 4-3b) is the scoped tool-EDIT code: a Führende with
+    // only it can view + edit tools (incl. the inventory number) but not
+    // create/archive (those stay tools.manage).
+    codes: ['tools.manage', 'tool.edit', 'tool_types.manage'],
+  },
+  {
+    key: 'einstellungen',
+    route: '/admin/einstellungen',
+    label: 'Einstellungen',
+    description: 'E-Mail-, Sicherungs-, Zeitplan- und System-Einstellungen.',
+    icon: IconEinstellungen,
+    iconColor: 'var(--gear-color-icon-indigo)',
+    codes: ['admin.settings.email', 'admin.settings.backup', 'schedules.manage', 'admin.settings.system'],
+  },
+  {
+    key: 'dsgvo',
+    route: '/admin/dsgvo',
+    label: 'DSGVO',
+    description: 'Datenauskünfte und Löschungen nach Datenschutz.',
+    icon: IconDsgvo,
+    iconColor: 'var(--gear-color-icon-amber)',
+    codes: ['dsgvo.access_report', 'dsgvo.delete'],
+  },
+] as const
+
+// adminNavCodes returns the gating codes for a single nav entry by its key.
+// Route guards reference this instead of re-declaring the arrays, so the codes
+// live in exactly one place and cannot drift from the nav model.
+export function adminNavCodes(key: string): readonly string[] {
+  const entry = ADMIN_NAV_ENTRIES.find((e) => e.key === key)
+  if (!entry) {
+    throw new Error(`unknown admin nav entry: ${key}`)
+  }
+  return entry.codes
+}
+
+// hasAnyAdminCode reports whether the resolved permission set carries any code
+// that opens the admin module (Story 2.3, FR-19). This replaces the binary
+// is_admin flag for module visibility.
+export function hasAnyAdminCode(perms: readonly string[]): boolean {
+  const set = new Set(perms)
+  return ADMIN_NAV_ENTRIES.some((entry) => entry.codes.some((code) => set.has(code)))
+}
+
+// filteredAdminNav returns only the nav entries the caller's resolved
+// permission set exposes (anti-enumeration, FR-19). Übersicht is always first
+// when any entry is visible.
+export function filteredAdminNav(perms: readonly string[]): AdminNavEntry[] {
+  const set = new Set(perms)
+  return ADMIN_NAV_ENTRIES.filter((entry) => entry.codes.some((code) => set.has(code)))
+}

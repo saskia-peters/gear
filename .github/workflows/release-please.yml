@@ -1,0 +1,26 @@
+# Release automation (release-please): watches `main`, opens a "chore(main):
+# release …" PR that versions the repo + writes CHANGELOG.md + creates a GitHub
+# Release + git tag on merge. Config: .github/release-please-config.json
+# (initial version 0.1.0 in .github/release-please-manifest.json).
+name: release-please
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: write
+  pull-requests: write
+
+jobs:
+  release-please:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: googleapis/release-please-action@v4
+        with:
+          token: ${{ secrets.GITHUB_TOKEN }}
+          config-file: .github/release-please-config.json
+          manifest-file: .github/release-please-manifest.json

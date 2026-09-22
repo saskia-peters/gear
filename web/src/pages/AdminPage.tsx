@@ -1,0 +1,79 @@
+import { useMemo } from 'react'
+import { Link } from 'react-router-dom'
+import { Header } from '../components/Header.tsx'
+import { AdminNav } from '../components/AdminNav.tsx'
+import { getPermissions, hasPermission } from '../auth/authState.ts'
+import { filteredAdminNav } from '../auth/permissions.ts'
+import styles from './AdminPage.module.css'
+
+// AdminPage is the admin module's landing hub — "Verwaltung — Start" (Story
+// 2.3). It is a warm, plain-language home for people who do not work with IT
+// systems every day: one big tappable card per permitted nav entry (each with a
+// short German purpose, no jargon, no permission codes) and the
+// Dual-Admin-Wiederherstellung link for admins. Pending approvals live on the
+// dedicated Benutzer → "Ausstehende Anträge" surface, not on this landing. The
+// nav and cards are filtered by the caller's resolved permission set, so a
+// caller only ever sees the entries they hold (anti-enumeration, FR-19). Route
+// gating happens in the route table — no "Zugriff verweigert" branch lives here.
+export function AdminPage() {
+  const entries = filteredAdminNav(getPermissions())
+
+  // The card grid pairs adjacent entries two-per-row on wide screens. To put
+  // the Übersicht and DSGVO cards side by side (the two "command/overview"
+  // surfaces), DSGVO is pulled right after Übersicht in the CARD order only —
+  // the sidebar nav keeps its own logical order (entries).
+  const cardEntries = useMemo(() => {
+    const overview = entries.find((e) => e.key === 'uebersicht')
+    const dsgvo = entries.find((e) => e.key === 'dsgvo')
+    const rest = entries.filter((e) => e.key !== 'uebersicht' && e.key !== 'dsgvo')
+    return [
+      ...(overview ? [overview] : []),
+      ...(dsgvo ? [dsgvo] : []),
+      ...rest,
+    ]
+  }, [entries])
+
+  return (
+    <div className={styles.page}>
+      <Header />
+      <div className={styles.body}>
+        <AdminNav entries={entries} />
+        <main className={styles.main}>
+          <h2 className={styles.title}>Verwaltung — Start</h2>
+          <p className={styles.subtitle}>
+            Willkommen in der Verwaltung. Hier kümmern Sie sich um Mitglieder,
+            Geräte und Einstellungen.
+          </p>
+
+          <section aria-label="Verwaltungsbereiche" className={styles.grid}>
+            {cardEntries.map((entry) => (
+              <Link
+                key={entry.key}
+                to={entry.route}
+                className={styles.card}
+              >
+                <span
+                  className={styles.cardIcon}
+                  style={entry.iconColor ? { color: entry.iconColor } : undefined}
+                  aria-hidden="true"
+                >
+                  {entry.icon && <entry.icon />}
+                </span>
+                <span className={styles.cardText}>
+                  <span className={styles.cardTitle}>{entry.label}</span>
+                  <span className={styles.cardDescription}>{entry.description}</span>
+                </span>
+              </Link>
+            ))}
+          </section>
+
+          {hasPermission('admin.recovery.approve') && (
+            <Link to="/admin/recovery" className={styles.secondaryLink}>
+              Dual-Admin-Wiederherstellung
+            </Link>
+          )}
+        </main>
+      </div>
+    </div>
+  )
+}

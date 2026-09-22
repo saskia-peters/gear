@@ -1,0 +1,904 @@
+package postgres
+
+import (
+	"context"
+	"encoding/json"
+	"errors"
+	"fmt"
+	"regexp"
+	"strings"
+	"testing"
+	"time"
+
+	"github.com/jackc/pgx/v5/pgxpool"
+
+	"github.com/saskia-peters/gear/internal/tools/core"
+)
+
+// activeTestTools filters a ListTools result to the test-% rows (case-
+// insensitive) that this suite owns, so the count/order assertions stay
+// correct even when real user-created tools exist in the shared dev DB.
+func activeTestTools(tools []*core.Tool) []*core.Tool {
+	out := tools[:0]
+	for _, t := range tools {
+		if strings.HasPrefix(strings.ToLower(t.Name), "test-") {
+			out = append(out, t)
+		}
+	}
+	return out
+}
+
+// seedToolRefs inserts one Test- schedule (Admin-owned catalog) and one Test-
+// tool type (Tool-owned, referencing the schedule) and returns their ids. The
+// rows are cleaned up by the caller. Cleanup order matters: `tools` rows must
+// be deleted BEFORE the `tool_types`/`schedules` rows they FK-reference.
+func seedToolRefs(t *testing.T, ctx context.Context, pool *pgxpool.Pool) (toolTypeID, scheduleID string) {
+	t.Helper()
+	// Case-insensitive cleanup (case-variants leak past a case-sensitive LIKE).
+	if _, err := pool.Exec(ctx, "DELETE FROM tools WHERE lower(name) LIKE 'test-%'"); err != nil {
+		t.Fatalf("cleanup tools err = %v", err)
+	}
+	if _, err := pool.Exec(ctx, "DELETE FROM tool_types WHERE lower(name) LIKE 'test-%'"); err != nil {
+		t.Fatalf("cleanup tool_types err = %v", err)
+	}
+	if _, err := pool.Exec(ctx, "DELETE FROM schedules WHERE lower(name) LIKE 'test-%'"); err != nil {
+		t.Fatalf("cleanup schedules err = %v", err)
+	}
+	if _, err := pool.Exec(ctx, "DELETE FROM qualifications WHERE lower(name) LIKE 'test-%'"); err != nil {
+		t.Fatalf("cleanup qualifications err = %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, "DELETE FROM tools WHERE lower(name) LIKE 'test-%'")
+		_, _ = pool.Exec(ctx, "DELETE FROM tool_types WHERE lower(name) LIKE 'test-%'")
+		_, _ = pool.Exec(ctx, "DELETE FROM schedules WHERE lower(name) LIKE 'test-%'")
+		_, _ = pool.Exec(ctx, "DELETE FROM qualifications WHERE lower(name) LIKE 'test-%'")
+	})
+
+	if err := pool.QueryRow(ctx,
+		"INSERT INTO schedules (name, interval_unit, interval_magnitude) VALUES ('Test-Zeitplan', 'year', 1) RETURNING id",
+	).Scan(&scheduleID); err != nil {
+		t.Fatalf("seeding schedule err = %v", err)
+	}
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO tool_types (name, default_schedule_id, required_qualification_id, inspection_mode)
+		 VALUES ('Test-Geraetetyp', $1, NULL, 'pass_fail') RETURNING id`, scheduleID,
+	).Scan(&toolTypeID); err != nil {
+		t.Fatalf("seeding tool type err = %v", err)
+	}
+	return toolTypeID, scheduleID
+}
+
+// TestPostgresToolsStore exercises the CRUD + override-clear + soft-archive
+// round-trip over the dev database (migration 000024 applied), plus the
+// optional-override NULL semantics. It covers GET_LIST_EMPTY, GET_LIST (active
+// filter + JOINed type name), CREATE_VALID (empty override → SQL NULL),
+// CREATE_OVERRIDE (FK override), UPDATE_CLEAR_OVERRIDE (override → NULL),
+// UPDATE_ARCHIVED / ARCHIVE_ARCHIVED (404 sentinel), ARCHIVE (archived_at set +
+// leaves active list) and the German duplicate-name 400.
+func TestPostgresToolsStore(t *testing.T) {
+	pool := toolTestPool(t)
+	ctx := context.Background()
+	// Close the pool AFTER the row-cleanup DELETEs below run (t.Cleanup runs in
+	// LIFO order: registering the close first means the DELETE runs before it).
+	t.Cleanup(func() { pool.Close() })
+
+	repo := NewRepository(New(pool))
+	toolTypeID, scheduleID := seedToolRefs(t, ctx, pool)
+
+	// GET_LIST_EMPTY: after cleanup, there are no TEST- rows (real user-created
+	// tools may exist in the shared dev DB — the assertions below count only
+	// the test-% rows, the documented isolation convention).
+	initial, err := repo.ListTools(ctx)
+	if err != nil {
+		t.Fatalf("ListTools(initial) err = %v", err)
+	}
+	if len(activeTestTools(initial)) != 0 {
+		t.Fatalf("initial = %d test rows, want 0", len(activeTestTools(initial)))
+	}
+
+	// CREATE_VALID: a tool WITHOUT a schedule override is persisted with SQL
+	// NULL schedule_id (AD-5: inherits the type default) and the JOINed type
+	// name.
+	created, err := repo.CreateTool(ctx, &core.Tool{
+		Name:       "Test-Bohrmaschine-01",
+		ToolTypeID: toolTypeID,
+		ScheduleID: "",
+	}, "GEAR", 9)
+	if err != nil {
+		t.Fatalf("CreateTool err = %v", err)
+	}
+	if created.ID == "" || len(created.ID) != 36 {
+		t.Errorf("id = %q, want a generated uuid", created.ID)
+	}
+	if created.Name != "Test-Bohrmaschine-01" || created.ToolTypeID != toolTypeID {
+		t.Errorf("created = %+v, want persisted values", created)
+	}
+	if created.ToolTypeName != "Test-Geraetetyp" {
+		t.Errorf("tool_type_name = %q, want the JOINed type name", created.ToolTypeName)
+	}
+	if created.ScheduleID != "" {
+		t.Errorf("schedule_id = %q, want empty (NULL → inherit)", created.ScheduleID)
+	}
+	if len(created.Attributes) != 0 {
+		t.Errorf("attributes = %v, want empty map from '{}' default", created.Attributes)
+	}
+	if created.ArchivedAt != nil {
+		t.Error("new tool must be active (archived_at NULL)")
+	}
+	// CREATE_AUTO: the created tool carries an auto-assigned 'GEAR' + 9
+	// zero-padded digits inventory number.
+	if !strings.HasPrefix(created.InventoryNumber, "GEAR") || len(created.InventoryNumber) != 13 {
+		t.Errorf("created inventory_number = %q, want 'GEAR' + 9 zero-padded digits", created.InventoryNumber)
+	}
+	if created.CreatedAt.IsZero() || created.UpdatedAt.IsZero() {
+		t.Errorf("timestamps missing: %+v", created)
+	}
+
+	// The empty override is stored as SQL NULL (never a zero uuid).
+	var dbSchedule *string
+	if err := pool.QueryRow(ctx,
+		"SELECT schedule_id FROM tools WHERE id = $1", created.ID,
+	).Scan(&dbSchedule); err != nil {
+		t.Fatalf("scan schedule_id err = %v", err)
+	}
+	if dbSchedule != nil {
+		t.Errorf("DB schedule_id = %v, want SQL NULL (inherit)", *dbSchedule)
+	}
+
+	// GET_LIST: the created tool is returned with its JOINed type name.
+	list, err := repo.ListTools(ctx)
+	if err != nil {
+		t.Fatalf("ListTools err = %v", err)
+	}
+	testRows := activeTestTools(list)
+	if len(testRows) != 1 || testRows[0].ID != created.ID {
+		t.Fatalf("test rows = %d, want the created tool", len(testRows))
+	}
+	if testRows[0].ToolTypeName != "Test-Geraetetyp" {
+		t.Errorf("listed tool_type_name = %q, want the JOINed type name", testRows[0].ToolTypeName)
+	}
+	// Story 6.1: ListTools carries the type's DEFAULT schedule id (the AD-5
+	// interval-resolution input the dashboard's derived status resolves).
+	if testRows[0].DefaultScheduleID != scheduleID {
+		t.Errorf("default_schedule_id = %q, want %q (the type's default schedule)", testRows[0].DefaultScheduleID, scheduleID)
+	}
+
+	// CREATE_OVERRIDE: a second tool with a valid ACTIVE schedule override is
+	// persisted with the FK override.
+	withOverride, err := repo.CreateTool(ctx, &core.Tool{
+		Name:       "Test-Bohrmaschine-02",
+		ToolTypeID: toolTypeID,
+		ScheduleID: scheduleID,
+	}, "GEAR", 9)
+	if err != nil {
+		t.Fatalf("CreateTool(override) err = %v", err)
+	}
+	if withOverride.ScheduleID != scheduleID {
+		t.Errorf("override = %q, want %q", withOverride.ScheduleID, scheduleID)
+	}
+
+	// UPDATE_CLEAR_OVERRIDE: editing the overridden tool and clearing the
+	// override stores SQL NULL again (the tool inherits its type's default).
+	updated, err := repo.UpdateTool(ctx, &core.Tool{
+		ID:         withOverride.ID,
+		Name:       "Test-Bohrmaschine-02-neu",
+		ToolTypeID: toolTypeID,
+		ScheduleID: "",
+	})
+	if err != nil {
+		t.Fatalf("UpdateTool(clear override) err = %v", err)
+	}
+	if updated.ScheduleID != "" {
+		t.Errorf("updated schedule override = %q, want empty (cleared to NULL)", updated.ScheduleID)
+	}
+	var dbScheduleAfter *string
+	if err := pool.QueryRow(ctx,
+		"SELECT schedule_id FROM tools WHERE id = $1", withOverride.ID,
+	).Scan(&dbScheduleAfter); err != nil {
+		t.Fatalf("scan schedule_id(after clear) err = %v", err)
+	}
+	if dbScheduleAfter != nil {
+		t.Errorf("DB schedule_id after clear = %v, want SQL NULL", *dbScheduleAfter)
+	}
+	if updated.Name != "Test-Bohrmaschine-02-neu" {
+		t.Errorf("updated name = %q", updated.Name)
+	}
+	if !updated.UpdatedAt.After(created.UpdatedAt) {
+		t.Errorf("updated_at = %v, want after create's %v", updated.UpdatedAt, created.UpdatedAt)
+	}
+
+	// ARCHIVE: archived_at set, the row leaves the active list.
+	archived, err := repo.ArchiveTool(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("ArchiveTool err = %v", err)
+	}
+	if archived.ArchivedAt == nil {
+		t.Fatal("archived_at = nil, want set")
+	}
+	list, err = repo.ListTools(ctx)
+	if err != nil {
+		t.Fatalf("ListTools(after archive) err = %v", err)
+	}
+	testRows = activeTestTools(list)
+	if len(testRows) != 1 || testRows[0].ID != withOverride.ID {
+		t.Fatalf("test rows = %d, want only the non-archived tool", len(testRows))
+	}
+
+	// ARCHIVE_ARCHIVED: archiving the already-archived row → 404 sentinel.
+	if _, err := repo.ArchiveTool(ctx, created.ID); !errors.Is(err, core.ErrToolNotFound) {
+		t.Fatalf("ArchiveTool(archived) err = %v, want ErrToolNotFound", err)
+	}
+	// UPDATE_ARCHIVED: updating the archived row → 404 sentinel.
+	if _, err := repo.UpdateTool(ctx, &core.Tool{
+		ID: created.ID, Name: "Test-Darf-Nicht", ToolTypeID: toolTypeID,
+	}); !errors.Is(err, core.ErrToolNotFound) {
+		t.Fatalf("UpdateTool(archived) err = %v, want ErrToolNotFound", err)
+	}
+	// UPDATE missing id → 404 sentinel.
+	if _, err := repo.UpdateTool(ctx, &core.Tool{
+		ID: "00000000-0000-0000-0000-000000000000", Name: "x", ToolTypeID: toolTypeID,
+	}); !errors.Is(err, core.ErrToolNotFound) {
+		t.Fatalf("UpdateTool(missing) err = %v, want ErrToolNotFound", err)
+	}
+	// ARCHIVE missing id → 404 sentinel.
+	if _, err := repo.ArchiveTool(ctx, "00000000-0000-0000-0000-000000000000"); !errors.Is(err, core.ErrToolNotFound) {
+		t.Fatalf("ArchiveTool(missing) err = %v, want ErrToolNotFound", err)
+	}
+	// The lean active-exists check: true for an active id, false for a missing
+	// id and for the archived row.
+	active, err := repo.ToolExistsActive(ctx, withOverride.ID)
+	if err != nil {
+		t.Fatalf("ToolExistsActive err = %v", err)
+	}
+	if !active {
+		t.Error("ToolExistsActive(active) = false, want true")
+	}
+	active, err = repo.ToolExistsActive(ctx, created.ID)
+	if err != nil {
+		t.Fatalf("ToolExistsActive(archived) err = %v", err)
+	}
+	if active {
+		t.Error("ToolExistsActive(archived) = true, want false (the row is archived)")
+	}
+
+	// Re-creating the EXACT archived name is rejected with the German
+	// duplicate-name 400 (the DB UNIQUE constraint is the backstop the active
+	// catalog guard cannot see) — never a 500.
+	_, err = repo.CreateTool(ctx, &core.Tool{
+		Name: "Test-Bohrmaschine-01", ToolTypeID: toolTypeID,
+	}, "GEAR", 9)
+	var inv *core.InvalidToolError
+	if !errors.As(err, &inv) {
+		t.Fatalf("recreate archived name err = %v, want *InvalidToolError (German duplicate)", err)
+	}
+	if inv.Message != core.MsgToolNameTaken {
+		t.Errorf("message = %q, want %q", inv.Message, core.MsgToolNameTaken)
+	}
+
+	// UPDATE to a name already held by ANOTHER ACTIVE tool trips the DB UNIQUE
+	// constraint and is mapped to the German duplicate-name 400 — the DB-level
+	// backstop for the update path (the core's active case-insensitive guard
+	// would catch a live duplicate first; this pins the repo mapping).
+	conflictTool, err := repo.CreateTool(ctx, &core.Tool{
+		Name: "Test-Konflikt", ToolTypeID: toolTypeID,
+	}, "GEAR", 9)
+	if err != nil {
+		t.Fatalf("CreateTool(conflict target) err = %v", err)
+	}
+	_, err = repo.UpdateTool(ctx, &core.Tool{
+		ID: withOverride.ID, Name: "Test-Konflikt", ToolTypeID: toolTypeID,
+	})
+	inv = nil
+	if !errors.As(err, &inv) {
+		t.Fatalf("update to held name err = %v, want *InvalidToolError (German duplicate)", err)
+	}
+	if inv.Message != core.MsgToolNameTaken {
+		t.Errorf("message = %q, want %q", inv.Message, core.MsgToolNameTaken)
+	}
+	// The rejected update leaves BOTH active tools unchanged (withOverride keeps
+	// its name; conflictTool stays).
+	list, err = repo.ListTools(ctx)
+	if err != nil {
+		t.Fatalf("ListTools(after conflict) err = %v", err)
+	}
+	testRows = activeTestTools(list)
+	if len(testRows) != 2 {
+		t.Fatalf("test rows = %d, want 2 active tools (the rejected update persisted nothing)", len(testRows))
+	}
+	foundConflict := false
+	for _, tool := range testRows {
+		if tool.ID == conflictTool.ID {
+			foundConflict = true
+		}
+	}
+	if !foundConflict {
+		t.Error("conflict target missing from the active list")
+	}
+}
+
+// TestPostgresToolGetWithTypeQualification pins the Story 5.1 lean
+// inspection-start read (FR-11/AD-7): GetToolWithTypeQualification returns the
+// ACTIVE tool plus its type's required_qualification_id and inspection_mode
+// (intra-module JOIN on Tool-owned tool_types). A missing / archived tool id
+// answers core.ErrToolNotFound.
+func TestPostgresToolGetWithTypeQualification(t *testing.T) {
+	pool := toolTestPool(t)
+	ctx := context.Background()
+	t.Cleanup(func() { pool.Close() })
+
+	repo := NewRepository(New(pool))
+	// seedToolRefs already cleans up test-% rows and seeds a Test- tool type
+	// (required_qualification_id NULL, pass_fail mode) + a Test- schedule.
+	toolTypeID, scheduleID := seedToolRefs(t, ctx, pool)
+
+	// Seed a qualification so the type can REQUIRE one.
+	qualName := "Test-Quali-" + strings.ReplaceAll(time.Now().Format("20060102150405.000000"), ".", "")
+	var qualID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO qualifications (name, description, expiry_kind) VALUES ($1, '', 'unlimited') RETURNING id`, qualName,
+	).Scan(&qualID); err != nil {
+		t.Fatalf("seeding qualification err = %v", err)
+	}
+	t.Cleanup(func() {
+		_, _ = pool.Exec(ctx, "DELETE FROM qualifications WHERE id = $1", qualID)
+	})
+
+	// Give the type a required qualification + checklist mode, then a tool.
+	if _, err := pool.Exec(ctx,
+		`UPDATE tool_types SET required_qualification_id = $1, inspection_mode = 'checklist' WHERE id = $2`,
+		qualID, toolTypeID,
+	); err != nil {
+		t.Fatalf("updating type with required qualification err = %v", err)
+	}
+	// Seed the type's ordered checklist items (Story 5.2 mode-aware start): the
+	// inspection-start read must carry them so a checklist-mode inspection can
+	// render one Pass/Fail group per item.
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO tool_type_checklist_items (tool_type_id, position, label) VALUES ($1, 1, 'Kabel'), ($1, 2, 'Bohrfutter')`,
+		toolTypeID,
+	); err != nil {
+		t.Fatalf("seeding checklist items err = %v", err)
+	}
+	tool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Start-Lesen", ToolTypeID: toolTypeID}, "GEAR", 9)
+	if err != nil {
+		t.Fatalf("CreateTool err = %v", err)
+	}
+
+	// READ: the tool comes back with its type's required qualification + mode.
+	got, err := repo.GetToolWithTypeQualification(ctx, tool.ID)
+	if err != nil {
+		t.Fatalf("GetToolWithTypeQualification err = %v", err)
+	}
+	if got.ID != tool.ID || got.Name != "Test-Start-Lesen" {
+		t.Errorf("tool = %+v, want id %q / name", got, tool.ID)
+	}
+	if got.ToolTypeID != toolTypeID || got.ToolTypeName != "Test-Geraetetyp" {
+		t.Errorf("type = %+v, want the JOINed type", got)
+	}
+	if got.RequiredQualificationID != qualID {
+		t.Errorf("required_qualification_id = %q, want %q", got.RequiredQualificationID, qualID)
+	}
+	if got.InspectionMode != core.InspectionModeChecklist {
+		t.Errorf("inspection_mode = %q, want %q", got.InspectionMode, core.InspectionModeChecklist)
+	}
+	if len(got.ChecklistItems) != 2 || got.ChecklistItems[0].Label != "Kabel" || got.ChecklistItems[1].Label != "Bohrfutter" {
+		t.Errorf("checklist_items = %+v, want the ordered [Kabel, Bohrfutter]", got.ChecklistItems)
+	}
+	// AD-5 schedule-resolution inputs: a tool WITHOUT an override reads an EMPTY
+	// ScheduleID (SQL NULL → inherit) and the type's default schedule id (the
+	// submit path resolves the effective interval through the SchedulesPort).
+	if got.ScheduleID != "" {
+		t.Errorf("schedule_id = %q, want empty (NULL → inherit the type default)", got.ScheduleID)
+	}
+	if got.DefaultScheduleID != scheduleID {
+		t.Errorf("default_schedule_id = %q, want the type's default %q", got.DefaultScheduleID, scheduleID)
+	}
+
+	// A per-tool OVERRIDE round-trips: setting the tool's schedule_id to a
+	// SECOND Test- schedule makes GetToolWithTypeQualification carry the
+	// override id (the type default stays the original schedule).
+	var overrideID string
+	if err := pool.QueryRow(ctx,
+		`INSERT INTO schedules (name, interval_unit, interval_magnitude) VALUES ('Test-Override', 'month', 1) RETURNING id`,
+	).Scan(&overrideID); err != nil {
+		t.Fatalf("seeding override schedule err = %v", err)
+	}
+	t.Cleanup(func() { _, _ = pool.Exec(ctx, "DELETE FROM schedules WHERE id = $1", overrideID) })
+	if _, err := pool.Exec(ctx, `UPDATE tools SET schedule_id = $1 WHERE id = $2`, overrideID, tool.ID); err != nil {
+		t.Fatalf("setting the tool's schedule override err = %v", err)
+	}
+	withOverride, err := repo.GetToolWithTypeQualification(ctx, tool.ID)
+	if err != nil {
+		t.Fatalf("GetToolWithTypeQualification(override) err = %v", err)
+	}
+	if withOverride.ScheduleID != overrideID {
+		t.Errorf("schedule_id = %q, want the override %q", withOverride.ScheduleID, overrideID)
+	}
+	if withOverride.DefaultScheduleID != scheduleID {
+		t.Errorf("default_schedule_id = %q, want %q (the type default is unchanged)", withOverride.DefaultScheduleID, scheduleID)
+	}
+
+	// MISSING: an unknown id → ErrToolNotFound (never a raw 500).
+	if _, err := repo.GetToolWithTypeQualification(ctx, "00000000-0000-0000-0000-000000000000"); !errors.Is(err, core.ErrToolNotFound) {
+		t.Fatalf("missing id err = %v, want ErrToolNotFound", err)
+	}
+
+	// ARCHIVED TOOL: an archived tool is non-existent to the surface → the 404
+	// sentinel (the tool-side guard).
+	archivedTool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Start-Archiv", ToolTypeID: toolTypeID}, "GEAR", 9)
+	if err != nil {
+		t.Fatalf("CreateTool(archived candidate) err = %v", err)
+	}
+	if _, err := repo.ArchiveTool(ctx, archivedTool.ID); err != nil {
+		t.Fatalf("ArchiveTool err = %v", err)
+	}
+	if _, err := repo.GetToolWithTypeQualification(ctx, archivedTool.ID); !errors.Is(err, core.ErrToolNotFound) {
+		t.Fatalf("archived tool err = %v, want ErrToolNotFound", err)
+	}
+
+	// ARCHIVED TYPE: an ACTIVE tool whose type was soft-archived must NOT
+	// resolve the retired type's required_qualification_id / inspection_mode —
+	// the type-side JOIN guard (tt.archived_at IS NULL) answers the 404 sentinel.
+	orphanedTool, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Start-Waise", ToolTypeID: toolTypeID}, "GEAR", 9)
+	if err != nil {
+		t.Fatalf("CreateTool(orphan candidate) err = %v", err)
+	}
+	if _, err := pool.Exec(ctx, `UPDATE tool_types SET archived_at = now(), updated_at = now() WHERE id = $1`, toolTypeID); err != nil {
+		t.Fatalf("archiving tool type err = %v", err)
+	}
+	if _, err := repo.GetToolWithTypeQualification(ctx, orphanedTool.ID); !errors.Is(err, core.ErrToolNotFound) {
+		t.Fatalf("active tool with archived type err = %v, want ErrToolNotFound (no retired-type resolution)", err)
+	}
+}
+
+// TestPostgresToolsFKConstraints verifies the DB enforces the FKs (AD-10): a
+// create referencing a non-existent tool type (intra-module FK) or schedule
+// override (cross-module FK) is MAPPED by the repository to the German 400 —
+// the raw pg error must never surface as a 500. The raw DB constraint is
+// additionally pinned with a direct INSERT expecting 23503.
+func TestPostgresToolsFKConstraints(t *testing.T) {
+	pool := toolTestPool(t)
+	ctx := context.Background()
+	t.Cleanup(func() { pool.Close() })
+
+	repo := NewRepository(New(pool))
+	toolTypeID, _ := seedToolRefs(t, ctx, pool)
+
+	missing := "00000000-0000-0000-0000-000000000000"
+
+	// Bad tool_type FK → mapped to the German 400 (intra-module FK, AD-10).
+	_, err := repo.CreateTool(ctx, &core.Tool{
+		Name: "Test-Fk-Type", ToolTypeID: missing,
+	}, "GEAR", 9)
+	var inv *core.InvalidToolError
+	if !errors.As(err, &inv) {
+		t.Fatalf("create with missing type err = %v, want *InvalidToolError (German 400)", err)
+	}
+	if inv.Message != core.MsgToolReferencedGone {
+		t.Errorf("message = %q, want %q", inv.Message, core.MsgToolReferencedGone)
+	}
+
+	// Bad schedule override FK → mapped to the German 400.
+	_, err = repo.CreateTool(ctx, &core.Tool{
+		Name: "Test-Fk-Override", ToolTypeID: toolTypeID, ScheduleID: missing,
+	}, "GEAR", 9)
+	inv = nil
+	if !errors.As(err, &inv) {
+		t.Fatalf("create with missing override err = %v, want *InvalidToolError (German 400)", err)
+	}
+	if inv.Message != core.MsgToolReferencedGone {
+		t.Errorf("message = %q, want %q", inv.Message, core.MsgToolReferencedGone)
+	}
+
+	// The raw DB backstop still exists: a direct INSERT with a missing tool
+	// type FK trips SQLSTATE 23503. (The inventory_number column is NOT NULL —
+	// the insert takes a FRESH sequence value so the FK is the only violation.)
+	var rawInv string
+	if err := pool.QueryRow(ctx,
+		`SELECT 'GEAR' || lpad(nextval('tools_inventory_number_seq')::text, 6, '0')`).Scan(&rawInv); err != nil {
+		t.Fatalf("reserving a unique raw inventory number err = %v", err)
+	}
+	_, err = pool.Exec(ctx,
+		`INSERT INTO tools (name, tool_type_id, inventory_number) VALUES ('Test-Fk-Raw', $1, $2)`, missing, rawInv)
+	if !isForeignKeyViolation(err) {
+		t.Fatalf("raw insert with missing type err = %v, want FK violation 23503", err)
+	}
+}
+
+// toolInventoryNumberFormat is the auto-assigned shape: 'GEAR' + 9 zero-padded
+// digits (Story 5-2c, C2 adoption — the configurable inventory_width default 9).
+var toolInventoryNumberFormat = regexp.MustCompile(`^GEAR\d{9}$`)
+
+// TestPostgresToolInventoryNumbers covers the Story 4-3b inventory-number
+// store contract: CREATE_AUTO (monotonic 'GEAR%09d' sequence values), the
+// list round-trip, and the DB-level uniqueness backstop (EXACT, over ALL rows
+// incl. archived — the Story 4.5 import backstop) mapped to the German
+// duplicate-inventory 400.
+func TestPostgresToolInventoryNumbers(t *testing.T) {
+	pool := toolTestPool(t)
+	ctx := context.Background()
+	t.Cleanup(func() { pool.Close() })
+
+	repo := NewRepository(New(pool))
+	toolTypeID, _ := seedToolRefs(t, ctx, pool)
+
+	// CREATE_AUTO: two creates get distinct, monotonic 'GEAR' + 6 zero-padded
+	// numbers (same width → string order == numeric order).
+	first, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Inv-A", ToolTypeID: toolTypeID}, "GEAR", 9)
+	if err != nil {
+		t.Fatalf("CreateTool(A) err = %v", err)
+	}
+	second, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Inv-B", ToolTypeID: toolTypeID}, "GEAR", 9)
+	if err != nil {
+		t.Fatalf("CreateTool(B) err = %v", err)
+	}
+	if !toolInventoryNumberFormat.MatchString(first.InventoryNumber) || !toolInventoryNumberFormat.MatchString(second.InventoryNumber) {
+		t.Fatalf("inventory numbers = %q / %q, want 'GEAR' + 9 zero-padded digits", first.InventoryNumber, second.InventoryNumber)
+	}
+	if first.InventoryNumber == second.InventoryNumber {
+		t.Fatalf("inventory numbers collide: %q", first.InventoryNumber)
+	}
+	if first.InventoryNumber >= second.InventoryNumber {
+		t.Errorf("monotonicity broken: %q >= %q", first.InventoryNumber, second.InventoryNumber)
+	}
+
+	// ROUND-TRIP: the list returns both numbers on the active catalog.
+	list, err := repo.ListTools(ctx)
+	if err != nil {
+		t.Fatalf("ListTools err = %v", err)
+	}
+	seen := map[string]bool{}
+	for _, tool := range list {
+		if strings.HasPrefix(strings.ToLower(tool.Name), "test-inv-") {
+			seen[tool.InventoryNumber] = true
+		}
+	}
+	if !seen[first.InventoryNumber] || !seen[second.InventoryNumber] {
+		t.Errorf("round-trip missing numbers: have %v, want %q and %q", seen, first.InventoryNumber, second.InventoryNumber)
+	}
+
+	// UNIQUENESS backstop (case-insensitive, all rows): editing a tool onto a
+	// number another row already holds — INCLUDING a case-variant — trips the
+	// tools_inventory_number_key functional UNIQUE index (lower(...)) → German
+	// duplicate-inventory 400 (never a raw 500). The core's active-only
+	// case-insensitive guard would catch the ACTIVE variant first; this pins the
+	// DB-level backstop for the EXACT same-number case AND the case-variant
+	// (which only the functional index can catch).
+	_, err = repo.UpdateTool(ctx, &core.Tool{
+		ID:              second.ID,
+		Name:            "Test-Inv-B",
+		ToolTypeID:      toolTypeID,
+		InventoryNumber: first.InventoryNumber,
+	})
+	var inv *core.InvalidToolError
+	if !errors.As(err, &inv) {
+		t.Fatalf("duplicate-inventory update err = %v, want *InvalidToolError", err)
+	}
+	if inv.Message != core.MsgToolInventoryNumberTaken {
+		t.Errorf("message = %q, want %q", inv.Message, core.MsgToolInventoryNumberTaken)
+	}
+
+	// CASE-INSENSITIVITY (finding 3): a case-variant of an ACTIVE number is
+	// rejected by the functional index — 'gear000000001' collides with
+	// 'GEAR000000001' (the core guard alone cannot be trusted with a case-blind
+	// DB).
+	_, err = repo.UpdateTool(ctx, &core.Tool{
+		ID:              second.ID,
+		Name:            "Test-Inv-B",
+		ToolTypeID:      toolTypeID,
+		InventoryNumber: strings.ToLower(first.InventoryNumber),
+	})
+	inv = nil
+	if !errors.As(err, &inv) {
+		t.Fatalf("case-variant update err = %v, want *InvalidToolError", err)
+	}
+	if inv.Message != core.MsgToolInventoryNumberTaken {
+		t.Errorf("message = %q, want %q", inv.Message, core.MsgToolInventoryNumberTaken)
+	}
+}
+
+// TestPostgresToolInventoryArchivedBackstop pins the Story 4.5 import backstop
+// (finding 2): an ARCHIVED tool's inventory number stays "taken" — updating an
+// active tool onto it is rejected (case-insensitively), and a create whose
+// auto-assigned nextval lands on an archived number is retried to a fresh
+// value instead of 500ing.
+func TestPostgresToolInventoryArchivedBackstop(t *testing.T) {
+	pool := toolTestPool(t)
+	ctx := context.Background()
+	t.Cleanup(func() { pool.Close() })
+
+	repo := NewRepository(New(pool))
+	toolTypeID, _ := seedToolRefs(t, ctx, pool)
+
+	archived, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Inv-Arch-A", ToolTypeID: toolTypeID}, "GEAR", 9)
+	if err != nil {
+		t.Fatalf("CreateTool(archived candidate) err = %v", err)
+	}
+	active, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Inv-Arch-B", ToolTypeID: toolTypeID}, "GEAR", 9)
+	if err != nil {
+		t.Fatalf("CreateTool(active) err = %v", err)
+	}
+
+	// Archive the first tool: its number must stay taken.
+	if _, err := repo.ArchiveTool(ctx, archived.ID); err != nil {
+		t.Fatalf("ArchiveTool err = %v", err)
+	}
+
+	// UPDATE backstop: editing the ACTIVE tool onto the ARCHIVED tool's number
+	// (case-insensitively — the lower() functional index) → German duplicate 400.
+	_, err = repo.UpdateTool(ctx, &core.Tool{
+		ID:              active.ID,
+		Name:            "Test-Inv-Arch-B",
+		ToolTypeID:      toolTypeID,
+		InventoryNumber: strings.ToLower(archived.InventoryNumber),
+	})
+	var inv *core.InvalidToolError
+	if !errors.As(err, &inv) {
+		t.Fatalf("update onto archived number err = %v, want *InvalidToolError", err)
+	}
+	if inv.Message != core.MsgToolInventoryNumberTaken {
+		t.Errorf("message = %q, want %q", inv.Message, core.MsgToolInventoryNumberTaken)
+	}
+
+	// CREATE retry onto an ARCHIVED number: make the next generated nextval
+	// collide with the archived row's (manually re-set) number, then a create
+	// must retry to a fresh value.
+	var last int64
+	var called bool
+	if err := pool.QueryRow(ctx, "SELECT last_value, is_called FROM tools_inventory_number_seq").Scan(&last, &called); err != nil {
+		t.Fatalf("reading sequence state err = %v", err)
+	}
+	next := last
+	if called {
+		next++
+	}
+	if _, err := pool.Exec(ctx,
+		`UPDATE tools SET inventory_number = $1 WHERE id = $2`,
+		fmt.Sprintf("GEAR%09d", next), archived.ID,
+	); err != nil {
+		t.Fatalf("re-setting the archived number err = %v", err)
+	}
+	created, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Inv-Arch-C", ToolTypeID: toolTypeID}, "GEAR", 9)
+	if err != nil {
+		t.Fatalf("CreateTool (retry past an archived number) err = %v", err)
+	}
+	if want := fmt.Sprintf("GEAR%09d", next+1); created.InventoryNumber != want {
+		t.Errorf("inventory_number = %q, want %q (the retry advanced past the archived collision)", created.InventoryNumber, want)
+	}
+}
+
+// TestPostgresCreateToolInventoryCollisionRetry pins the bounded retry loop
+// (Story 4-3b, CREATE_COLLISION): when a MANUAL edit consumed the generated
+// nextval, the first INSERT trips the UNIQUE index and the repository re-runs
+// the INSERT (which computes a FRESH nextval in-SQL) until the budget is
+// exhausted → German collision 400.
+func TestPostgresCreateToolInventoryCollisionRetry(t *testing.T) {
+	pool := toolTestPool(t)
+	ctx := context.Background()
+	t.Cleanup(func() { pool.Close() })
+
+	repo := NewRepository(New(pool))
+	toolTypeID, _ := seedToolRefs(t, ctx, pool)
+
+	// Read the sequence state WITHOUT advancing it: since the sequence has been
+	// called (migration backfill + prior creates), the NEXT nextval returns
+	// last_value + 1.
+	var last int64
+	var called bool
+	if err := pool.QueryRow(ctx, "SELECT last_value, is_called FROM tools_inventory_number_seq").Scan(&last, &called); err != nil {
+		t.Fatalf("reading sequence state err = %v", err)
+	}
+	next := last
+	if called {
+		next++
+	}
+
+	// Reserve ONLY the first generated value: the auto-assign collides on
+	// attempt 1, the retry loop advances to the next fresh number → succeeds.
+	reserved := fmt.Sprintf("GEAR%09d", next)
+	if _, err := pool.Exec(ctx,
+		`INSERT INTO tools (name, tool_type_id, inventory_number) VALUES ('Test-Collision-Reserve', $1, $2)`, toolTypeID, reserved,
+	); err != nil {
+		t.Fatalf("reserving the next generated number err = %v", err)
+	}
+
+	created, err := repo.CreateTool(ctx, &core.Tool{Name: "Test-Collision-Auto", ToolTypeID: toolTypeID}, "GEAR", 9)
+	if err != nil {
+		t.Fatalf("CreateTool (collision retry) err = %v", err)
+	}
+	if want := fmt.Sprintf("GEAR%09d", next+1); created.InventoryNumber != want {
+		t.Errorf("inventory_number = %q, want %q (the retry advanced past the collision)", created.InventoryNumber, want)
+	}
+
+	// Reserve the next THREE generated values → every retry attempt collides →
+	// the bounded loop exhausts and maps to the German collision 400.
+	if err := pool.QueryRow(ctx, "SELECT last_value, is_called FROM tools_inventory_number_seq").Scan(&last, &called); err != nil {
+		t.Fatalf("re-reading sequence state err = %v", err)
+	}
+	cur := last
+	if called {
+		cur++
+	}
+	for i := 0; i < 3; i++ {
+		if _, err := pool.Exec(ctx,
+			`INSERT INTO tools (name, tool_type_id, inventory_number) VALUES ($1, $2, $3)`,
+			fmt.Sprintf("Test-Collision-Reserve-%d", i), toolTypeID, fmt.Sprintf("GEAR%09d", cur+int64(i)),
+		); err != nil {
+			t.Fatalf("reserving colliding number %d err = %v", i, err)
+		}
+	}
+	_, err = repo.CreateTool(ctx, &core.Tool{Name: "Test-Collision-Fail", ToolTypeID: toolTypeID}, "GEAR", 9)
+	var inv *core.InvalidToolError
+	if !errors.As(err, &inv) {
+		t.Fatalf("exhausted retry err = %v, want *InvalidToolError (German collision)", err)
+	}
+	if inv.Message != core.MsgToolInventoryNumberCollision {
+		t.Errorf("message = %q, want %q", inv.Message, core.MsgToolInventoryNumberCollision)
+	}
+}
+
+// TestPostgresToolInventoryBackfill pins the 000025 backfill contract
+// (CREATE_BACKFILL): a pre-existing row whose inventory_number was NULL (the
+// pre-migration state) is assigned 'GEAR' + zero-padded nextval. The scenario
+// is simulated in a rolled-back transaction — the live dev DB is never
+// disturbed.
+func TestPostgresToolInventoryBackfill(t *testing.T) {
+	pool := toolTestPool(t)
+	ctx := context.Background()
+	t.Cleanup(func() { pool.Close() })
+
+	toolTypeID, _ := seedToolRefs(t, ctx, pool)
+
+	tx, err := pool.Begin(ctx)
+	if err != nil {
+		t.Fatalf("begin tx err = %v", err)
+	}
+	defer func() { _ = tx.Rollback(ctx) }()
+
+	// Recreate the pre-migration state: the column is nullable and the row has
+	// no inventory number yet.
+	if _, err := tx.Exec(ctx, `ALTER TABLE tools ALTER COLUMN inventory_number DROP NOT NULL`); err != nil {
+		t.Fatalf("drop not null err = %v", err)
+	}
+	var preID string
+	if err := tx.QueryRow(ctx,
+		`INSERT INTO tools (name, tool_type_id) VALUES ('Test-Backfill-Pre', $1) RETURNING id`, toolTypeID,
+	).Scan(&preID); err != nil {
+		t.Fatalf("inserting the pre-migration row err = %v", err)
+	}
+	// The 000025 backfill UPDATE assigns the sequence number to the NULL rows.
+	if _, err := tx.Exec(ctx,
+		`UPDATE tools SET inventory_number = 'GEAR' || lpad(nextval('tools_inventory_number_seq')::text, 6, '0')
+		 WHERE id = $1 AND inventory_number IS NULL`, preID,
+	); err != nil {
+		t.Fatalf("backfill update err = %v", err)
+	}
+	// The 000025 backfill is a HISTORICAL migration: its width-6 lpad is the
+	// fixed shape of that backfill (the 000031 migration only changes the
+	// width of NEW auto-assignments via the CreateTool params) — assert the
+	// literal 'GEAR' + 6 zero-padded digits the 000025 SQL produced.
+	var inv string
+	if err := tx.QueryRow(ctx, `SELECT inventory_number FROM tools WHERE id = $1`, preID).Scan(&inv); err != nil {
+		t.Fatalf("scanning the backfilled number err = %v", err)
+	}
+	if !regexp.MustCompile(`^GEAR\d{6}$`).MatchString(inv) {
+		t.Errorf("backfilled inventory_number = %q, want 'GEAR' + 6 zero-padded digits", inv)
+	}
+}
+
+// TestPostgresToolsAttributes pins the Story 4.4 attributes surface on the
+// `tools.attributes` JSONB column: a NON-EMPTY set round-trips (semantic
+// equality — JSONB normalizes key order), the DB default '{}' applies to an
+// absent create, and the update path honors absent=unchanged / {} = clear /
+// object=replace through the repository's COALESCE keep. Archiving preserves
+// the stored attributes.
+func TestPostgresToolsAttributes(t *testing.T) {
+	pool := toolTestPool(t)
+	ctx := context.Background()
+	t.Cleanup(func() { pool.Close() })
+
+	repo := NewRepository(New(pool))
+	toolTypeID, _ := seedToolRefs(t, ctx, pool)
+
+	// CREATE_TOOL_ATTRS: a tool created WITH a non-empty attributes set stores
+	// it in tools.attributes.
+	created, err := repo.CreateTool(ctx, &core.Tool{
+		Name:       "Test-Attr-Werkzeug",
+		ToolTypeID: toolTypeID,
+		Attributes: map[string]any{"standort": "Werkstatt", "leistung": float64(1200)},
+	}, "GEAR", 9)
+	if err != nil {
+		t.Fatalf("CreateTool(attributes) err = %v", err)
+	}
+	if created.Attributes == nil || created.Attributes["standort"] != "Werkstatt" {
+		t.Fatalf("created attributes = %+v, want the stored set", created.Attributes)
+	}
+	if created.Attributes["leistung"] != float64(1200) {
+		t.Errorf("created attributes leistung = %v, want 1200", created.Attributes["leistung"])
+	}
+
+	// ROUND_TRIP: the raw DB row holds the valid JSON; the list read-back
+	// returns the same values.
+	var raw []byte
+	if err := pool.QueryRow(ctx, "SELECT attributes FROM tools WHERE id = $1", created.ID).Scan(&raw); err != nil {
+		t.Fatalf("scan raw attributes err = %v", err)
+	}
+	var rawAttrs map[string]any
+	if err := json.Unmarshal(raw, &rawAttrs); err != nil {
+		t.Fatalf("raw attributes not JSON: %v", err)
+	}
+	if rawAttrs["standort"] != "Werkstatt" || rawAttrs["leistung"] != float64(1200) {
+		t.Errorf("raw DB attributes = %v, want the stored set", rawAttrs)
+	}
+
+	// UPDATE_TOOL_ABSENT: an update with a NIL attributes map leaves the stored
+	// JSONB unchanged (COALESCE keep).
+	updated, err := repo.UpdateTool(ctx, &core.Tool{
+		ID: created.ID, Name: "Test-Attr-Werkzeug-Neu", ToolTypeID: toolTypeID,
+		Attributes: nil,
+	})
+	if err != nil {
+		t.Fatalf("UpdateTool(absent attributes) err = %v", err)
+	}
+	if updated.Attributes["standort"] != "Werkstatt" {
+		t.Errorf("attributes after absent update = %+v, want stored set preserved", updated.Attributes)
+	}
+
+	// UPDATE_TOOL_OBJECT: a non-empty object REPLACES the stored set wholesale.
+	replaced, err := repo.UpdateTool(ctx, &core.Tool{
+		ID: created.ID, Name: "Test-Attr-Werkzeug-Neu", ToolTypeID: toolTypeID,
+		Attributes: map[string]any{"standort": "Lager"},
+	})
+	if err != nil {
+		t.Fatalf("UpdateTool(replace attributes) err = %v", err)
+	}
+	if replaced.Attributes["standort"] != "Lager" {
+		t.Errorf("attributes after replace = %+v, want the replaced set", replaced.Attributes)
+	}
+	if _, stale := replaced.Attributes["leistung"]; stale {
+		t.Errorf("attributes after replace = %+v, want the old key gone", replaced.Attributes)
+	}
+
+	// UPDATE_TOOL_CLEAR: an EXPLICIT `{}` clears the stored set.
+	cleared, err := repo.UpdateTool(ctx, &core.Tool{
+		ID: created.ID, Name: "Test-Attr-Werkzeug-Neu", ToolTypeID: toolTypeID,
+		Attributes: map[string]any{},
+	})
+	if err != nil {
+		t.Fatalf("UpdateTool(clear attributes) err = %v", err)
+	}
+	if cleared.Attributes == nil || len(cleared.Attributes) != 0 {
+		t.Errorf("attributes after clear = %+v, want empty map", cleared.Attributes)
+	}
+
+	// ARCHIVED: soft-archiving the tool preserves its (re-set) attributes on the
+	// archived row, and the raw DB row still carries them.
+	withAttrs, err := repo.UpdateTool(ctx, &core.Tool{
+		ID: created.ID, Name: "Test-Attr-Werkzeug-Neu", ToolTypeID: toolTypeID,
+		Attributes: map[string]any{"hinweis": "archiviert"},
+	})
+	if err != nil {
+		t.Fatalf("UpdateTool(set attrs before archive) err = %v", err)
+	}
+	archived, err := repo.ArchiveTool(ctx, withAttrs.ID)
+	if err != nil {
+		t.Fatalf("ArchiveTool err = %v", err)
+	}
+	if archived.ArchivedAt == nil {
+		t.Fatal("archived_at = nil, want set")
+	}
+	if archived.Attributes["hinweis"] != "archiviert" {
+		t.Errorf("archived attributes = %+v, want preserved", archived.Attributes)
+	}
+	var archivedRaw []byte
+	if err := pool.QueryRow(ctx, "SELECT attributes FROM tools WHERE id = $1", created.ID).Scan(&archivedRaw); err != nil {
+		t.Fatalf("scan archived attributes err = %v", err)
+	}
+	var archivedAttrs map[string]any
+	if err := json.Unmarshal(archivedRaw, &archivedAttrs); err != nil {
+		t.Fatalf("archived attributes not JSON: %v", err)
+	}
+	if archivedAttrs["hinweis"] != "archiviert" {
+		t.Errorf("archived DB attributes = %v, want preserved", archivedAttrs)
+	}
+}

@@ -1,0 +1,309 @@
+# GEAR - single command interface (casey/just)
+# Docs site lives in ./docs (Docusaurus). Recipes below are the docs lifecycle.
+
+set shell := ["bash", "-cu"]
+
+# Alias: list all available recipes when run without arguments
+default:
+    @just --list
+
+# Install docs dependencies
+docs-install:
+    cd docs && npm install
+
+# Start the Docusaurus dev server (default http://localhost:3000)
+docs-start:
+    cd docs && npm start
+
+# Regenerate the code-derived implementation docs + OpenAPI spec (no build)
+docs-generate:
+    cd docs && npm run generate && npm run gen-api-docs
+
+# Build the static docs site into docs/build
+docs-build:
+    cd docs && npm run build
+
+# Build then serve the static site locally (validate production output)
+docs-serve:
+    cd docs && npm run build && npm run serve
+
+# Build and run the docs Playwright browser tests (mermaid overlay, etc.)
+docs-test:
+    cd docs && npm run build && npx playwright test
+
+# Clear Docusaurus caches
+docs-clear:
+    cd docs && npm run clear
+
+# ============================================================================
+# App lifecycle (Story 1.1 scaffold)
+# Pinned tool versions — go run <module>@<version> so no global CLI installs
+# are required. Override DATABASE_URL via the environment if needed.
+# ============================================================================
+
+MIGRATE_VERSION := "v4.19.1"
+SQLC_VERSION    := "v1.31.1"
+GOLANGCI_VERSION := "v2.13.2"
+DATABASE_URL    := env_var_or_default("DATABASE_URL", "postgres://gear:gear@localhost:5432/gear?sslmode=disable")
+DB_CONTAINER    := env_var_or_default("DB_CONTAINER", "gear-db")
+
+# Abort with an actionable message when podman/podman-compose are missing
+podman-check:
+    @command -v podman >/dev/null 2>&1 || { echo "G.E.A.R. requires podman (podman-compose >= 1.0.6) to run the dev stack. Please install podman and retry." >&2; exit 1; }
+    @command -v podman-compose >/dev/null 2>&1 || { echo "G.E.A.R. requires podman-compose >= 1.0.6. Please install it and retry." >&2; exit 1; }
+    @podman compose version >/dev/null 2>&1 || { echo "podman compose is not functional. Check the podman-compose plugin and retry." >&2; exit 1; }
+
+# Bring the db container up and wait until it accepts connections
+# The compose healthcheck allows ~50s (10 x 5s); give the wait loop the same
+# budget so a cold first start (image pull + initdb) is not aborted early.
+db-wait: podman-check
+    podman compose up -d db
+    @i=0; until podman exec {{DB_CONTAINER}} pg_isready -U gear -d gear >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 60 ] && { echo "database not ready after 60s" >&2; exit 1; }; sleep 1; done
+
+# Start PostgreSQL 18 and apply pending migrations (idempotent)
+db-up: migrate-up
+    podman compose ps
+
+# Stop the db container (keeps the named volume)
+db-down: podman-check
+    podman compose down
+
+alias db-stop := db-down
+alias db-shutdown := db-down
+
+# Local-dev only: delete users created by TEST RUNS, keeping every real user
+# (seeded admins + any real accounts). Test-run users are identified by the
+# runtime email pattern the suites generate: a local part ending in a
+# "<stamp>.YYYYMMDDHHMMSS.<micro>" timestamp (e.g. approval.p1.20260911...@gear.local).
+# Emails WITHOUT that timestamp (admin.1@gear.local, your real account, …) are
+# NEVER touched. Run after a test suite has littered the dev DB.
+#
+#   just db-purge-test-users
+#
+# Related rows (sessions, reset tokens, role grants, qualifications,
+# memberships, audit actor refs) are removed by ON DELETE CASCADE/SET NULL.
+db-purge-test-users: db-wait
+    @before=$(podman exec {{DB_CONTAINER}} psql -U gear -d gear -tAc "SELECT count(*) FROM users"); \
+    podman exec {{DB_CONTAINER}} psql -U gear -d gear -c "DELETE FROM users WHERE email ~ '^[^@]+\.[0-9]{14}\.[0-9]+@gear\.local$'"; \
+    after=$(podman exec {{DB_CONTAINER}} psql -U gear -d gear -tAc "SELECT count(*) FROM users"); \
+    echo "Purged test-run users: $before -> $after remaining. Real users are untouched."
+
+# Apply pending forward migrations
+migrate-up: db-wait
+    go run -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@{{MIGRATE_VERSION}} -path ./migrations --database "{{DATABASE_URL}}" up
+
+# Roll back all applied migrations (used to prove a clean rebuild)
+migrate-down: db-wait
+    go run -tags postgres github.com/golang-migrate/migrate/v4/cmd/migrate@{{MIGRATE_VERSION}} -path ./migrations --database "{{DATABASE_URL}}" down -all
+
+# Ensure web dependencies exist before running the SPA (fresh checkout)
+web-deps:
+    @test -d web/node_modules || npm --prefix web ci
+
+# Local-dev only: generate/persist GEAR_ENCRYPTION_KEY into .env so MFA works
+# locally. The key is never committed (.env is gitignored). Idempotent — reuses
+# an existing key.
+dev-key:
+    @if [ -f .env ] && grep -q '^GEAR_ENCRYPTION_KEY=.\+' .env 2>/dev/null; then \
+        echo "GEAR_ENCRYPTION_KEY already set in .env"; \
+    else \
+        key=$(openssl rand -hex 32 2>/dev/null || od -An -N32 -tx1 /dev/urandom | tr -d ' \n'); \
+        grep -v '^GEAR_ENCRYPTION_KEY=' .env 2>/dev/null > .env.tmp || true; \
+        printf 'GEAR_ENCRYPTION_KEY=%s\n' "$key" >> .env.tmp; \
+        mv .env.tmp .env; \
+        echo "Generated GEAR_ENCRYPTION_KEY in .env"; \
+    fi
+
+# Run the full dev stack: DB + API + Vite SPA
+dev-up: web-deps dev-key db-up
+    set -a; [ -f .env ] && . ./.env; set +a; \
+    npm --prefix web run dev & \
+    vite_pid=$!; \
+    sleep 2; \
+    kill -0 "$vite_pid" 2>/dev/null || { echo "vite failed to start (see output above)" >&2; exit 1; }; \
+    trap 'kill "$vite_pid" 2>/dev/null; kill $(jobs -p) 2>/dev/null' EXIT INT TERM; \
+    go run ./cmd/server
+
+# Stop the dev stack started by `just dev-up`: kill any leftover API (:8080) and
+# Vite (:5173) processes still bound after Ctrl+C. `just dev-up` cleans up its
+# own children on exit, but a crashed/interrupted run can leave the `server`
+# binary or a Vite process orphaned on a port — this recipe finds whatever is
+# listening on the two dev ports and kills it, then reports what is still bound.
+dev-down:
+    @echo "Stopping G.E.A.R. dev stack..."; \
+    for port in 8080 5173; do \
+        pids=$(ss -tlnpH "sport = :$port" 2>/dev/null | sed -n 's/.*pid=\([0-9][0-9]*\).*/\1/p' | sort -u); \
+        if [ -n "$pids" ]; then \
+            echo "  port $port: killing pid(s) $pids"; \
+            for pid in $pids; do kill "$pid" 2>/dev/null || true; done; \
+        else \
+            echo "  port $port: free"; \
+        fi; \
+    done; \
+    sleep 1; \
+    left=$(ss -tlnH 2>/dev/null | grep -E ':(8080|5173)\b' | wc -l); \
+    if [ "$left" -eq 0 ]; then \
+        echo "  done — nothing left listening on 8080/5173."; \
+    else \
+        echo "  WARNING: something still listens on 8080/5173 — check with: ss -tlnp" >&2; \
+        exit 1; \
+    fi
+
+alias dev := dev-up
+
+# Build all Go packages
+build:
+    go build ./cmd/... ./internal/...
+
+# Run all Go and web tests
+test:
+    go test ./cmd/... ./internal/...
+    npm --prefix web run test
+
+# Run the DB-backed INTEGRATION tests (Story 7.3): the cold-start seed
+# assertions (+ any future //go:build integration suites). Brings the dev DB
+# up (idempotent) then runs the tagged tests against a FRESH migrated schema
+# (dbtest applies the migrations itself — no migrate-up needed). Not part of
+# `just test` — these couple to a live DB by design (NFR-R2/AD-12/AD-13).
+test-integration: db-wait
+    go test -tags integration -v ./internal/user/adapters/postgres/
+
+# Vet all Go packages
+vet:
+    go vet ./cmd/... ./internal/...
+
+# Lint Go (via pinned golangci-lint) and web (via eslint)
+lint: vet
+    go run github.com/golangci/golangci-lint/v2/cmd/golangci-lint@{{GOLANGCI_VERSION}} run ./cmd/... ./internal/...
+    npm --prefix web run lint
+
+# Regenerate per-module stores from migrations/ via pinned sqlc (config: sqlc.yaml)
+sqlc-generate:
+    go run github.com/sqlc-dev/sqlc/cmd/sqlc@{{SQLC_VERSION}} generate
+
+# ============================================================================
+# Deployable container + portable IaC (Story 7.6)
+# ============================================================================
+
+# Build the deployable app image (multi-stage: web/dist + Go binary → minimal runtime)
+container-build: podman-check
+    podman build -t gear-app .
+
+# Run the full dev stack from the built image (app on host port 8081 + db)
+container-run: podman-check container-build
+    podman compose up -d db --build
+    podman compose up -d app
+
+# Prove the FULL registry-driven deployment flow locally (zero cloud cost):
+# start a local Docker Registry v2 (the same HTTP v2 API IONOS/GCP use), push
+# the image, then run the SAME deployed compose (deploy/compose.prod.yaml,
+# image-pinned, db internal-only) + healthz. Host port 8081 avoids a running
+# `just dev` server on :8080.
+deploy-local-proof: podman-check container-build
+    @echo "==> starting local registry:2 on :5000"
+    @podman run -d --name gear-registry -p 5000:5000 -v gear_registry_data:/var/lib/registry docker.io/library/registry:2 >/dev/null 2>&1 || podman start gear-registry >/dev/null
+    @echo "==> pushing image to localhost:5000/gear:local"
+    podman tag gear-app localhost:5000/gear:local
+    podman push --tls-verify=false localhost:5000/gear:local
+    @echo "==> generating .env.prod (0600) if absent"
+    @if [ ! -f .env.prod ]; then umask 077; { printf 'GEAR_DB_PASSWORD=%s\n' "$(openssl rand -hex 16)"; printf 'GEAR_ENCRYPTION_KEY=%s\n' "$(openssl rand -hex 32)"; } > .env.prod; chmod 0600 .env.prod; fi
+    @echo "==> pulling + up the deployed compose (deploy/compose.prod.yaml)"
+    @set -a; . ./.env.prod; set +a; \
+    export GEAR_IMAGE=localhost:5000/gear:local; \
+    export GEAR_HTTP_PORT=8081; \
+    export GEAR_APP_ORIGIN=http://localhost:8081; \
+    podman pull --tls-verify=false localhost:5000/gear:local && \
+    podman compose -f deploy/compose.prod.yaml up -d && \
+    i=0; until curl -fsS http://localhost:8081/healthz >/dev/null 2>&1; do i=$((i+1)); [ $i -ge 60 ] && { echo "app not healthy after 60s" >&2; exit 1; }; sleep 1; done; \
+    echo "==> pg_dump present in the app container (Story 7.7 NFR-R3)"; \
+    podman exec gear-prod-app /usr/bin/pg_dump --version; \
+    echo "==> proof OK: /healthz 200 on http://localhost:8081"
+
+# Tear down the local-proof stack + registry (keeps nothing behind)
+deploy-local-proof-down:
+    @podman compose -f deploy/compose.prod.yaml down >/dev/null 2>&1 || true
+    @podman rm -f gear-registry >/dev/null 2>&1 || true
+    @rm -f .env.prod
+
+# Prove the NFR-R3 restore procedure (Story 7.7) locally: dump the dev DB
+# (pg_dump -Fc), restore it into a throwaway scratch database
+# `gear_restore_proof` via the REAL deploy/restore.sh (pg_restore --clean
+# --if-exists), assert the two seeded admin accounts are present, then drop the
+# scratch. This is the "tested from initial deployment" evidence (NFR-R3). The
+# scratch is a throwaway DATABASE because pg_restore cannot remap the dump's
+# objects into a differently-named schema — a fresh DB is the clean target that
+# exercises the same restore.sh path without touching the dev DB's public
+# schema. The EXIT trap drops the scratch too, so a mid-proof failure never
+# leaks scratch state; and the URL rewrite is asserted to have actually changed
+# the database component (a fall-through would run restore.sh against the dev
+# DB itself). Fails red if pg_dump, the restore, or the admin assertion fails.
+backup-restore-proof: db-up
+    set -euo pipefail; \
+    dump=$(mktemp /tmp/gear-backup-XXXXXX.dump); \
+    trap 'rm -f "$dump"; psql "{{DATABASE_URL}}" -c "DROP DATABASE IF EXISTS gear_restore_proof WITH (FORCE)" >/dev/null 2>&1 || true' EXIT; \
+    scratch_url=$(echo "{{DATABASE_URL}}" | sed -E 's#/([^/?]+)(\?.*)?$#/gear_restore_proof\2#'); \
+    [ "$scratch_url" != "{{DATABASE_URL}}" ] || { echo "backup-restore-proof: could not derive the scratch database URL from DATABASE_URL" >&2; exit 1; }; \
+    echo "==> 1. dumping the dev DB (pg_dump -Fc)"; \
+    pg_dump -Fc --no-owner --no-acl "{{DATABASE_URL}}" -f "$dump"; \
+    echo "==> 2. creating a fresh scratch database gear_restore_proof"; \
+    psql "{{DATABASE_URL}}" -c "DROP DATABASE IF EXISTS gear_restore_proof WITH (FORCE)" >/dev/null; \
+    psql "{{DATABASE_URL}}" -c "CREATE DATABASE gear_restore_proof" >/dev/null; \
+    echo "==> 3. restoring via deploy/restore.sh"; \
+    bash deploy/restore.sh "$dump" "$scratch_url"; \
+    echo "==> 4. asserting the two seeded admins are present"; \
+    n=$(psql "$scratch_url" -tAc "SELECT count(*) FROM users WHERE email IN ('admin.1@gear.local','admin.2@gear.local')"); \
+    [ "$n" = "2" ] || { echo "backup-restore-proof FAILED: seeded admins found = $n, want 2" >&2; exit 1; }; \
+    echo "==> 5. dropping the scratch"; \
+    psql "{{DATABASE_URL}}" -c "DROP DATABASE IF EXISTS gear_restore_proof WITH (FORCE)" >/dev/null; \
+    echo "==> backup-restore-proof OK (dump -> restore -> admins verified -> scratch dropped)"
+
+# Validate the OpenTofu IaC (local state; no provisioning)
+infra-validate:
+    tofu -chdir=infra init -backend=false
+    tofu -chdir=infra validate
+
+# Show the GCP plan (requires project/region via -var; no apply)
+infra-plan:
+    tofu -chdir=infra init -backend=false
+    tofu -chdir=infra plan
+
+# Apply the GCP IaC (OPERATOR STEP — provisions real GCP resources)
+infra-apply:
+    tofu -chdir=infra apply
+
+# Local-dev only: set/reset a user's password hash (e.g. unlock a seeded admin).
+# Pass optional EMAIL and PASSWD to run non-interactively:
+#   just set-admin-password admin.1@gear.local 'NewPassw0rd!'
+# Without them, prompts for email + password. NOT for production — real admin
+# credentials are provisioned out-of-band (AD-13 / FR-27). Never run against
+# production data.
+set-admin-password EMAIL='' PASSWD='': db-up
+    go run -tags dev ./cmd/devadmin {{EMAIL}} {{PASSWD}}
+
+# WSL2 (Option A): print the current WSL IP and the admin-PowerShell commands to
+# expose `just dev` to devices on the same LAN via a Windows port proxy. The WSL
+# NAT IP is NOT reachable from the LAN directly, so Windows must forward
+# 5173 (Vite) and 8080 (API) to it. Run the printed commands in an elevated
+# PowerShell on Windows, then open http://<windows-lan-ip>:5173 from a phone.
+wsl-portproxy-setup:
+    @wsl_ip=$(hostname -I | awk '{print $1}'); \
+    echo "WSL IP: $wsl_ip"; \
+    echo ""; \
+    echo "Run these in an ADMIN PowerShell on Windows (replace <LAN_IP> with your"; \
+    echo "Windows LAN IP from 'ipconfig', e.g. 192.168.1.20):"; \
+    echo ""; \
+    echo "  netsh interface portproxy add v4tov4 listenport=5173 listenaddress=0.0.0.0 connectport=5173 connectaddress=$wsl_ip"; \
+    echo "  netsh interface portproxy add v4tov4 listenport=8080 listenaddress=0.0.0.0 connectport=8080 connectaddress=$wsl_ip"; \
+    echo '  netsh advfirewall firewall add rule name="GEAR dev 5173" dir=in action=allow protocol=TCP localport=5173'; \
+    echo '  netsh advfirewall firewall add rule name="GEAR dev 8080" dir=in action=allow protocol=TCP localport=8080'; \
+    echo ""; \
+    echo "Then open http://<LAN_IP>:5173 from your phone."
+
+# WSL2 (Option A): print the commands to remove the Windows port proxy + firewall
+# rules created by wsl-portproxy-setup. Run them in an ADMIN PowerShell.
+wsl-portproxy-teardown:
+    @echo 'Run these in an ADMIN PowerShell on Windows:'; \
+    echo '  netsh interface portproxy delete v4tov4 listenport=5173 listenaddress=0.0.0.0'; \
+    echo '  netsh interface portproxy delete v4tov4 listenport=8080 listenaddress=0.0.0.0'; \
+    echo '  netsh advfirewall firewall delete rule name="GEAR dev 5173"'; \
+    echo '  netsh advfirewall firewall delete rule name="GEAR dev 8080"'

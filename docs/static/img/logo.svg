@@ -1,0 +1,5 @@
+<svg width="200" height="200" viewBox="0 0 200 200" xmlns="http://www.w3.org/2000/svg">
+  <rect width="200" height="200" rx="40" fill="#003399"/>
+  <text x="100" y="118" font-family="Arial, Helvetica, sans-serif" font-size="46" font-weight="bold" fill="#FFFFFF" text-anchor="middle" letter-spacing="-1">G.E.A.R.</text>
+  <rect x="34" y="132" width="132" height="8" rx="4" fill="#F5821F"/>
+</svg>

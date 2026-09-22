@@ -1,0 +1,238 @@
+.page {
+  display: flex;
+  flex-direction: column;
+  min-height: 100vh;
+  width: 100%;
+}
+
+.main {
+  flex: 1;
+  width: 100%;
+  max-width: 1024px;
+  margin: 0 auto;
+  padding: var(--gear-space-6) var(--gear-space-margin-mobile);
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-6);
+  box-sizing: border-box;
+}
+
+.titleSection {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-1);
+}
+
+.pageTitle {
+  font-size: var(--gear-font-display-size);
+  font-weight: var(--gear-font-display-weight);
+  line-height: var(--gear-font-display-line-height);
+  letter-spacing: var(--gear-font-display-letter-spacing);
+  color: var(--gear-color-ink-primary);
+  hyphens: auto;
+  word-break: normal;
+}
+
+.pageSubtitle {
+  font-size: var(--gear-font-body-size);
+  color: var(--gear-color-ink-secondary);
+}
+
+.section {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-4);
+  width: 100%;
+}
+
+.loading {
+  margin: 0;
+  padding: var(--gear-space-3) var(--gear-space-4);
+  border-radius: var(--gear-radius-md);
+  background-color: var(--gear-color-surface-raised);
+  border: 1px solid var(--gear-color-border-hairline);
+  color: var(--gear-color-ink-secondary);
+  font-size: var(--gear-font-label-size);
+  line-height: var(--gear-font-label-line-height);
+}
+
+.error {
+  margin: 0;
+  padding: var(--gear-space-3) var(--gear-space-4);
+  border-radius: var(--gear-radius-md);
+  background-color: var(--gear-color-status-red-soft);
+  border: 1px solid var(--gear-color-status-red);
+  color: var(--gear-color-status-red);
+  font-size: var(--gear-font-label-size);
+  line-height: var(--gear-font-label-line-height);
+}
+
+/* The tool header card (Story 5.2): tool name + identifier + mode, the first
+   block of the SINGLE-COLUMN inspection content (UX-DR3/DR10). */
+.toolHeader {
+  padding: var(--gear-space-4);
+  background-color: var(--gear-color-surface-raised);
+  border: 1px solid var(--gear-color-border-hairline);
+  border-radius: var(--gear-radius-md);
+}
+
+.detail {
+  margin: 0;
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-3);
+}
+
+.detailRow {
+  display: flex;
+  align-items: baseline;
+  gap: var(--gear-space-3);
+}
+
+.detailTerm {
+  min-width: 8rem;
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  color: var(--gear-color-ink-secondary);
+}
+
+.detailValue {
+  margin: 0;
+  font-size: var(--gear-font-title-size);
+  font-weight: var(--gear-font-title-weight);
+  color: var(--gear-color-ink-primary);
+}
+
+/* The empty-checklist state (Story 5.2 mode-aware decision): a checklist-mode
+   type whose items are missing/empty renders this note instead of chips — the
+   graceful fallback, never a crash. The submit stays disabled (an empty
+   checklist must not save a meaningless BESTANDEN). */
+.emptyChecklist {
+  margin: 0;
+  padding: var(--gear-space-3) var(--gear-space-4);
+  border-radius: var(--gear-radius-md);
+  background-color: var(--gear-color-surface-raised);
+  border: 1px solid var(--gear-color-border-hairline);
+  color: var(--gear-color-ink-secondary);
+  font-size: var(--gear-font-label-size);
+  line-height: var(--gear-font-label-line-height);
+}
+
+/* The single submit row (Story 5.2, UX-DR7/DR8): ONE column — the whole
+   inspection is saved by a single tap, no chained modals. */
+.submitRow {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-2);
+}
+
+/* The OPTIONAL inspection comment (FR-13 "optional notes"): a free-form German
+   textarea between the result chips and the submit. Single-column like the
+   rest of the surface (UX-DR10); ≥48px min-height for the tap target, with a
+   visible focus ring (UX-DR9). The submit never depends on it. */
+.commentField {
+  display: flex;
+  flex-direction: column;
+  gap: var(--gear-space-2);
+}
+
+.commentLabel {
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  line-height: var(--gear-font-label-line-height);
+  color: var(--gear-color-ink-primary);
+}
+
+.commentInput {
+  min-height: 96px;
+  padding: var(--gear-space-3);
+  border: 1px solid var(--gear-color-input-border);
+  border-radius: var(--gear-radius-md);
+  background-color: var(--gear-color-input-bg);
+  color: var(--gear-color-input-text);
+  font-family: var(--gear-font-family);
+  font-size: var(--gear-font-body-size);
+  line-height: var(--gear-font-body-line-height);
+  box-sizing: border-box;
+  resize: vertical;
+}
+
+.commentInput:focus-visible {
+  outline: 2px solid var(--gear-focus-ring-color);
+  outline-offset: 2px;
+}
+
+.commentInput:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* "Prüfung speichern" (du-form German): a ≥48px target (UX-DR9). Disabled
+   while the placeholder submit is in flight AND during the auto-return delay
+   (double-submit guard). */
+.submitButton {
+  min-height: 48px;
+  padding: var(--gear-space-2) var(--gear-space-4);
+  border: 1px solid var(--gear-color-brand);
+  border-radius: var(--gear-radius-md);
+  background-color: var(--gear-color-brand);
+  color: var(--gear-color-surface-base);
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  line-height: var(--gear-font-label-line-height);
+  cursor: pointer;
+}
+
+.submitButton:hover:not(:disabled) {
+  background-color: var(--gear-color-brand-hover, var(--gear-color-brand));
+}
+
+.submitButton:disabled {
+  background-color: var(--gear-color-surface-muted, var(--gear-color-surface-base));
+  border-color: var(--gear-color-border-hairline);
+  color: var(--gear-color-ink-secondary);
+  cursor: not-allowed;
+}
+
+/* The "Alle bestanden" shortcut (Story 5.5, FR-12/UX-DR7): a ≥48px secondary
+   target that marks EVERY checklist item passed in one tap — the fewest-taps
+   path for a clean tool. Disabled while the submit is in flight AND during the
+   auto-return delay (the chips lock at the same time). */
+.alleBestandenButton {
+  min-height: 48px;
+  align-self: flex-start;
+  padding: var(--gear-space-2) var(--gear-space-4);
+  background-color: transparent;
+  color: var(--gear-color-brand);
+  border: 1px solid var(--gear-color-border-hairline);
+  border-radius: var(--gear-radius-md);
+  font-family: var(--gear-font-family);
+  font-size: var(--gear-font-label-size);
+  font-weight: var(--gear-font-label-weight);
+  line-height: var(--gear-font-label-line-height);
+  cursor: pointer;
+  transition: background-color 0.15s ease, border-color 0.15s ease;
+}
+
+.alleBestandenButton:hover:not(:disabled) {
+  background-color: var(--gear-color-surface-base);
+  border-color: var(--gear-color-brand);
+}
+
+.alleBestandenButton:disabled {
+  opacity: 0.6;
+  cursor: not-allowed;
+}
+
+/* The inline post-submit confirmation (Story 5.2, UX-DR7): role="status" so
+   screen readers announce it; names the tool + a generic saved consequence. */
+.confirmation {
+  margin: 0;
+  padding: var(--gear-space-3) var(--gear-space-4);
+  border-radius: var(--gear-radius-md);
+  background-color: var(--gear-color-status-green-soft);
+  border: 1px solid var(--gear-color-status-green);
+  color: var(--gear-color-status-green);
+  font-size: var(--gear-font-label-size);
+  line-height: var(--gear-font-label-line-height);
+}
